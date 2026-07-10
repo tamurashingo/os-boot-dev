@@ -208,12 +208,14 @@ static LispObject lisp_sym_t;
 static LispObject lisp_sym_quote;
 static LispObject lisp_sym_if;
 static LispObject lisp_sym_lambda;
+static LispObject lisp_sym_defun;
 
 void lisp_symbols_init(void) {
     lisp_sym_t = lisp_intern("t");
     lisp_sym_quote = lisp_intern("quote");
     lisp_sym_if = lisp_intern("if");
     lisp_sym_lambda = lisp_intern("lambda");
+    lisp_sym_defun = lisp_intern("defun");
 }
 
 
@@ -475,7 +477,11 @@ LispObject lisp_env_extend(LispObject env, LispObject sym, LispObject value) {
     return lisp_cons(lisp_cons(sym, value), env);
 }
 
-// alist envをsymで線形探索し、見つかった値を返す。無ければlisp_panic
+// alist envをsymで線形探索し、見つかった値を返す。無ければlisp_panic。
+// envの中に見つからなければ、現在のglobal_envも探す。defunで作られたクロージャは
+// 自分自身の束縛が追加される前のenvスナップショットを保持しているため、これが無いと
+// 再帰呼び出しや、後から定義された他のdefun関数の呼び出しがすべてunbound variableに
+// なってしまう
 LispObject lisp_env_lookup(LispObject env, LispObject sym) {
     LispObject cur = env;
     while (lisp_is_cons(cur)) {
@@ -484,6 +490,16 @@ LispObject lisp_env_lookup(LispObject env, LispObject sym) {
             return lisp_cdr(pair);
         }
         cur = lisp_cdr(cur);
+    }
+    if (env != global_env) {
+        cur = global_env;
+        while (lisp_is_cons(cur)) {
+            LispObject pair = lisp_car(cur);
+            if (lisp_car(pair) == sym) {
+                return lisp_cdr(pair);
+            }
+            cur = lisp_cdr(cur);
+        }
     }
     lisp_panic(L"unbound variable");
 }
@@ -567,6 +583,18 @@ LispObject lisp_eval(LispObject expr, LispObject env) {
             LispObject params = lisp_car(lisp_cdr(expr));
             LispObject body = lisp_car(lisp_cdr(lisp_cdr(expr)));
             return lisp_make_closure(params, body, env);
+        }
+
+        if (op == lisp_sym_defun) {
+            LispObject name = lisp_car(lisp_cdr(expr));
+            lisp_assert_symbol(name);
+            LispObject params = lisp_car(lisp_cdr(lisp_cdr(expr)));
+            LispObject body = lisp_car(lisp_cdr(lisp_cdr(lisp_cdr(expr))));
+            LispObject closure = lisp_make_closure(params, body, env);
+            // 同名の再定義でも既存の束縛を消さず先頭に追加するだけでよい。
+            // lisp_env_lookupは先頭から線形探索するため新しい束縛が優先される
+            global_env = lisp_env_extend(global_env, name, closure);
+            return name;
         }
 
         LispObject fn = lisp_eval(op, env);
