@@ -31,6 +31,7 @@ typedef struct {
     LispObject body;   // 本文（単一式、builtinの場合は未使用）
     LispObject env;    // 生成時の環境（レキシカルスコープ用、builtinの場合は未使用）
     LispBuiltinFn builtin; // NULLならlambda由来、非NULLならC実装の組み込み関数
+    int is_macro; // 真ならdefmacro由来のマクロ（呼び出し時に引数を評価しない）
 } LispClosure;
 
 static inline LispObject lisp_make_fixnum(long long value) {
@@ -148,6 +149,7 @@ LispObject lisp_make_closure(LispObject params, LispObject body, LispObject env)
     closure->body = body;
     closure->env = env;
     closure->builtin = 0;
+    closure->is_macro = 0;
     return ((LispObject)closure) | LISP_TAG_CLOSURE;
 }
 
@@ -157,6 +159,19 @@ LispObject lisp_make_builtin(LispBuiltinFn fn) {
     closure->body = LISP_NIL;
     closure->env = LISP_NIL;
     closure->builtin = fn;
+    closure->is_macro = 0;
+    return ((LispObject)closure) | LISP_TAG_CLOSURE;
+}
+
+// defmacro由来のマクロを作る。lambda由来のクロージャと同じ構造だが、
+// 呼び出し時にlisp_evalが引数を評価せず展開処理に回すためis_macroを立てる
+LispObject lisp_make_macro(LispObject params, LispObject body, LispObject env) {
+    LispClosure *closure = (LispClosure *)lisp_alloc(sizeof(LispClosure));
+    closure->params = params;
+    closure->body = body;
+    closure->env = env;
+    closure->builtin = 0;
+    closure->is_macro = 1;
     return ((LispObject)closure) | LISP_TAG_CLOSURE;
 }
 
@@ -209,6 +224,10 @@ static LispObject lisp_sym_quote;
 static LispObject lisp_sym_if;
 static LispObject lisp_sym_lambda;
 static LispObject lisp_sym_defun;
+static LispObject lisp_sym_defmacro;
+static LispObject lisp_sym_quasiquote;
+static LispObject lisp_sym_unquote;
+static LispObject lisp_sym_unquote_splicing;
 
 void lisp_symbols_init(void) {
     lisp_sym_t = lisp_intern("t");
@@ -216,6 +235,10 @@ void lisp_symbols_init(void) {
     lisp_sym_if = lisp_intern("if");
     lisp_sym_lambda = lisp_intern("lambda");
     lisp_sym_defun = lisp_intern("defun");
+    lisp_sym_defmacro = lisp_intern("defmacro");
+    lisp_sym_quasiquote = lisp_intern("quasiquote");
+    lisp_sym_unquote = lisp_intern("unquote");
+    lisp_sym_unquote_splicing = lisp_intern("unquote-splicing");
 }
 
 
@@ -348,6 +371,8 @@ void lisp_print(EFI_SYSTEM_TABLE *SystemTable, LispObject obj) {
     if (lisp_is_closure(obj)) {
         if (lisp_closure_cell(obj)->builtin != 0) {
             SystemTable->ConOut->OutputString(SystemTable->ConOut, L"#<builtin>");
+        } else if (lisp_closure_cell(obj)->is_macro) {
+            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"#<macro>");
         } else {
             SystemTable->ConOut->OutputString(SystemTable->ConOut, L"#<closure>");
         }
@@ -365,7 +390,8 @@ void lisp_print(EFI_SYSTEM_TABLE *SystemTable, LispObject obj) {
 static const char *lisp_reader_pos;
 
 static inline int lisp_reader_is_delim(char c) {
-    return c == '\0' || c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == '(' || c == ')';
+    return c == '\0' || c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == '(' || c == ')' ||
+           c == '\'' || c == '`' || c == ',';
 }
 
 static void lisp_reader_skip_ws(void) {
@@ -420,7 +446,9 @@ LispObject lisp_read_list(void) {
 }
 
 // 現在位置から1つのS式を読み取り、LispObjectを返す。
-// "("なら再帰的にリストを読み取り、それ以外は整数リテラルまたはシンボルのトークンとして読む
+// "("なら再帰的にリストを読み取り、"'"/"`"/","/",@"ならquote/quasiquote/unquote/
+// unquote-splicingへの糖衣構文として展開し、それ以外は整数リテラルまたはシンボルの
+// トークンとして読む
 LispObject lisp_read(void) {
     lisp_reader_skip_ws();
 
@@ -434,6 +462,22 @@ LispObject lisp_read(void) {
     if (c == '(') {
         lisp_reader_pos++;
         return lisp_read_list();
+    }
+    if (c == '\'') {
+        lisp_reader_pos++;
+        return lisp_cons(lisp_sym_quote, lisp_cons(lisp_read(), LISP_NIL));
+    }
+    if (c == '`') {
+        lisp_reader_pos++;
+        return lisp_cons(lisp_sym_quasiquote, lisp_cons(lisp_read(), LISP_NIL));
+    }
+    if (c == ',') {
+        lisp_reader_pos++;
+        if (*lisp_reader_pos == '@') {
+            lisp_reader_pos++;
+            return lisp_cons(lisp_sym_unquote_splicing, lisp_cons(lisp_read(), LISP_NIL));
+        }
+        return lisp_cons(lisp_sym_unquote, lisp_cons(lisp_read(), LISP_NIL));
     }
 
     char token[LISP_TOKEN_MAX];
@@ -545,6 +589,45 @@ LispObject lisp_apply(LispObject fn, LispObject args) {
     return lisp_eval(closure->body, call_env);
 }
 
+// リストaの末尾にリストbを連結した新しいリストを返す（aは破壊しない）。
+// quasiquoteの",@"展開でのみ使う内部ヘルパー
+LispObject lisp_append(LispObject a, LispObject b) {
+    if (!lisp_is_cons(a)) {
+        return b;
+    }
+    return lisp_cons(lisp_car(a), lisp_append(lisp_cdr(a), b));
+}
+
+// quasiquoteのテンプレートformを再帰的に展開する。ネストしたquasiquote自体は
+// 特別扱いしない（1段のbackquoteのみを想定した単純化。内側にquasiquoteが
+// 現れる場合、その中のunquote/unquote-splicingも同じ深さのまま展開されるため、
+// 標準的なLisp処理系のネスト深度追跡とは異なる挙動になる点に注意）。
+// - formが(unquote x)そのものならenvでxを評価した結果を返す
+// - リストの要素が(unquote-splicing x)なら、評価結果（リスト）を周囲に継ぎ足す
+// - それ以外のconsは car/cdrを再帰的に展開して再構築する
+// - cons以外（nil・fixnum・symbol・closure）はそのまま返す（自己クオート）
+LispObject lisp_qq_expand(LispObject form, LispObject env) {
+    if (!lisp_is_cons(form)) {
+        return form;
+    }
+
+    LispObject head = lisp_car(form);
+
+    if (head == lisp_sym_unquote) {
+        return lisp_eval(lisp_car(lisp_cdr(form)), env);
+    }
+
+    if (lisp_is_cons(head) && lisp_car(head) == lisp_sym_unquote_splicing) {
+        LispObject spliced = lisp_eval(lisp_car(lisp_cdr(head)), env);
+        LispObject rest = lisp_qq_expand(lisp_cdr(form), env);
+        return lisp_append(spliced, rest);
+    }
+
+    LispObject expanded_head = lisp_qq_expand(head, env);
+    LispObject expanded_tail = lisp_qq_expand(lisp_cdr(form), env);
+    return lisp_cons(expanded_head, expanded_tail);
+}
+
 // exprをenv上で評価する。fixnum/nil/tは自己評価、symbolは変数参照、
 // consはquote/if/lambdaの特殊形式または関数呼び出しとして扱う
 LispObject lisp_eval(LispObject expr, LispObject env) {
@@ -564,6 +647,10 @@ LispObject lisp_eval(LispObject expr, LispObject env) {
 
         if (op == lisp_sym_quote) {
             return lisp_car(lisp_cdr(expr));
+        }
+
+        if (op == lisp_sym_quasiquote) {
+            return lisp_qq_expand(lisp_car(lisp_cdr(expr)), env);
         }
 
         if (op == lisp_sym_if) {
@@ -597,7 +684,28 @@ LispObject lisp_eval(LispObject expr, LispObject env) {
             return name;
         }
 
+        if (op == lisp_sym_defmacro) {
+            LispObject name = lisp_car(lisp_cdr(expr));
+            lisp_assert_symbol(name);
+            LispObject params = lisp_car(lisp_cdr(lisp_cdr(expr)));
+            LispObject body = lisp_car(lisp_cdr(lisp_cdr(lisp_cdr(expr))));
+            LispObject macro = lisp_make_macro(params, body, env);
+            global_env = lisp_env_extend(global_env, name, macro);
+            return name;
+        }
+
         LispObject fn = lisp_eval(op, env);
+
+        // マクロ呼び出しは引数を評価せず、未評価の式のまま仮引数に束縛して
+        // マクロ本文を評価する（マクロ展開）。展開結果は呼び出し元のenvで
+        // 通常のevalにかける（2段階評価）
+        if (lisp_is_closure(fn) && lisp_closure_cell(fn)->is_macro) {
+            LispClosure *macro = lisp_closure_cell(fn);
+            LispObject expand_env = lisp_env_bind_params(macro->params, lisp_cdr(expr), macro->env);
+            LispObject expansion = lisp_eval(macro->body, expand_env);
+            return lisp_eval(expansion, env);
+        }
+
         LispObject args = lisp_eval_list(lisp_cdr(expr), env);
         return lisp_apply(fn, args);
     }

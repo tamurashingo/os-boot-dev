@@ -45,9 +45,35 @@
 |---|---|---|---|
 | 12 | グローバル環境の永続化 | ✅ 完了 | `global_env`を`EfiMain`のローカル変数から、`// --- 評価器 (milestone 9) ---`セクション先頭で宣言する`static LispObject global_env`（ファイルスコープ）に変更した。`EfiMain`は`global_env = lisp_builtins_init();`と代入するだけで、以後は`defun`/`load`など今後の特殊形式がここを直接書き換えれば、その変更は次のREPL入力からも見える。関数呼び出し時の引数↔値バインディング自体（マイルストーン9の`lisp_env_bind_params`）は変更していない。検証は、REPLループ内で`lisp_eval`直後に一時的に`global_env = lisp_env_extend(global_env, lisp_intern("last"), result);`を追加し、`(+ 1 2)`→`3`の後に`last`→`3`、`(+ last 10)`→`13`の後に`last`→`13`と、ある入力での変更が次の入力から見えることをQEMU上で確認してから元に戻した。（2026-07-10のファイル分割リファクタで実装は`main.c`から`lisp.c`に移動し、`global_env`は非staticの`extern`共有変数になった。挙動は変更していない） |
 | 13 | `defun`の実装 | ✅ 完了 | `(defun name (params...) body)`という特殊形式を`lisp_eval`に追加した。既存の`lisp_make_closure`（マイルストーン9）でクロージャを作り、マイルストーン12で永続化した`global_env`に`name`を束縛し、`name`自身を返す。同名での再定義は新しい束縛を先頭に追加するだけで良い（既存の`lisp_env_lookup`が最前面を優先して探索するため）。実装時に、`defun`が作るクロージャは自分自身の束縛が`global_env`に追加される前の環境スナップショットを捕捉するため、再帰呼び出しが`unbound variable`でpanicする問題を発見した。`lisp_env_lookup`が渡された`env`チェーン内で見つからなかった場合に現在の`global_env`も探すフォールバックを追加して解決した（レキシカルな束縛は変わらず優先され、グローバル関数の再帰・相互参照・後方参照が可能になった）。QEMU上で関数定義・呼び出し・再定義・再帰（`(defun sumto (n) (if (eq n 0) 0 (+ n (sumto (- n 1)))))`→`(sumto 3)`→`6`）・引数無し関数を確認した |
-| 14 | macroの実装 | 未着手 | `defmacro`特殊形式を追加し、`LispClosure`にマクロであることを示すフラグ用フィールドを追加する（マイルストーン10の`builtin`フィールド追加と同じ手法でタグを増やさない）。呼び出し対象がマクロの場合は引数を評価せずに展開body側の環境に束縛して評価（マクロ展開）し、その展開結果を呼び出し元の環境で通常のevalにかける2段階の評価を`lisp_eval`/`lisp_apply`に組み込む |
+| 14 | macroの実装 | ✅ 完了 | `defmacro`特殊形式を追加し、`LispClosure`にマクロであることを示す`is_macro`フィールドを追加した（マイルストーン10の`builtin`フィールド追加と同じ手法でタグを増やさない）。`(defmacro name (params...) body)`は`lisp_make_macro`でマクロクロージャを作り`global_env`に束縛し、`name`自身を返す（`defun`と同型）。呼び出し対象がマクロの場合、`lisp_eval`は引数を評価せず未評価のまま仮引数に束縛してマクロ本文を評価し（マクロ展開）、その展開結果を呼び出し元の環境で通常のevalにかける2段階の評価とした。実装時、テスト用マクロのパラメータ名に`t`を使ったところ展開結果が意図せず壊れる現象に遭遇したが、これは`lisp_eval`がシンボル`t`を環境ルックアップより先に自己評価させる既存仕様（Common Lispの`T`/`NIL`同様、予約シンボルはローカル束縛で覆えない）によるもので、マクロ機能自体のバグではないと判明した。パラメータ名を変えて、`(defmacro my-if (test then else) (cons (quote if) (cons test (cons then (cons else nil)))))`を定義し、`(my-if 1 (+ 1 1) (car 5))`→`2`、`(my-if nil (car 5) (+ 2 2))`→`4`（いずれも選ばれなかった分岐の`(car 5)`が評価されずpanicしないこと）と、`my-if`単体の評価が`#<macro>`と表示されることをQEMU上で確認した |
 | 15 | 最小限のLisp文字列型 | 未着手 | `load`がファイル名を受け取れるよう、ダブルクオートで囲んだ文字列リテラル（例: `"boot.lsp"`）をリーダーが読み取れるようにし、対応する新しい文字列オブジェクトを導入する。既存のタグ空間（cons/fixnum/symbol/closure）は使い切っているため、既存タグの構造体にフィールドを追加するマイルストーン10と同じescape hatchを踏襲し、新しい2bitタグは増やさない方針とする。プリンターも文字列を`"..."`形式で表示できるようにする |
 | 16 | `load`の実装（FAT32のESPからのファイル読み込み） | 未着手 | `(load "filename")`という組み込み関数を追加し、UEFIの`EFI_SIMPLE_FILE_SYSTEM_PROTOCOL`/`EFI_FILE_PROTOCOL`（CLAUDE.mdの方針に従い必要なフィールドのみ新規に手書き）を使ってQEMUがマウントしているFAT32のESPからファイル内容を読み込む。読み込んだ内容は複数のトップレベルS式を含み得るため、マイルストーン8のリーダーを「バッファ終端に達したら`lisp_panic`せずに読み込み終了とみなす」ように拡張し、各S式を順にマイルストーン12の永続グローバル環境で評価する。読み込んだファイル内の`defun`/`defmacro`による定義がその後のREPL入力からも使えることを確認する |
+
+## 追加機能: quote/quasiquoteのreader糖衣構文とmacroとの連携（2026-07-10）
+
+マイルストーン12〜16の番号には含まれないが、macro（マイルストーン14）を書きやすくするための
+拡張として、ユーザーの明示的な指示により以下を実装した。✅ 完了。
+
+- **reader**: `lisp_read`に`'`/`` ` ``/`,`/`,@`の4つの糖衣構文を追加した。`'expr`→
+  `(quote expr)`、`` `expr ``→`(quasiquote expr)`、`,expr`→`(unquote expr)`、
+  `,@expr`→`(unquote-splicing expr)`と読み替える（`lisp_reader_is_delim`にもこの3文字を
+  追加し、トークンの区切りとして機能するようにした）。
+- **評価器**: `lisp_qq_expand`（`quasiquote`のテンプレートを再帰的に展開する内部ヘルパー）と
+  `lisp_append`（`,@`のスプライシング用）を追加し、`lisp_eval`に`quasiquote`特殊形式を追加した。
+  `(unquote x)`に一致した箇所はenv上で`x`を評価した値に置き換わり、リスト要素が
+  `(unquote-splicing x)`の場合はその評価結果（リスト）を周囲のリスト構造にそのまま継ぎ足す。
+  それ以外のconsは再帰的に展開して再構築し、atomはそのまま返す（自己クオート）。
+  **スコープ上の制限**: ネストしたquasiquote（backquoteの中にさらにbackquoteが現れるケース）の
+  深度追跡は実装していない。単純化のため、内側のquasiquoteも同じ深さのまま展開される
+  （標準的なCommon Lisp/Schemeの`depth`を1段ずつ増減させる挙動とは異なる）。今回のmacro用途
+  では単一階層のbackquoteしか使わないため、実用上は問題にならないと判断した。
+- **QEMUでの確認**: `'a`→`a`、`'(1 2 3)`→`(1 2 3)`、`` `(1 2 3) ``→`(1 2 3)`、
+  `` `(1 ,(+ 2 3) 4) ``→`(1 5 4)`、`` `(1 ,@(cons 2 (cons 3 nil)) 4) ``→`(1 2 3 4)`を確認した。
+  さらにmacroとの連携として、マイルストーン14で`cons`/`quote`を手書きしていた`my-if`マクロを
+  backquoteで書き直した`(defmacro my-if2 (test then else) `(if ,test ,then ,else))`を定義し、
+  `(my-if2 1 (+ 1 1) (car 5))`→`2`、`(my-if2 nil (car 5) (+ 2 2))`→`4`
+  （選ばれなかった分岐の`(car 5)`が評価されずpanicしないこと）を確認し、macro本文が
+  quasiquoteで簡潔に書けることを実証した。
 
 ## 検証方針
 
