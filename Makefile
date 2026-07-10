@@ -6,6 +6,9 @@ SRCDIR = src
 SRC = $(SRCDIR)/main.c $(SRCDIR)/lisp.c
 HDRS = $(SRCDIR)/uefi.h $(SRCDIR)/lisp.h
 
+TEST_LISP_SRC := $(wildcard test/lisp/*.lisp)
+TEST_LISP_DST := $(patsubst test/lisp/%.lisp,esp_dir/test/%.lisp,$(TEST_LISP_SRC))
+
 STAMP_DIR := .make-stamps
 IMAGE_STAMP := $(STAMP_DIR)/image-built
 
@@ -13,8 +16,12 @@ IMAGE_STAMP := $(STAMP_DIR)/image-built
 
 all: build
 
-setup:
+setup: $(TEST_LISP_DST)
 	mkdir -p esp_dir/EFI/BOOT
+
+esp_dir/test/%.lisp: test/lisp/%.lisp
+	mkdir -p esp_dir/test
+	cp $< $@
 
 $(IMAGE_STAMP): Dockerfile
 	mkdir -p $(STAMP_DIR)

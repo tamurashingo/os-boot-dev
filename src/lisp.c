@@ -270,6 +270,15 @@ static LispObject lisp_sym_defmacro;
 static LispObject lisp_sym_quasiquote;
 static LispObject lisp_sym_unquote;
 static LispObject lisp_sym_unquote_splicing;
+static LispObject lisp_sym_progn;
+static LispObject lisp_sym_let;
+static LispObject lisp_sym_let_star;
+static LispObject lisp_sym_setq;
+static LispObject lisp_sym_cond;
+static LispObject lisp_sym_and;
+static LispObject lisp_sym_or;
+static LispObject lisp_sym_when;
+static LispObject lisp_sym_unless;
 
 void lisp_symbols_init(void) {
     lisp_sym_t = lisp_intern("t");
@@ -281,6 +290,15 @@ void lisp_symbols_init(void) {
     lisp_sym_quasiquote = lisp_intern("quasiquote");
     lisp_sym_unquote = lisp_intern("unquote");
     lisp_sym_unquote_splicing = lisp_intern("unquote-splicing");
+    lisp_sym_progn = lisp_intern("progn");
+    lisp_sym_let = lisp_intern("let");
+    lisp_sym_let_star = lisp_intern("let*");
+    lisp_sym_setq = lisp_intern("setq");
+    lisp_sym_cond = lisp_intern("cond");
+    lisp_sym_and = lisp_intern("and");
+    lisp_sym_or = lisp_intern("or");
+    lisp_sym_when = lisp_intern("when");
+    lisp_sym_unless = lisp_intern("unless");
 }
 
 
@@ -442,10 +460,20 @@ static inline int lisp_reader_is_delim(char c) {
 
 #define LISP_STRING_READ_MAX 128
 
+// 空白と";"から行末(または入力終端)までのコメントを読み飛ばす。コメントの後に空白が
+// 続く場合もあるため、両方無くなるまでループする
 static void lisp_reader_skip_ws(void) {
-    while (*lisp_reader_pos == ' ' || *lisp_reader_pos == '\t' ||
-           *lisp_reader_pos == '\r' || *lisp_reader_pos == '\n') {
-        lisp_reader_pos++;
+    for (;;) {
+        while (*lisp_reader_pos == ' ' || *lisp_reader_pos == '\t' ||
+               *lisp_reader_pos == '\r' || *lisp_reader_pos == '\n') {
+            lisp_reader_pos++;
+        }
+        if (*lisp_reader_pos != ';') {
+            return;
+        }
+        while (*lisp_reader_pos != '\0' && *lisp_reader_pos != '\n') {
+            lisp_reader_pos++;
+        }
     }
 }
 
@@ -621,6 +649,33 @@ LispObject lisp_env_lookup(LispObject env, LispObject sym) {
     lisp_panic(L"unbound variable");
 }
 
+// symの既存の束縛を破壊的に書き換える（milestone 17のsetq用）。envチェーンを先に探し、
+// 見つからなければlisp_env_lookupと同じ考え方でglobal_envも探す。どちらにも束縛が
+// 無ければlisp_env_lookupと同じくunbound variableとしてpanicする（新規変数の暗黙定義はしない）
+void lisp_env_set(LispObject env, LispObject sym, LispObject value) {
+    LispObject cur = env;
+    while (lisp_is_cons(cur)) {
+        LispObject pair = lisp_car(cur);
+        if (lisp_car(pair) == sym) {
+            lisp_set_cdr(pair, value);
+            return;
+        }
+        cur = lisp_cdr(cur);
+    }
+    if (env != global_env) {
+        cur = global_env;
+        while (lisp_is_cons(cur)) {
+            LispObject pair = lisp_car(cur);
+            if (lisp_car(pair) == sym) {
+                lisp_set_cdr(pair, value);
+                return;
+            }
+            cur = lisp_cdr(cur);
+        }
+    }
+    lisp_panic(L"unbound variable");
+}
+
 // paramsとargsを1対1で対応付けてenvに順に束縛していく（個数不一致はpanic）
 LispObject lisp_env_bind_params(LispObject params, LispObject args, LispObject env) {
     while (lisp_is_cons(params)) {
@@ -647,6 +702,17 @@ LispObject lisp_eval_list(LispObject list, LispObject env) {
     LispObject head = lisp_eval(lisp_car(list), env);
     LispObject tail = lisp_eval_list(lisp_cdr(list), env);
     return lisp_cons(head, tail);
+}
+
+// フォーム列を順にenvで評価し、最後の値を返す（formsが無ければnilを返す）。
+// milestone 17のprogn本体、およびlet/let*/when/unless/condの各本体評価に共通で使う
+LispObject lisp_eval_progn(LispObject forms, LispObject env) {
+    LispObject result = LISP_NIL;
+    while (lisp_is_cons(forms)) {
+        result = lisp_eval(lisp_car(forms), env);
+        forms = lisp_cdr(forms);
+    }
+    return result;
 }
 
 // クロージャfnをargs(評価済みリスト)に適用する。builtinならCの実装関数を直接呼ぶ
@@ -702,7 +768,8 @@ LispObject lisp_qq_expand(LispObject form, LispObject env) {
 }
 
 // exprをenv上で評価する。fixnum/nil/tは自己評価、symbolは変数参照、
-// consはquote/if/lambdaの特殊形式または関数呼び出しとして扱う
+// consはquote/if/progn/let/let*/setq/cond/and/or/when/unless/lambdaなどの
+// 特殊形式または関数呼び出しとして扱う
 LispObject lisp_eval(LispObject expr, LispObject env) {
     if (lisp_is_fixnum(expr) || expr == LISP_NIL) {
         return expr;
@@ -737,6 +804,107 @@ LispObject lisp_eval(LispObject expr, LispObject env) {
                 return LISP_NIL;
             }
             return lisp_eval(lisp_car(else_rest), env);
+        }
+
+        if (op == lisp_sym_progn) {
+            return lisp_eval_progn(lisp_cdr(expr), env);
+        }
+
+        if (op == lisp_sym_let) {
+            LispObject bindings = lisp_car(lisp_cdr(expr));
+            LispObject body = lisp_cdr(lisp_cdr(expr));
+            LispObject new_env = env;
+            LispObject cur = bindings;
+            // 各初期値式はletの外側のenvで評価する（束縛済みの他の変数を参照できない、
+            // let*との違い）
+            while (lisp_is_cons(cur)) {
+                LispObject binding = lisp_car(cur);
+                LispObject value = lisp_eval(lisp_car(lisp_cdr(binding)), env);
+                new_env = lisp_env_extend(new_env, lisp_car(binding), value);
+                cur = lisp_cdr(cur);
+            }
+            return lisp_eval_progn(body, new_env);
+        }
+
+        if (op == lisp_sym_let_star) {
+            LispObject bindings = lisp_car(lisp_cdr(expr));
+            LispObject body = lisp_cdr(lisp_cdr(expr));
+            LispObject new_env = env;
+            LispObject cur = bindings;
+            // let*は各初期値式をそれまでに束縛した変数が見える環境で評価する
+            while (lisp_is_cons(cur)) {
+                LispObject binding = lisp_car(cur);
+                LispObject value = lisp_eval(lisp_car(lisp_cdr(binding)), new_env);
+                new_env = lisp_env_extend(new_env, lisp_car(binding), value);
+                cur = lisp_cdr(cur);
+            }
+            return lisp_eval_progn(body, new_env);
+        }
+
+        if (op == lisp_sym_setq) {
+            LispObject sym = lisp_car(lisp_cdr(expr));
+            lisp_assert_symbol(sym);
+            LispObject value = lisp_eval(lisp_car(lisp_cdr(lisp_cdr(expr))), env);
+            lisp_env_set(env, sym, value);
+            return value;
+        }
+
+        if (op == lisp_sym_cond) {
+            LispObject clauses = lisp_cdr(expr);
+            while (lisp_is_cons(clauses)) {
+                LispObject clause = lisp_car(clauses);
+                LispObject test = lisp_eval(lisp_car(clause), env);
+                if (test != LISP_NIL) {
+                    LispObject body = lisp_cdr(clause);
+                    if (body == LISP_NIL) {
+                        return test; // 本体が無いクローズはtestの値そのものを返す
+                    }
+                    return lisp_eval_progn(body, env);
+                }
+                clauses = lisp_cdr(clauses);
+            }
+            return LISP_NIL; // どのclauseもマッチしなかった
+        }
+
+        if (op == lisp_sym_and) {
+            LispObject forms = lisp_cdr(expr);
+            LispObject result = lisp_sym_t; // (and)はtを返す
+            while (lisp_is_cons(forms)) {
+                result = lisp_eval(lisp_car(forms), env);
+                if (result == LISP_NIL) {
+                    return LISP_NIL; // 短絡評価: 以降のformは評価しない
+                }
+                forms = lisp_cdr(forms);
+            }
+            return result;
+        }
+
+        if (op == lisp_sym_or) {
+            LispObject forms = lisp_cdr(expr);
+            while (lisp_is_cons(forms)) {
+                LispObject result = lisp_eval(lisp_car(forms), env);
+                if (result != LISP_NIL) {
+                    return result; // 短絡評価: 最初にnilでない値が出た時点で返す
+                }
+                forms = lisp_cdr(forms);
+            }
+            return LISP_NIL; // (or)はnilを返す
+        }
+
+        if (op == lisp_sym_when) {
+            LispObject test = lisp_eval(lisp_car(lisp_cdr(expr)), env);
+            if (test == LISP_NIL) {
+                return LISP_NIL;
+            }
+            return lisp_eval_progn(lisp_cdr(lisp_cdr(expr)), env);
+        }
+
+        if (op == lisp_sym_unless) {
+            LispObject test = lisp_eval(lisp_car(lisp_cdr(expr)), env);
+            if (test != LISP_NIL) {
+                return LISP_NIL;
+            }
+            return lisp_eval_progn(lisp_cdr(lisp_cdr(expr)), env);
         }
 
         if (op == lisp_sym_lambda) {
