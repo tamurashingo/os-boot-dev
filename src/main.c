@@ -126,14 +126,23 @@ typedef UINT64 LispObject;
 #define LISP_TAG_MASK   0x3ULL
 #define LISP_TAG_CONS   0x0ULL   // ポインタ（cons cellへの16byte境界アドレス、下位2bit=00）
 #define LISP_TAG_FIXNUM 0x1ULL   // 整数（上位62bitに値、下位2bit=01）
+#define LISP_TAG_SYMBOL 0x2ULL   // ポインタ（LispSymbolへの16byte境界アドレス、下位2bit=10）
 
-// 予約アドレス0。ヒープはPhysicalStart==0を使わないため衝突しない
+// 予約アドレス0。ヒープはPhysicalStart==0を使わないため衝突しない。
+// nilはシンボルとしてintern済みテーブルに載せず、この専用の即値のまま扱う
+// （空リストの終端とfalse相当を1つの値で表す、という一般的なLisp実装の簡略化）
 #define LISP_NIL ((LispObject)0)
+
+#define LISP_SYMBOL_NAME_MAX 32
 
 typedef struct {
     LispObject car;
     LispObject cdr;
 } LispCons;
+
+typedef struct {
+    char name[LISP_SYMBOL_NAME_MAX];
+} LispSymbol;
 
 static inline LispObject lisp_make_fixnum(long long value) {
     return ((UINT64)value << 2) | LISP_TAG_FIXNUM;
@@ -151,8 +160,16 @@ static inline int lisp_is_cons(LispObject obj) {
     return obj != LISP_NIL && (obj & LISP_TAG_MASK) == LISP_TAG_CONS;
 }
 
+static inline int lisp_is_symbol(LispObject obj) {
+    return (obj & LISP_TAG_MASK) == LISP_TAG_SYMBOL;
+}
+
 static inline LispCons *lisp_cons_cell(LispObject obj) {
     return (LispCons *)(obj & ~LISP_TAG_MASK);
+}
+
+static inline LispSymbol *lisp_symbol_cell(LispObject obj) {
+    return (LispSymbol *)(obj & ~LISP_TAG_MASK);
 }
 
 static UINT64 lisp_heap_ptr;
@@ -173,18 +190,31 @@ static inline void lisp_assert_cons(LispObject obj) {
     }
 }
 
+static inline void lisp_assert_symbol(LispObject obj) {
+    if (!lisp_is_symbol(obj)) {
+        lisp_panic(L"expected a symbol but got something else");
+    }
+}
+
 void lisp_heap_init(UINT64 start, UINT64 size) {
     lisp_heap_ptr = (start + 15) & ~15ULL; // 16byte境界に切り上げ（タグ用に下位ビットを空ける）
     lisp_heap_end = start + size;
 }
 
-LispObject alloc_cons(void) {
-    if (lisp_heap_ptr + sizeof(LispCons) > lisp_heap_end) {
+// ヒープからsizeバイトを切り出す（解放・GCなしのバンプアロケータ）。
+// 戻り値は常に16byte境界なので、下位2bitをそのままタグとして使える
+void *lisp_alloc(UINTN size) {
+    UINT64 aligned_size = (size + 15) & ~15ULL;
+    if (lisp_heap_ptr + aligned_size > lisp_heap_end) {
         lisp_panic(L"heap exhausted");
     }
-    LispObject obj = (LispObject)lisp_heap_ptr;
-    lisp_heap_ptr += sizeof(LispCons);
-    return obj; // 16byte境界なので下位2bit=00=LISP_TAG_CONS、タグ付け不要
+    void *ptr = (void *)lisp_heap_ptr;
+    lisp_heap_ptr += aligned_size;
+    return ptr;
+}
+
+LispObject alloc_cons(void) {
+    return (LispObject)lisp_alloc(sizeof(LispCons)); // 下位2bit=00=LISP_TAG_CONS、タグ付け不要
 }
 
 LispObject lisp_cons(LispObject car, LispObject cdr) {
@@ -213,6 +243,56 @@ void lisp_set_car(LispObject obj, LispObject value) {
 void lisp_set_cdr(LispObject obj, LispObject value) {
     lisp_assert_cons(obj);
     lisp_cons_cell(obj)->cdr = value;
+}
+
+#define LISP_MAX_SYMBOLS 256
+static LispObject lisp_symbol_table[LISP_MAX_SYMBOLS];
+static UINTN lisp_symbol_count = 0;
+
+static int lisp_streq(const char *a, const char *b) {
+    while (*a != '\0' && *b != '\0') {
+        if (*a != *b) {
+            return 0;
+        }
+        a++;
+        b++;
+    }
+    return *a == *b;
+}
+
+// 同じ名前でintern済みのシンボルがあれば同一のLispObjectを返す（eqで比較可能にする）。
+// 無ければ新規に確保してテーブルに登録する
+LispObject lisp_intern(const char *name) {
+    for (UINTN i = 0; i < lisp_symbol_count; i++) {
+        LispSymbol *sym = lisp_symbol_cell(lisp_symbol_table[i]);
+        if (lisp_streq(sym->name, name)) {
+            return lisp_symbol_table[i];
+        }
+    }
+
+    if (lisp_symbol_count >= LISP_MAX_SYMBOLS) {
+        lisp_panic(L"symbol table exhausted");
+    }
+
+    LispSymbol *sym = (LispSymbol *)lisp_alloc(sizeof(LispSymbol));
+    UINTN i = 0;
+    while (name[i] != '\0' && i < LISP_SYMBOL_NAME_MAX - 1) {
+        sym->name[i] = name[i];
+        i++;
+    }
+    sym->name[i] = '\0';
+
+    LispObject obj = ((LispObject)sym) | LISP_TAG_SYMBOL;
+    lisp_symbol_table[lisp_symbol_count] = obj;
+    lisp_symbol_count++;
+    return obj;
+}
+
+// よく使う特別なシンボル（nilはLISP_NILの即値のまま。tのみここでintern）
+static LispObject lisp_sym_t;
+
+void lisp_symbols_init(void) {
+    lisp_sym_t = lisp_intern("t");
 }
 
 
@@ -306,6 +386,31 @@ EFI_STATUS EFIAPI EfiMain(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable)
 
             SystemTable->ConOut->OutputString(SystemTable->ConOut, L"car decoded as fixnum: ");
             SystemTable->ConOut->OutputString(SystemTable->ConOut, hex_car);
+            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\n");
+
+            lisp_symbols_init();
+
+            LispObject sym_foo1 = lisp_intern("foo");
+            LispObject sym_foo2 = lisp_intern("foo");
+            LispObject sym_bar = lisp_intern("bar");
+
+            CHAR16 hex_same[20];
+            CHAR16 hex_diff[20];
+            CHAR16 hex_is_sym[20];
+            UINT64ToHexStr((UINT64)(sym_foo1 == sym_foo2), hex_same);
+            UINT64ToHexStr((UINT64)(sym_foo1 == sym_bar), hex_diff);
+            UINT64ToHexStr((UINT64)lisp_is_symbol(lisp_sym_t), hex_is_sym);
+
+            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"intern(foo) == intern(foo): ");
+            SystemTable->ConOut->OutputString(SystemTable->ConOut, hex_same);
+            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\n");
+
+            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"intern(foo) == intern(bar): ");
+            SystemTable->ConOut->OutputString(SystemTable->ConOut, hex_diff);
+            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\n");
+
+            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"lisp_sym_t is_symbol: ");
+            SystemTable->ConOut->OutputString(SystemTable->ConOut, hex_is_sym);
             SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\n");
         } else {
             CHAR16 hex_status[20];
