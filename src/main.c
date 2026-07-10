@@ -849,148 +849,22 @@ EFI_STATUS EFIAPI EfiMain(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable)
 
             lisp_heap_init(heap_start, max_free_size);
 
-            LispObject test = lisp_cons(lisp_make_fixnum(42), LISP_NIL);
-
-            CHAR16 hex_obj[20];
-            CHAR16 hex_car[20];
-            UINT64ToHexStr((UINT64)test, hex_obj);
-            UINT64ToHexStr((UINT64)lisp_fixnum_value(lisp_car(test)), hex_car);
-
-            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"Test cons cell: ");
-            SystemTable->ConOut->OutputString(SystemTable->ConOut, hex_obj);
-            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\n");
-
-            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"car decoded as fixnum: ");
-            SystemTable->ConOut->OutputString(SystemTable->ConOut, hex_car);
-            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\n");
-
             lisp_symbols_init();
-
-            LispObject sym_foo1 = lisp_intern("foo");
-            LispObject sym_foo2 = lisp_intern("foo");
-            LispObject sym_bar = lisp_intern("bar");
-
-            CHAR16 hex_same[20];
-            CHAR16 hex_diff[20];
-            CHAR16 hex_is_sym[20];
-            UINT64ToHexStr((UINT64)(sym_foo1 == sym_foo2), hex_same);
-            UINT64ToHexStr((UINT64)(sym_foo1 == sym_bar), hex_diff);
-            UINT64ToHexStr((UINT64)lisp_is_symbol(lisp_sym_t), hex_is_sym);
-
-            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"intern(foo) == intern(foo): ");
-            SystemTable->ConOut->OutputString(SystemTable->ConOut, hex_same);
-            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\n");
-
-            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"intern(foo) == intern(bar): ");
-            SystemTable->ConOut->OutputString(SystemTable->ConOut, hex_diff);
-            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\n");
-
-            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"lisp_sym_t is_symbol: ");
-            SystemTable->ConOut->OutputString(SystemTable->ConOut, hex_is_sym);
-            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\n");
-
-            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"Type a line and press Enter: ");
-            lisp_read_line(SystemTable);
-            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"You typed: ");
-            lisp_print_ascii(SystemTable, input_buffer);
-            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\n");
-
-            LispObject list123 = lisp_cons(lisp_make_fixnum(1),
-                lisp_cons(lisp_make_fixnum(2), lisp_cons(lisp_make_fixnum(3), LISP_NIL)));
-            LispObject dotted = lisp_cons(lisp_make_fixnum(1), lisp_make_fixnum(2));
-            LispObject negative = lisp_make_fixnum(-5);
-
-            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"print nil: ");
-            lisp_print(SystemTable, LISP_NIL);
-            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\n");
-
-            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"print (1 2 3): ");
-            lisp_print(SystemTable, list123);
-            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\n");
-
-            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"print (1 . 2): ");
-            lisp_print(SystemTable, dotted);
-            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\n");
-
-            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"print -5: ");
-            lisp_print(SystemTable, negative);
-            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\n");
-
-            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"print symbol foo: ");
-            lisp_print(SystemTable, sym_foo1);
-            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\n");
-
-            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"Read & print back what you typed: ");
-            LispObject parsed = lisp_read_from_buffer(input_buffer);
-            lisp_print(SystemTable, parsed);
-            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\n");
-
-            LispObject nested = lisp_read_from_buffer("(a (b c) -3 d)");
-            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"Read \"(a (b c) -3 d)\" and print back: ");
-            lisp_print(SystemTable, nested);
-            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\n");
-
             LispObject global_env = lisp_builtins_init();
 
-            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"eval 42: ");
-            lisp_print(SystemTable, lisp_eval(lisp_read_from_buffer("42"), global_env));
-            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\n");
+            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\nMinimal Lisp REPL. Type an expression and press Enter.\r\n");
 
-            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"eval (quote (1 2 3)): ");
-            lisp_print(SystemTable, lisp_eval(lisp_read_from_buffer("(quote (1 2 3))"), global_env));
-            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\n");
-
-            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"eval (if nil 1 2): ");
-            lisp_print(SystemTable, lisp_eval(lisp_read_from_buffer("(if nil 1 2)"), global_env));
-            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\n");
-
-            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"eval (if t 1 2): ");
-            lisp_print(SystemTable, lisp_eval(lisp_read_from_buffer("(if t 1 2)"), global_env));
-            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\n");
-
-            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"eval ((lambda (x y) x) 10 20): ");
-            lisp_print(SystemTable, lisp_eval(lisp_read_from_buffer("((lambda (x y) x) 10 20)"), global_env));
-            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\n");
-
-            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"eval (car (quote (1 2 3))): ");
-            lisp_print(SystemTable, lisp_eval(lisp_read_from_buffer("(car (quote (1 2 3)))"), global_env));
-            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\n");
-
-            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"eval (cdr (quote (1 2 3))): ");
-            lisp_print(SystemTable, lisp_eval(lisp_read_from_buffer("(cdr (quote (1 2 3)))"), global_env));
-            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\n");
-
-            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"eval (cons 1 2): ");
-            lisp_print(SystemTable, lisp_eval(lisp_read_from_buffer("(cons 1 2)"), global_env));
-            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\n");
-
-            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"eval (eq 1 1): ");
-            lisp_print(SystemTable, lisp_eval(lisp_read_from_buffer("(eq 1 1)"), global_env));
-            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\n");
-
-            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"eval (eq 1 2): ");
-            lisp_print(SystemTable, lisp_eval(lisp_read_from_buffer("(eq 1 2)"), global_env));
-            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\n");
-
-            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"eval (atom 1): ");
-            lisp_print(SystemTable, lisp_eval(lisp_read_from_buffer("(atom 1)"), global_env));
-            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\n");
-
-            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"eval (atom (quote (1 2))): ");
-            lisp_print(SystemTable, lisp_eval(lisp_read_from_buffer("(atom (quote (1 2)))"), global_env));
-            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\n");
-
-            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"eval (+ 1 2 3): ");
-            lisp_print(SystemTable, lisp_eval(lisp_read_from_buffer("(+ 1 2 3)"), global_env));
-            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\n");
-
-            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"eval (- 10 3 2): ");
-            lisp_print(SystemTable, lisp_eval(lisp_read_from_buffer("(- 10 3 2)"), global_env));
-            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\n");
-
-            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"eval (- 5): ");
-            lisp_print(SystemTable, lisp_eval(lisp_read_from_buffer("(- 5)"), global_env));
-            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\n");
+            for (;;) {
+                SystemTable->ConOut->OutputString(SystemTable->ConOut, L"> ");
+                lisp_read_line(SystemTable);
+                if (input_length == 0) {
+                    continue;
+                }
+                LispObject expr = lisp_read_from_buffer(input_buffer);
+                LispObject result = lisp_eval(expr, global_env);
+                lisp_print(SystemTable, result);
+                SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\n");
+            }
         } else {
             CHAR16 hex_status[20];
             CHAR16 hex_needed[20];

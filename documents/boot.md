@@ -29,11 +29,11 @@ Lisp（リーダー・評価器・プリンターを持ち、対話的にS式を
 | 8 | リーダー（S式パーサー） | ✅ 完了 | `lisp_read_from_buffer(str)`が文字列の先頭から1つのS式を読み取り`LispObject`を返す。`lisp_read`と`lisp_read_list`が相互再帰で括弧を処理し、括弧以外は`lisp_token_is_fixnum`/`lisp_token_to_fixnum`で整数リテラルかどうかを判定して`fixnum`または`lisp_intern`によるシンボルにする。空白（スペース・タブ・CR・LF）をトークン区切りとし、ネストした括弧・先頭`-`付きの負数をサポート。不正な入力（閉じ括弧の不足・単独の`)`など）は`lisp_panic`で停止する。動作確認はマイルストーン7のプリンターで結果を出力して目視確認した |
 | 9 | 最小評価器（eval/apply） | ✅ 完了 | `lisp_eval(expr, env)`が`fixnum`/`nil`/`t`を自己評価し、シンボルは環境から変数として検索する。`quote`/`if`/`lambda`を特殊形式として（起動時にintern済みの`lisp_sym_quote`/`lisp_sym_if`/`lisp_sym_lambda`との`eq`比較で）判定し、それ以外のconsは関数呼び出しとして演算子を評価した上で`lisp_apply`する。関数値は新設の第4タグ`LISP_TAG_CLOSURE`（`LispClosure{params, body, env}`）で表現し、`lambda`は生成時の環境を閉じ込めたクロージャを返す（レキシカルスコープ、本文は単一式のみサポート）。環境は新しい構造体を増やさず既存のconsで作る連想リスト（`(symbol . value)`のリスト、`lisp_env_extend`/`lisp_env_lookup`/`lisp_env_bind_params`）として表現した。未束縛変数・関数でないものへの適用・引数個数不一致は`lisp_panic`で停止する。実装中に、マイルストーン8のリーダーが`nil`トークンを（`LISP_NIL`の代わりに）新規のシンボルとしてinternしてしまうバグを発見し修正した（プリンターでは両者が同じ`"nil"`という文字列で表示されるため見た目上区別できず、evalが`nil`をポインタ等価で真偽判定するようになって初めて表面化した） |
 | 10 | 組み込みプリミティブ | ✅ 完了 | `car`/`cdr`/`cons`/`eq`/`atom`/`+`/`-`の7つをCで実装。マイルストーン9終了時点でタグ付きポインタの下位2bitは`cons`/`fixnum`/`symbol`/`closure`の4値すべてを使い切っていたため、新しいタグは増やさず`LispClosure`に4番目のフィールド`builtin`（Cの関数ポインタ、`typedef LispObject (*LispBuiltinFn)(LispObject args);`）を追加した。`lambda`由来の通常クロージャは`builtin == NULL`、組み込み関数は`params`/`body`/`env`を使わず`builtin`にC実装関数を設定したもの（`lisp_make_builtin`で生成）とし、両方とも同じ`LISP_TAG_CLOSURE`・同じ`lisp_apply`経路に乗る。`lisp_apply`は`closure->builtin != NULL`なら評価済み引数リストを渡してC関数を直接呼ぶ分岐を追加した。`+`/`-`は複数引数対応（`+`は0個以上の合計、`-`は1個なら符号反転・2個以上なら左から順に減算）。`lisp_builtins_init()`が7つのプリミティブをinternしグローバル環境に束縛して返し、`EfiMain`はこれを`global_env`として使う |
-| 11 | REPL（最小Lisp起動） | 未着手 | 「入力読み取り→リーダー→eval→プリンター→次の入力待ち」のループを`EfiMain`から起動し、キーボードから対話的にS式を評価できる状態にする。ここに到達した時点を「最小のLispが動く」とみなす |
+| 11 | REPL（最小Lisp起動） | ✅ 完了 | `EfiMain`内で`lisp_symbols_init()`＋`lisp_builtins_init()`で`global_env`を作った後、マイルストーン3〜10で積み重ねていた動作確認用デモコード（`lisp_cons`テスト・シンボルintern確認・`lisp_read_line`のエコーテスト・`lisp_print`/`lisp_read_from_buffer`/`lisp_eval`の固定文字列テスト）はすべて削除し、`> `プロンプト表示→`lisp_read_line`→（空行なら`continue`で再プロンプト）→`lisp_read_from_buffer`→`lisp_eval`→`lisp_print`という`for(;;)`ループに置き換えた。`global_env`はループの外で一度だけ作り各反復で使い続ける。空行（Enterのみ）は`lisp_eval`を呼ばずに再度プロンプトへ戻り、Lisp全体は停止しない。それ以外のエラー（未束縛変数・構文エラー・型エラーなど）は既存の`lisp_panic`パターンに従い停止し、再起動が必要（巻き戻し・再開機構は本マイルストーンの範囲外）。起動時の診断メッセージ（Hello World・メモリマップ取得・ヒープアドレス／サイズ表示・`lisp_heap_init`呼び出し）はそのまま残した。ここに到達したことで「最小のLispが動く」状態となり、ロードマップの全11マイルストーンが完了した |
 
 ## 各マイルストーンの参考実装位置
 
-- マイルストーン1〜10は`src/main.c`内に実装済み。
+- マイルストーン1〜11は`src/main.c`内に実装済み。
   - Hello World・画面クリア: `EfiMain`冒頭
   - メモリマップ取得・最大空き領域探索: `EfiMain`内、`GetMemoryMap`呼び出しから探索ループまで
   - Lispオブジェクトシステム: `// --- Lisp Object System ---`セクション（`LispObject`/`LispCons`/`LispClosure`（`builtin`フィールド含む）/`LispBuiltinFn`/`lisp_make_fixnum`/`lisp_is_cons`/`lisp_is_closure`/`lisp_heap_init`/`alloc_cons`/`lisp_make_closure`/`lisp_make_builtin`など）
@@ -44,7 +44,8 @@ Lisp（リーダー・評価器・プリンターを持ち、対話的にS式を
   - リーダー: `// --- リーダー (milestone 8) ---`セクション（`lisp_read`/`lisp_read_list`/`lisp_token_is_fixnum`/`lisp_token_to_fixnum`/`lisp_read_from_buffer`）
   - 評価器: `// --- 評価器 (milestone 9) ---`セクション（`lisp_env_extend`/`lisp_env_lookup`/`lisp_env_bind_params`/`lisp_eval`/`lisp_eval_list`/`lisp_apply`）
   - 組み込みプリミティブ: `// --- 組み込みプリミティブ (milestone 10) ---`セクション（`lisp_builtin_car`/`lisp_builtin_cdr`/`lisp_builtin_cons`/`lisp_builtin_eq`/`lisp_builtin_atom`/`lisp_builtin_add`/`lisp_builtin_sub`/`lisp_builtins_init`）
-- マイルストーン11以降は、既存の単一ファイル構成（`src/main.c`にすべて追記し、`Makefile`はビルド対象を増やさない）を維持しつつ実装していく想定。ファイルを分割する場合はその時点で`Makefile`の`SRC`定義も見直す。
+  - REPLループ: `EfiMain`内、`lisp_heap_init`呼び出し直後（`lisp_symbols_init()`/`global_env = lisp_builtins_init()`の後）の`for (;;) { ... }`
+- 全11マイルストーンが完了し、ロードマップ上の残タスクはない。今後新たな機能を追加する場合は、既存の単一ファイル構成（`src/main.c`にすべて追記し、`Makefile`はビルド対象を増やさない）を維持しつつ実装していく想定。ファイルを分割する場合はその時点で`Makefile`の`SRC`定義も見直す。
 
 ## 検証方針
 
