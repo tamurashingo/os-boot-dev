@@ -32,6 +32,8 @@ typedef struct {
     LispObject env;    // 生成時の環境（レキシカルスコープ用、builtinの場合は未使用）
     LispBuiltinFn builtin; // NULLならlambda由来、非NULLならC実装の組み込み関数
     int is_macro; // 真ならdefmacro由来のマクロ（呼び出し時に引数を評価しない）
+    char *str_data; // NULLなら文字列ではない。非NULLなら文字列データ（0終端）へのポインタ
+    UINTN str_len;  // str_dataが指す文字列の長さ（終端の'\0'を含まない）
 } LispClosure;
 
 static inline LispObject lisp_make_fixnum(long long value) {
@@ -68,6 +70,12 @@ static inline LispSymbol *lisp_symbol_cell(LispObject obj) {
 
 static inline LispClosure *lisp_closure_cell(LispObject obj) {
     return (LispClosure *)(obj & ~LISP_TAG_MASK);
+}
+
+// 文字列はLISP_TAG_CLOSUREを共有し、str_dataフィールドの有無で判別する
+// （マイルストーン10のbuiltinフィールドと同じescape hatch。新しい2bitタグは増やさない）
+static inline int lisp_is_string(LispObject obj) {
+    return lisp_is_closure(obj) && lisp_closure_cell(obj)->str_data != 0;
 }
 
 static UINT64 lisp_heap_ptr;
@@ -150,6 +158,8 @@ LispObject lisp_make_closure(LispObject params, LispObject body, LispObject env)
     closure->env = env;
     closure->builtin = 0;
     closure->is_macro = 0;
+    closure->str_data = 0;
+    closure->str_len = 0;
     return ((LispObject)closure) | LISP_TAG_CLOSURE;
 }
 
@@ -160,6 +170,8 @@ LispObject lisp_make_builtin(LispBuiltinFn fn) {
     closure->env = LISP_NIL;
     closure->builtin = fn;
     closure->is_macro = 0;
+    closure->str_data = 0;
+    closure->str_len = 0;
     return ((LispObject)closure) | LISP_TAG_CLOSURE;
 }
 
@@ -172,6 +184,29 @@ LispObject lisp_make_macro(LispObject params, LispObject body, LispObject env) {
     closure->env = env;
     closure->builtin = 0;
     closure->is_macro = 1;
+    closure->str_data = 0;
+    closure->str_len = 0;
+    return ((LispObject)closure) | LISP_TAG_CLOSURE;
+}
+
+// 文字列オブジェクトを作る（milestone 15）。charsのlen文字分をヒープに
+// コピーして0終端したバッファをstr_dataに持たせる（呼び出し元のバッファを
+// 保持し続けるわけではないので、charsはこの呼び出し中だけ有効なスタック上の
+// 一時バッファ等で構わない）
+LispObject lisp_make_string(const char *chars, UINTN len) {
+    LispClosure *closure = (LispClosure *)lisp_alloc(sizeof(LispClosure));
+    closure->params = LISP_NIL;
+    closure->body = LISP_NIL;
+    closure->env = LISP_NIL;
+    closure->builtin = 0;
+    closure->is_macro = 0;
+    char *buf = (char *)lisp_alloc(len + 1);
+    for (UINTN i = 0; i < len; i++) {
+        buf[i] = chars[i];
+    }
+    buf[len] = '\0';
+    closure->str_data = buf;
+    closure->str_len = len;
     return ((LispObject)closure) | LISP_TAG_CLOSURE;
 }
 
@@ -369,7 +404,11 @@ void lisp_print(EFI_SYSTEM_TABLE *SystemTable, LispObject obj) {
     }
 
     if (lisp_is_closure(obj)) {
-        if (lisp_closure_cell(obj)->builtin != 0) {
+        if (lisp_closure_cell(obj)->str_data != 0) {
+            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\"");
+            lisp_print_ascii(SystemTable, lisp_closure_cell(obj)->str_data);
+            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\"");
+        } else if (lisp_closure_cell(obj)->builtin != 0) {
             SystemTable->ConOut->OutputString(SystemTable->ConOut, L"#<builtin>");
         } else if (lisp_closure_cell(obj)->is_macro) {
             SystemTable->ConOut->OutputString(SystemTable->ConOut, L"#<macro>");
@@ -391,8 +430,10 @@ static const char *lisp_reader_pos;
 
 static inline int lisp_reader_is_delim(char c) {
     return c == '\0' || c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == '(' || c == ')' ||
-           c == '\'' || c == '`' || c == ',';
+           c == '\'' || c == '`' || c == ',' || c == '"';
 }
+
+#define LISP_STRING_READ_MAX 128
 
 static void lisp_reader_skip_ws(void) {
     while (*lisp_reader_pos == ' ' || *lisp_reader_pos == '\t' ||
@@ -478,6 +519,23 @@ LispObject lisp_read(void) {
             return lisp_cons(lisp_sym_unquote_splicing, lisp_cons(lisp_read(), LISP_NIL));
         }
         return lisp_cons(lisp_sym_unquote, lisp_cons(lisp_read(), LISP_NIL));
+    }
+    if (c == '"') {
+        lisp_reader_pos++;
+        char str_buf[LISP_STRING_READ_MAX];
+        UINTN str_len = 0;
+        while (*lisp_reader_pos != '"') {
+            if (*lisp_reader_pos == '\0') {
+                lisp_panic(L"unterminated string literal");
+            }
+            if (str_len < LISP_STRING_READ_MAX - 1) {
+                str_buf[str_len] = *lisp_reader_pos;
+                str_len++;
+            }
+            lisp_reader_pos++;
+        }
+        lisp_reader_pos++; // 閉じの"を読み飛ばす
+        return lisp_make_string(str_buf, str_len);
     }
 
     char token[LISP_TOKEN_MAX];
