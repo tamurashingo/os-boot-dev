@@ -123,10 +123,11 @@ void UINT64ToHexStr(UINT64 val, CHAR16 *str) {
 // --- Lisp Object System ---
 typedef UINT64 LispObject;
 
-#define LISP_TAG_MASK   0x3ULL
-#define LISP_TAG_CONS   0x0ULL   // ポインタ（cons cellへの16byte境界アドレス、下位2bit=00）
-#define LISP_TAG_FIXNUM 0x1ULL   // 整数（上位62bitに値、下位2bit=01）
-#define LISP_TAG_SYMBOL 0x2ULL   // ポインタ（LispSymbolへの16byte境界アドレス、下位2bit=10）
+#define LISP_TAG_MASK    0x3ULL
+#define LISP_TAG_CONS    0x0ULL   // ポインタ（cons cellへの16byte境界アドレス、下位2bit=00）
+#define LISP_TAG_FIXNUM  0x1ULL   // 整数（上位62bitに値、下位2bit=01）
+#define LISP_TAG_SYMBOL  0x2ULL   // ポインタ（LispSymbolへの16byte境界アドレス、下位2bit=10）
+#define LISP_TAG_CLOSURE 0x3ULL   // ポインタ（LispClosureへの16byte境界アドレス、下位2bit=11）
 
 // 予約アドレス0。ヒープはPhysicalStart==0を使わないため衝突しない。
 // nilはシンボルとしてintern済みテーブルに載せず、この専用の即値のまま扱う
@@ -143,6 +144,15 @@ typedef struct {
 typedef struct {
     char name[LISP_SYMBOL_NAME_MAX];
 } LispSymbol;
+
+typedef LispObject (*LispBuiltinFn)(LispObject args);
+
+typedef struct {
+    LispObject params; // 仮引数シンボルのリスト（builtinの場合は未使用）
+    LispObject body;   // 本文（単一式、builtinの場合は未使用）
+    LispObject env;    // 生成時の環境（レキシカルスコープ用、builtinの場合は未使用）
+    LispBuiltinFn builtin; // NULLならlambda由来、非NULLならC実装の組み込み関数
+} LispClosure;
 
 static inline LispObject lisp_make_fixnum(long long value) {
     return ((UINT64)value << 2) | LISP_TAG_FIXNUM;
@@ -164,12 +174,20 @@ static inline int lisp_is_symbol(LispObject obj) {
     return (obj & LISP_TAG_MASK) == LISP_TAG_SYMBOL;
 }
 
+static inline int lisp_is_closure(LispObject obj) {
+    return (obj & LISP_TAG_MASK) == LISP_TAG_CLOSURE;
+}
+
 static inline LispCons *lisp_cons_cell(LispObject obj) {
     return (LispCons *)(obj & ~LISP_TAG_MASK);
 }
 
 static inline LispSymbol *lisp_symbol_cell(LispObject obj) {
     return (LispSymbol *)(obj & ~LISP_TAG_MASK);
+}
+
+static inline LispClosure *lisp_closure_cell(LispObject obj) {
+    return (LispClosure *)(obj & ~LISP_TAG_MASK);
 }
 
 static UINT64 lisp_heap_ptr;
@@ -245,6 +263,24 @@ void lisp_set_cdr(LispObject obj, LispObject value) {
     lisp_cons_cell(obj)->cdr = value;
 }
 
+LispObject lisp_make_closure(LispObject params, LispObject body, LispObject env) {
+    LispClosure *closure = (LispClosure *)lisp_alloc(sizeof(LispClosure));
+    closure->params = params;
+    closure->body = body;
+    closure->env = env;
+    closure->builtin = 0;
+    return ((LispObject)closure) | LISP_TAG_CLOSURE;
+}
+
+LispObject lisp_make_builtin(LispBuiltinFn fn) {
+    LispClosure *closure = (LispClosure *)lisp_alloc(sizeof(LispClosure));
+    closure->params = LISP_NIL;
+    closure->body = LISP_NIL;
+    closure->env = LISP_NIL;
+    closure->builtin = fn;
+    return ((LispObject)closure) | LISP_TAG_CLOSURE;
+}
+
 #define LISP_MAX_SYMBOLS 256
 static LispObject lisp_symbol_table[LISP_MAX_SYMBOLS];
 static UINTN lisp_symbol_count = 0;
@@ -288,11 +324,17 @@ LispObject lisp_intern(const char *name) {
     return obj;
 }
 
-// よく使う特別なシンボル（nilはLISP_NILの即値のまま。tのみここでintern）
+// よく使う特別なシンボル（nilはLISP_NILの即値のまま。それ以外はここでintern）
 static LispObject lisp_sym_t;
+static LispObject lisp_sym_quote;
+static LispObject lisp_sym_if;
+static LispObject lisp_sym_lambda;
 
 void lisp_symbols_init(void) {
     lisp_sym_t = lisp_intern("t");
+    lisp_sym_quote = lisp_intern("quote");
+    lisp_sym_if = lisp_intern("if");
+    lisp_sym_lambda = lisp_intern("lambda");
 }
 
 
@@ -423,6 +465,15 @@ void lisp_print(EFI_SYSTEM_TABLE *SystemTable, LispObject obj) {
         return;
     }
 
+    if (lisp_is_closure(obj)) {
+        if (lisp_closure_cell(obj)->builtin != 0) {
+            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"#<builtin>");
+        } else {
+            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"#<closure>");
+        }
+        return;
+    }
+
     lisp_panic(L"unknown lisp object type in printer");
 }
 
@@ -519,6 +570,9 @@ LispObject lisp_read(void) {
     if (lisp_token_is_fixnum(token)) {
         return lisp_make_fixnum(lisp_token_to_fixnum(token));
     }
+    if (lisp_streq(token, "nil")) {
+        return LISP_NIL; // nilはintern済みシンボルではなく即値LISP_NILそのものを返す
+    }
     return lisp_intern(token);
 }
 
@@ -526,6 +580,196 @@ LispObject lisp_read(void) {
 LispObject lisp_read_from_buffer(const char *str) {
     lisp_reader_pos = str;
     return lisp_read();
+}
+
+
+// --- 評価器 (milestone 9) ---
+
+// symをvalueに束縛したペアをenvの先頭に追加した新しい環境を返す
+LispObject lisp_env_extend(LispObject env, LispObject sym, LispObject value) {
+    return lisp_cons(lisp_cons(sym, value), env);
+}
+
+// alist envをsymで線形探索し、見つかった値を返す。無ければlisp_panic
+LispObject lisp_env_lookup(LispObject env, LispObject sym) {
+    LispObject cur = env;
+    while (lisp_is_cons(cur)) {
+        LispObject pair = lisp_car(cur);
+        if (lisp_car(pair) == sym) {
+            return lisp_cdr(pair);
+        }
+        cur = lisp_cdr(cur);
+    }
+    lisp_panic(L"unbound variable");
+}
+
+// paramsとargsを1対1で対応付けてenvに順に束縛していく（個数不一致はpanic）
+LispObject lisp_env_bind_params(LispObject params, LispObject args, LispObject env) {
+    while (lisp_is_cons(params)) {
+        if (!lisp_is_cons(args)) {
+            lisp_panic(L"too few arguments");
+        }
+        env = lisp_env_extend(env, lisp_car(params), lisp_car(args));
+        params = lisp_cdr(params);
+        args = lisp_cdr(args);
+    }
+    if (args != LISP_NIL) {
+        lisp_panic(L"too many arguments");
+    }
+    return env;
+}
+
+LispObject lisp_eval(LispObject expr, LispObject env);
+
+// リストの各要素をenvで評価し、結果のリストを返す（関数呼び出しの引数評価に使う）
+LispObject lisp_eval_list(LispObject list, LispObject env) {
+    if (!lisp_is_cons(list)) {
+        return LISP_NIL;
+    }
+    LispObject head = lisp_eval(lisp_car(list), env);
+    LispObject tail = lisp_eval_list(lisp_cdr(list), env);
+    return lisp_cons(head, tail);
+}
+
+// クロージャfnをargs(評価済みリスト)に適用する。builtinならCの実装関数を直接呼ぶ
+LispObject lisp_apply(LispObject fn, LispObject args) {
+    if (!lisp_is_closure(fn)) {
+        lisp_panic(L"attempt to call a non-function");
+    }
+    LispClosure *closure = lisp_closure_cell(fn);
+    if (closure->builtin != 0) {
+        return closure->builtin(args);
+    }
+    LispObject call_env = lisp_env_bind_params(closure->params, args, closure->env);
+    return lisp_eval(closure->body, call_env);
+}
+
+// exprをenv上で評価する。fixnum/nil/tは自己評価、symbolは変数参照、
+// consはquote/if/lambdaの特殊形式または関数呼び出しとして扱う
+LispObject lisp_eval(LispObject expr, LispObject env) {
+    if (lisp_is_fixnum(expr) || expr == LISP_NIL) {
+        return expr;
+    }
+
+    if (lisp_is_symbol(expr)) {
+        if (expr == lisp_sym_t) {
+            return expr;
+        }
+        return lisp_env_lookup(env, expr);
+    }
+
+    if (lisp_is_cons(expr)) {
+        LispObject op = lisp_car(expr);
+
+        if (op == lisp_sym_quote) {
+            return lisp_car(lisp_cdr(expr));
+        }
+
+        if (op == lisp_sym_if) {
+            LispObject test = lisp_eval(lisp_car(lisp_cdr(expr)), env);
+            LispObject rest = lisp_cdr(lisp_cdr(expr));
+            if (test != LISP_NIL) {
+                return lisp_eval(lisp_car(rest), env);
+            }
+            LispObject else_rest = lisp_cdr(rest);
+            if (else_rest == LISP_NIL) {
+                return LISP_NIL;
+            }
+            return lisp_eval(lisp_car(else_rest), env);
+        }
+
+        if (op == lisp_sym_lambda) {
+            LispObject params = lisp_car(lisp_cdr(expr));
+            LispObject body = lisp_car(lisp_cdr(lisp_cdr(expr)));
+            return lisp_make_closure(params, body, env);
+        }
+
+        LispObject fn = lisp_eval(op, env);
+        LispObject args = lisp_eval_list(lisp_cdr(expr), env);
+        return lisp_apply(fn, args);
+    }
+
+    if (lisp_is_closure(expr)) {
+        return expr;
+    }
+
+    lisp_panic(L"cannot evaluate this object");
+}
+
+
+// --- 組み込みプリミティブ (milestone 10) ---
+
+LispObject lisp_builtin_car(LispObject args) {
+    return lisp_car(lisp_car(args));
+}
+
+LispObject lisp_builtin_cdr(LispObject args) {
+    return lisp_cdr(lisp_car(args));
+}
+
+LispObject lisp_builtin_cons(LispObject args) {
+    return lisp_cons(lisp_car(args), lisp_car(lisp_cdr(args)));
+}
+
+LispObject lisp_builtin_eq(LispObject args) {
+    LispObject a = lisp_car(args);
+    LispObject b = lisp_car(lisp_cdr(args));
+    return (a == b) ? lisp_sym_t : LISP_NIL;
+}
+
+LispObject lisp_builtin_atom(LispObject args) {
+    return lisp_is_cons(lisp_car(args)) ? LISP_NIL : lisp_sym_t;
+}
+
+LispObject lisp_builtin_add(LispObject args) {
+    long long sum = 0;
+    LispObject cur = args;
+    while (lisp_is_cons(cur)) {
+        LispObject v = lisp_car(cur);
+        if (!lisp_is_fixnum(v)) {
+            lisp_panic(L"+ expects fixnum arguments");
+        }
+        sum += lisp_fixnum_value(v);
+        cur = lisp_cdr(cur);
+    }
+    return lisp_make_fixnum(sum);
+}
+
+LispObject lisp_builtin_sub(LispObject args) {
+    if (!lisp_is_cons(args)) {
+        lisp_panic(L"- requires at least 1 argument");
+    }
+    LispObject first = lisp_car(args);
+    if (!lisp_is_fixnum(first)) {
+        lisp_panic(L"- expects fixnum arguments");
+    }
+    long long result = lisp_fixnum_value(first);
+    LispObject cur = lisp_cdr(args);
+    if (!lisp_is_cons(cur)) {
+        return lisp_make_fixnum(-result); // 単項: 符号反転
+    }
+    while (lisp_is_cons(cur)) {
+        LispObject v = lisp_car(cur);
+        if (!lisp_is_fixnum(v)) {
+            lisp_panic(L"- expects fixnum arguments");
+        }
+        result -= lisp_fixnum_value(v);
+        cur = lisp_cdr(cur);
+    }
+    return lisp_make_fixnum(result);
+}
+
+// car/cdr/cons/eq/atom/+/- をグローバル環境に束縛して返す
+LispObject lisp_builtins_init(void) {
+    LispObject env = LISP_NIL;
+    env = lisp_env_extend(env, lisp_intern("car"), lisp_make_builtin(lisp_builtin_car));
+    env = lisp_env_extend(env, lisp_intern("cdr"), lisp_make_builtin(lisp_builtin_cdr));
+    env = lisp_env_extend(env, lisp_intern("cons"), lisp_make_builtin(lisp_builtin_cons));
+    env = lisp_env_extend(env, lisp_intern("eq"), lisp_make_builtin(lisp_builtin_eq));
+    env = lisp_env_extend(env, lisp_intern("atom"), lisp_make_builtin(lisp_builtin_atom));
+    env = lisp_env_extend(env, lisp_intern("+"), lisp_make_builtin(lisp_builtin_add));
+    env = lisp_env_extend(env, lisp_intern("-"), lisp_make_builtin(lisp_builtin_sub));
+    return env;
 }
 
 
@@ -684,6 +928,68 @@ EFI_STATUS EFIAPI EfiMain(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable)
             LispObject nested = lisp_read_from_buffer("(a (b c) -3 d)");
             SystemTable->ConOut->OutputString(SystemTable->ConOut, L"Read \"(a (b c) -3 d)\" and print back: ");
             lisp_print(SystemTable, nested);
+            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\n");
+
+            LispObject global_env = lisp_builtins_init();
+
+            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"eval 42: ");
+            lisp_print(SystemTable, lisp_eval(lisp_read_from_buffer("42"), global_env));
+            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\n");
+
+            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"eval (quote (1 2 3)): ");
+            lisp_print(SystemTable, lisp_eval(lisp_read_from_buffer("(quote (1 2 3))"), global_env));
+            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\n");
+
+            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"eval (if nil 1 2): ");
+            lisp_print(SystemTable, lisp_eval(lisp_read_from_buffer("(if nil 1 2)"), global_env));
+            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\n");
+
+            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"eval (if t 1 2): ");
+            lisp_print(SystemTable, lisp_eval(lisp_read_from_buffer("(if t 1 2)"), global_env));
+            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\n");
+
+            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"eval ((lambda (x y) x) 10 20): ");
+            lisp_print(SystemTable, lisp_eval(lisp_read_from_buffer("((lambda (x y) x) 10 20)"), global_env));
+            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\n");
+
+            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"eval (car (quote (1 2 3))): ");
+            lisp_print(SystemTable, lisp_eval(lisp_read_from_buffer("(car (quote (1 2 3)))"), global_env));
+            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\n");
+
+            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"eval (cdr (quote (1 2 3))): ");
+            lisp_print(SystemTable, lisp_eval(lisp_read_from_buffer("(cdr (quote (1 2 3)))"), global_env));
+            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\n");
+
+            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"eval (cons 1 2): ");
+            lisp_print(SystemTable, lisp_eval(lisp_read_from_buffer("(cons 1 2)"), global_env));
+            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\n");
+
+            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"eval (eq 1 1): ");
+            lisp_print(SystemTable, lisp_eval(lisp_read_from_buffer("(eq 1 1)"), global_env));
+            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\n");
+
+            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"eval (eq 1 2): ");
+            lisp_print(SystemTable, lisp_eval(lisp_read_from_buffer("(eq 1 2)"), global_env));
+            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\n");
+
+            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"eval (atom 1): ");
+            lisp_print(SystemTable, lisp_eval(lisp_read_from_buffer("(atom 1)"), global_env));
+            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\n");
+
+            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"eval (atom (quote (1 2))): ");
+            lisp_print(SystemTable, lisp_eval(lisp_read_from_buffer("(atom (quote (1 2)))"), global_env));
+            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\n");
+
+            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"eval (+ 1 2 3): ");
+            lisp_print(SystemTable, lisp_eval(lisp_read_from_buffer("(+ 1 2 3)"), global_env));
+            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\n");
+
+            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"eval (- 10 3 2): ");
+            lisp_print(SystemTable, lisp_eval(lisp_read_from_buffer("(- 10 3 2)"), global_env));
+            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\n");
+
+            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"eval (- 5): ");
+            lisp_print(SystemTable, lisp_eval(lisp_read_from_buffer("(- 5)"), global_env));
             SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\n");
         } else {
             CHAR16 hex_status[20];

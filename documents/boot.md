@@ -27,22 +27,24 @@ Lisp（リーダー・評価器・プリンターを持ち、対話的にS式を
 | 6 | 文字列・文字入力 | ✅ 完了 | 既存の`EFI_SIMPLE_TEXT_INPUT_PROTOCOL`（`ReadKeyStroke`）をポーリングし、Enterまでの1行を8bit char（ASCII）の静的バッファ`input_buffer`に格納する`lisp_read_line`を追加。Backspaceは1文字削除し画面表示も`\b \b`で戻す。矢印キーなど`UnicodeChar==0`の制御キーは無視。入力中は打った文字をそのままエコー表示し、`lisp_print_ascii`でASCII文字列をCHAR16に変換してコンソールに再表示できるようにした。エンコーディングはASCIIを採用し、`LispSymbol`の`name`など既存コードと型を揃え、次のリーダー（トークナイザ）がそのまま`char *`として扱えるようにした。まだLispオブジェクトとしての文字列型（新タグ）は導入していない |
 | 7 | プリンター | ✅ 完了 | `lisp_print(SystemTable, obj)`が`LispObject`を人間が読める形式でコンソールに出力する。`fixnum`は`lisp_print_fixnum`（符号付き10進、libcのitoa相当を自前実装）、`symbol`は`lisp_symbol_cell(obj)->name`を`lisp_print_ascii`で表示、`cons`は`car`を順に走査して`(a b c)`形式（末尾が`nil`のとき）または`(a . b)`ドット対形式（末尾がconsでもnilでもない値のとき）で表示、`nil`は`nil`と表示する。想定外のタグは`lisp_panic`で停止する |
 | 8 | リーダー（S式パーサー） | ✅ 完了 | `lisp_read_from_buffer(str)`が文字列の先頭から1つのS式を読み取り`LispObject`を返す。`lisp_read`と`lisp_read_list`が相互再帰で括弧を処理し、括弧以外は`lisp_token_is_fixnum`/`lisp_token_to_fixnum`で整数リテラルかどうかを判定して`fixnum`または`lisp_intern`によるシンボルにする。空白（スペース・タブ・CR・LF）をトークン区切りとし、ネストした括弧・先頭`-`付きの負数をサポート。不正な入力（閉じ括弧の不足・単独の`)`など）は`lisp_panic`で停止する。動作確認はマイルストーン7のプリンターで結果を出力して目視確認した |
-| 9 | 最小評価器（eval/apply） | 未着手 | まず自己評価（数値・`nil`/`t`）と`quote`のみを評価できるようにし、その後`if`、変数束縛（`lambda`/関数呼び出し）を段階的に追加する |
-| 10 | 組み込みプリミティブ | 未着手 | `car`/`cdr`/`cons`/`eq`/`atom`/`+`/`-`など、evalが呼び出す基本関数をCで実装し、シンボルと結び付ける |
+| 9 | 最小評価器（eval/apply） | ✅ 完了 | `lisp_eval(expr, env)`が`fixnum`/`nil`/`t`を自己評価し、シンボルは環境から変数として検索する。`quote`/`if`/`lambda`を特殊形式として（起動時にintern済みの`lisp_sym_quote`/`lisp_sym_if`/`lisp_sym_lambda`との`eq`比較で）判定し、それ以外のconsは関数呼び出しとして演算子を評価した上で`lisp_apply`する。関数値は新設の第4タグ`LISP_TAG_CLOSURE`（`LispClosure{params, body, env}`）で表現し、`lambda`は生成時の環境を閉じ込めたクロージャを返す（レキシカルスコープ、本文は単一式のみサポート）。環境は新しい構造体を増やさず既存のconsで作る連想リスト（`(symbol . value)`のリスト、`lisp_env_extend`/`lisp_env_lookup`/`lisp_env_bind_params`）として表現した。未束縛変数・関数でないものへの適用・引数個数不一致は`lisp_panic`で停止する。実装中に、マイルストーン8のリーダーが`nil`トークンを（`LISP_NIL`の代わりに）新規のシンボルとしてinternしてしまうバグを発見し修正した（プリンターでは両者が同じ`"nil"`という文字列で表示されるため見た目上区別できず、evalが`nil`をポインタ等価で真偽判定するようになって初めて表面化した） |
+| 10 | 組み込みプリミティブ | ✅ 完了 | `car`/`cdr`/`cons`/`eq`/`atom`/`+`/`-`の7つをCで実装。マイルストーン9終了時点でタグ付きポインタの下位2bitは`cons`/`fixnum`/`symbol`/`closure`の4値すべてを使い切っていたため、新しいタグは増やさず`LispClosure`に4番目のフィールド`builtin`（Cの関数ポインタ、`typedef LispObject (*LispBuiltinFn)(LispObject args);`）を追加した。`lambda`由来の通常クロージャは`builtin == NULL`、組み込み関数は`params`/`body`/`env`を使わず`builtin`にC実装関数を設定したもの（`lisp_make_builtin`で生成）とし、両方とも同じ`LISP_TAG_CLOSURE`・同じ`lisp_apply`経路に乗る。`lisp_apply`は`closure->builtin != NULL`なら評価済み引数リストを渡してC関数を直接呼ぶ分岐を追加した。`+`/`-`は複数引数対応（`+`は0個以上の合計、`-`は1個なら符号反転・2個以上なら左から順に減算）。`lisp_builtins_init()`が7つのプリミティブをinternしグローバル環境に束縛して返し、`EfiMain`はこれを`global_env`として使う |
 | 11 | REPL（最小Lisp起動） | 未着手 | 「入力読み取り→リーダー→eval→プリンター→次の入力待ち」のループを`EfiMain`から起動し、キーボードから対話的にS式を評価できる状態にする。ここに到達した時点を「最小のLispが動く」とみなす |
 
 ## 各マイルストーンの参考実装位置
 
-- マイルストーン1〜8は`src/main.c`内に実装済み。
+- マイルストーン1〜10は`src/main.c`内に実装済み。
   - Hello World・画面クリア: `EfiMain`冒頭
   - メモリマップ取得・最大空き領域探索: `EfiMain`内、`GetMemoryMap`呼び出しから探索ループまで
-  - Lispオブジェクトシステム: `// --- Lisp Object System ---`セクション（`LispObject`/`LispCons`/`lisp_make_fixnum`/`lisp_is_cons`/`lisp_heap_init`/`alloc_cons`など）
+  - Lispオブジェクトシステム: `// --- Lisp Object System ---`セクション（`LispObject`/`LispCons`/`LispClosure`（`builtin`フィールド含む）/`LispBuiltinFn`/`lisp_make_fixnum`/`lisp_is_cons`/`lisp_is_closure`/`lisp_heap_init`/`alloc_cons`/`lisp_make_closure`/`lisp_make_builtin`など）
   - cons/car/cdr構築・アクセサ・panic: 同セクション内`lisp_panic`/`lisp_assert_cons`/`lisp_cons`/`lisp_car`/`lisp_cdr`/`lisp_set_car`/`lisp_set_cdr`
-  - シンボル・intern: 同セクション内`LispSymbol`/`lisp_alloc`/`lisp_intern`/`lisp_symbols_init`/`lisp_sym_t`
+  - シンボル・intern: 同セクション内`LispSymbol`/`lisp_alloc`/`lisp_intern`/`lisp_symbols_init`/`lisp_sym_t`/`lisp_sym_quote`/`lisp_sym_if`/`lisp_sym_lambda`
   - 文字列・文字入力: `// --- 文字入力 (milestone 6) ---`セクション（`input_buffer`/`lisp_read_line`/`lisp_print_ascii`）
   - プリンター: `// --- プリンター (milestone 7) ---`セクション（`lisp_print_fixnum`/`lisp_print`）
   - リーダー: `// --- リーダー (milestone 8) ---`セクション（`lisp_read`/`lisp_read_list`/`lisp_token_is_fixnum`/`lisp_token_to_fixnum`/`lisp_read_from_buffer`）
-- マイルストーン9以降は、既存の単一ファイル構成（`src/main.c`にすべて追記し、`Makefile`はビルド対象を増やさない）を維持しつつ実装していく想定。ファイルを分割する場合はその時点で`Makefile`の`SRC`定義も見直す。
+  - 評価器: `// --- 評価器 (milestone 9) ---`セクション（`lisp_env_extend`/`lisp_env_lookup`/`lisp_env_bind_params`/`lisp_eval`/`lisp_eval_list`/`lisp_apply`）
+  - 組み込みプリミティブ: `// --- 組み込みプリミティブ (milestone 10) ---`セクション（`lisp_builtin_car`/`lisp_builtin_cdr`/`lisp_builtin_cons`/`lisp_builtin_eq`/`lisp_builtin_atom`/`lisp_builtin_add`/`lisp_builtin_sub`/`lisp_builtins_init`）
+- マイルストーン11以降は、既存の単一ファイル構成（`src/main.c`にすべて追記し、`Makefile`はビルド対象を増やさない）を維持しつつ実装していく想定。ファイルを分割する場合はその時点で`Makefile`の`SRC`定義も見直す。
 
 ## 検証方針
 
