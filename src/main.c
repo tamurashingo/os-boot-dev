@@ -296,9 +296,67 @@ void lisp_symbols_init(void) {
 }
 
 
+// --- 文字入力 (milestone 6) ---
+#define LISP_INPUT_BUFFER_MAX 256
+static char input_buffer[LISP_INPUT_BUFFER_MAX];
+static UINTN input_length;
+
+// Enterキーまでの1行をキー入力から読み取り、input_bufferにASCII文字列として格納する。
+// Backspaceは1文字削除して画面表示も戻す。UnicodeChar==0の制御キー(矢印キー等)は無視する
+void lisp_read_line(EFI_SYSTEM_TABLE *SystemTable) {
+    input_length = 0;
+
+    for (;;) {
+        EFI_INPUT_KEY key;
+        EFI_STATUS status = SystemTable->ConIn->ReadKeyStroke(SystemTable->ConIn, &key);
+        if (status != 0) {
+            continue; // EFI_NOT_READY: まだキー入力がない
+        }
+
+        if (key.UnicodeChar == L'\r') {
+            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\n");
+            break;
+        }
+
+        if (key.UnicodeChar == 8) { // Backspace
+            if (input_length > 0) {
+                input_length--;
+                SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\b \b");
+            }
+            continue;
+        }
+
+        if (key.UnicodeChar == 0) {
+            continue;
+        }
+
+        if (input_length < LISP_INPUT_BUFFER_MAX - 1) {
+            input_buffer[input_length] = (char)key.UnicodeChar;
+            input_length++;
+
+            CHAR16 echo[2] = { key.UnicodeChar, 0 };
+            SystemTable->ConOut->OutputString(SystemTable->ConOut, echo);
+        }
+    }
+
+    input_buffer[input_length] = '\0';
+}
+
+// ASCII文字列(8bit char)をCHAR16に変換してコンソールへ出力する
+void lisp_print_ascii(EFI_SYSTEM_TABLE *SystemTable, const char *str) {
+    CHAR16 buf[LISP_INPUT_BUFFER_MAX];
+    UINTN i = 0;
+    while (str[i] != '\0' && i < LISP_INPUT_BUFFER_MAX - 1) {
+        buf[i] = (CHAR16)str[i];
+        i++;
+    }
+    buf[i] = 0;
+    SystemTable->ConOut->OutputString(SystemTable->ConOut, buf);
+}
+
+
 // --- エントリポイント ---
 EFI_STATUS EFIAPI EfiMain(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
-    EFI_INPUT_KEY Key;
     g_system_table = SystemTable;
 
     // clear screen
@@ -411,6 +469,12 @@ EFI_STATUS EFIAPI EfiMain(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable)
 
             SystemTable->ConOut->OutputString(SystemTable->ConOut, L"lisp_sym_t is_symbol: ");
             SystemTable->ConOut->OutputString(SystemTable->ConOut, hex_is_sym);
+            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\n");
+
+            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"Type a line and press Enter: ");
+            lisp_read_line(SystemTable);
+            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"You typed: ");
+            lisp_print_ascii(SystemTable, input_buffer);
             SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\n");
         } else {
             CHAR16 hex_status[20];
