@@ -585,6 +585,13 @@ LispObject lisp_read_from_buffer(const char *str) {
 
 // --- 評価器 (milestone 9) ---
 
+// トップレベルの永続グローバル環境 (milestone 12)。EfiMainのREPLループが起動時に
+// lisp_builtins_init()の結果で初期化する。EfiMainのローカル変数ではなくファイルスコープの
+// static変数にすることで、defun/loadなど今後の特殊形式がここを直接書き換えて新しい束縛を
+// 追加すれば、その後のすべてのREPL入力から見えるようになる（引数↔値のバインディング自体は
+// マイルストーン9のlisp_env_bind_paramsのままで変更しない）
+static LispObject global_env = LISP_NIL;
+
 // symをvalueに束縛したペアをenvの先頭に追加した新しい環境を返す
 LispObject lisp_env_extend(LispObject env, LispObject sym, LispObject value) {
     return lisp_cons(lisp_cons(sym, value), env);
@@ -850,7 +857,7 @@ EFI_STATUS EFIAPI EfiMain(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable)
             lisp_heap_init(heap_start, max_free_size);
 
             lisp_symbols_init();
-            LispObject global_env = lisp_builtins_init();
+            global_env = lisp_builtins_init();
 
             SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\nMinimal Lisp REPL. Type an expression and press Enter.\r\n");
 
