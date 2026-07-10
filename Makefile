@@ -25,6 +25,7 @@ image: $(IMAGE_STAMP)
 build: setup $(SRC) $(IMAGE_STAMP)
 	docker run --rm -v "$(PWD)":/workspace uefi-builder \
 		x86_64-w64-mingw32-gcc -nostdlib -mno-red-zone -shared \
+		-mno-stack-arg-probe \
 		-Wl,--subsystem,10 \
 		-Wl,--entry,EfiMain \
 		-o $(TARGET) $(SRC)
