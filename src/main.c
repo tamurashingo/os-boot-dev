@@ -427,6 +427,108 @@ void lisp_print(EFI_SYSTEM_TABLE *SystemTable, LispObject obj) {
 }
 
 
+// --- リーダー (milestone 8) ---
+#define LISP_TOKEN_MAX 64
+
+// 読み取り中の入力文字列上の現在位置。lisp_read_from_bufferで先頭に設定される
+static const char *lisp_reader_pos;
+
+static inline int lisp_reader_is_delim(char c) {
+    return c == '\0' || c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == '(' || c == ')';
+}
+
+static void lisp_reader_skip_ws(void) {
+    while (*lisp_reader_pos == ' ' || *lisp_reader_pos == '\t' ||
+           *lisp_reader_pos == '\r' || *lisp_reader_pos == '\n') {
+        lisp_reader_pos++;
+    }
+}
+
+// トークンが（先頭の"-"を許した）10進整数リテラルかどうかを判定する。"-"単体は記号として扱う
+static int lisp_token_is_fixnum(const char *token) {
+    UINTN i = (token[0] == '-') ? 1 : 0;
+    if (token[i] == '\0') {
+        return 0;
+    }
+    for (; token[i] != '\0'; i++) {
+        if (token[i] < '0' || token[i] > '9') {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static long long lisp_token_to_fixnum(const char *token) {
+    int negative = token[0] == '-';
+    UINTN i = negative ? 1 : 0;
+    long long value = 0;
+    for (; token[i] != '\0'; i++) {
+        value = value * 10 + (token[i] - '0');
+    }
+    return negative ? -value : value;
+}
+
+LispObject lisp_read(void);
+
+// "("の直後から呼ばれ、")"までの要素をconsのリストとして読み取る
+LispObject lisp_read_list(void) {
+    lisp_reader_skip_ws();
+
+    if (*lisp_reader_pos == ')') {
+        lisp_reader_pos++;
+        return LISP_NIL;
+    }
+
+    if (*lisp_reader_pos == '\0') {
+        lisp_panic(L"unexpected end of input in list");
+    }
+
+    LispObject head = lisp_read();
+    LispObject tail = lisp_read_list();
+    return lisp_cons(head, tail);
+}
+
+// 現在位置から1つのS式を読み取り、LispObjectを返す。
+// "("なら再帰的にリストを読み取り、それ以外は整数リテラルまたはシンボルのトークンとして読む
+LispObject lisp_read(void) {
+    lisp_reader_skip_ws();
+
+    char c = *lisp_reader_pos;
+    if (c == '\0') {
+        lisp_panic(L"unexpected end of input");
+    }
+    if (c == ')') {
+        lisp_panic(L"unexpected )");
+    }
+    if (c == '(') {
+        lisp_reader_pos++;
+        return lisp_read_list();
+    }
+
+    char token[LISP_TOKEN_MAX];
+    UINTN len = 0;
+    while (!lisp_reader_is_delim(*lisp_reader_pos)) {
+        if (len < LISP_TOKEN_MAX - 1) {
+            token[len] = *lisp_reader_pos;
+            len++;
+        }
+        lisp_reader_pos++;
+    }
+    token[len] = '\0';
+
+    if (lisp_token_is_fixnum(token)) {
+        return lisp_make_fixnum(lisp_token_to_fixnum(token));
+    }
+    return lisp_intern(token);
+}
+
+// ASCII文字列(0終端)の先頭から1つのS式を読み取る
+LispObject lisp_read_from_buffer(const char *str) {
+    lisp_reader_pos = str;
+    return lisp_read();
+}
+
+
 // --- エントリポイント ---
 EFI_STATUS EFIAPI EfiMain(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
     g_system_table = SystemTable;
@@ -572,6 +674,16 @@ EFI_STATUS EFIAPI EfiMain(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable)
 
             SystemTable->ConOut->OutputString(SystemTable->ConOut, L"print symbol foo: ");
             lisp_print(SystemTable, sym_foo1);
+            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\n");
+
+            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"Read & print back what you typed: ");
+            LispObject parsed = lisp_read_from_buffer(input_buffer);
+            lisp_print(SystemTable, parsed);
+            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\n");
+
+            LispObject nested = lisp_read_from_buffer("(a (b c) -3 d)");
+            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"Read \"(a (b c) -3 d)\" and print back: ");
+            lisp_print(SystemTable, nested);
             SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\n");
         } else {
             CHAR16 hex_status[20];
