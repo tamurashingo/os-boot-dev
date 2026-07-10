@@ -2,14 +2,16 @@
 
 ## 目的
 
-このドキュメントは、`src/main.c`のスクラッチUEFIブートローダーを起点に、最終的に最小限の
+このドキュメントは、`src`配下のスクラッチUEFIブートローダーを起点に、最終的に最小限の
 Lisp（リーダー・評価器・プリンターを持ち、対話的にS式を実行できる状態）をブート直後に動かす
 までの道筋を、マイルストーン単位で整理したものである。実装の詳細設計は各マイルストーンに着手
-する際に別途行い、本ドキュメントは全体の見取り図として保守する。
+する際に別途行い、本ドキュメントは全体の見取り図として保守する。（2026-07-10にソースを
+`src/uefi.h`/`src/lisp.h`+`src/lisp.c`/`src/main.c`の3ファイルに分割したが、以下のマイルストーン
+1〜11の内容自体は変更していない。詳細は「各マイルストーンの参考実装位置」参照）
 
 前提となる制約（詳細は`CLAUDE.md`参照）:
 
-- libc・既存のLispランタイム・ヒープアロケータは使わず、すべて`src/main.c`にスクラッチで書く。
+- libc・既存のLispランタイム・ヒープアロケータは使わず、すべて`src`配下にスクラッチで書く。
 - UEFIのブートサービスが有効な間（`ExitBootServices`を呼ぶまで）は物理アドレスと仮想アドレスが
   一致（identity mapping）しているため、`PhysicalStart`をそのままポインタとして扱える。
 - テストフレームワークは無いため、各マイルストーンの検証はQEMU/OVMF上で実際に起動し、コンソール
@@ -33,19 +35,31 @@ Lisp（リーダー・評価器・プリンターを持ち、対話的にS式を
 
 ## 各マイルストーンの参考実装位置
 
-- マイルストーン1〜11は`src/main.c`内に実装済み。
-  - Hello World・画面クリア: `EfiMain`冒頭
-  - メモリマップ取得・最大空き領域探索: `EfiMain`内、`GetMemoryMap`呼び出しから探索ループまで
+2026-07-10に`src/main.c`単一ファイルの構成を、UEFI定義（`src/uefi.h`）・Lispインタプリタ
+（`src/lisp.h`+`src/lisp.c`）・boot処理（`src/main.c`）の3ファイルに分割した（挙動・Lisp言語機能は
+変更していない）。マイルストーン1〜11は以下の位置に実装済み。
+
+- **`src/uefi.h`**（マイルストーン1・2が使うUEFI型・構造体定義）
+  - `EFIAPI`等の基本typedef、`EFI_SYSTEM_TABLE`、`EFI_MEMORY_DESCRIPTOR`＋`EfiConventionalMemory`等、
+    `EFI_BOOT_SERVICES`、`EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL`／`EFI_SIMPLE_TEXT_INPUT_PROTOCOL`関連、
+    診断出力用の`UINT64ToHexStr`
+- **`src/lisp.c`**（マイルストーン3〜10のLisp実装本体、`src/lisp.h`が公開API・externを宣言）
   - Lispオブジェクトシステム: `// --- Lisp Object System ---`セクション（`LispObject`/`LispCons`/`LispClosure`（`builtin`フィールド含む）/`LispBuiltinFn`/`lisp_make_fixnum`/`lisp_is_cons`/`lisp_is_closure`/`lisp_heap_init`/`alloc_cons`/`lisp_make_closure`/`lisp_make_builtin`など）
   - cons/car/cdr構築・アクセサ・panic: 同セクション内`lisp_panic`/`lisp_assert_cons`/`lisp_cons`/`lisp_car`/`lisp_cdr`/`lisp_set_car`/`lisp_set_cdr`
   - シンボル・intern: 同セクション内`LispSymbol`/`lisp_alloc`/`lisp_intern`/`lisp_symbols_init`/`lisp_sym_t`/`lisp_sym_quote`/`lisp_sym_if`/`lisp_sym_lambda`
   - 文字列・文字入力: `// --- 文字入力 (milestone 6) ---`セクション（`input_buffer`/`lisp_read_line`/`lisp_print_ascii`）
   - プリンター: `// --- プリンター (milestone 7) ---`セクション（`lisp_print_fixnum`/`lisp_print`）
   - リーダー: `// --- リーダー (milestone 8) ---`セクション（`lisp_read`/`lisp_read_list`/`lisp_token_is_fixnum`/`lisp_token_to_fixnum`/`lisp_read_from_buffer`）
-  - 評価器: `// --- 評価器 (milestone 9) ---`セクション（`lisp_env_extend`/`lisp_env_lookup`/`lisp_env_bind_params`/`lisp_eval`/`lisp_eval_list`/`lisp_apply`）
+  - 評価器: `// --- 評価器 (milestone 9) ---`セクション（`lisp_env_extend`/`lisp_env_lookup`/`lisp_env_bind_params`/`lisp_eval`/`lisp_eval_list`/`lisp_apply`。`global_env`（milestone 12）もこのセクションで定義）
   - 組み込みプリミティブ: `// --- 組み込みプリミティブ (milestone 10) ---`セクション（`lisp_builtin_car`/`lisp_builtin_cdr`/`lisp_builtin_cons`/`lisp_builtin_eq`/`lisp_builtin_atom`/`lisp_builtin_add`/`lisp_builtin_sub`/`lisp_builtins_init`）
+- **`src/main.c`**（マイルストーン1・2の呼び出しとマイルストーン11のREPLループ、`EfiMain`のみ）
+  - Hello World・画面クリア: `EfiMain`冒頭
+  - メモリマップ取得・最大空き領域探索: `EfiMain`内、`GetMemoryMap`呼び出しから探索ループまで
   - REPLループ: `EfiMain`内、`lisp_heap_init`呼び出し直後（`lisp_symbols_init()`/`global_env = lisp_builtins_init()`の後）の`for (;;) { ... }`
-- 全11マイルストーンが完了し、ロードマップ上の残タスクはない。今後新たな機能を追加する場合は、既存の単一ファイル構成（`src/main.c`にすべて追記し、`Makefile`はビルド対象を増やさない）を維持しつつ実装していく想定。ファイルを分割する場合はその時点で`Makefile`の`SRC`定義も見直す。
+
+全11マイルストーンが完了し、ロードマップ上の残タスクはない。今後の新機能（マイルストーン13以降、
+詳細は`documents/init_lisp.md`「ファイル構成」参照）は、この3ファイル構成の上に実装していく想定。
+新規ファイルを追加する場合は`Makefile`の`SRC`／`HDRS`定義も見直す。
 
 ## 検証方針
 

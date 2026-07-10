@@ -3,7 +3,8 @@ PWD = $(shell pwd)
 
 TARGET = esp_dir/EFI/BOOT/BOOTX64.EFI
 SRCDIR = src
-SRC = $(SRCDIR)/main.c
+SRC = $(SRCDIR)/main.c $(SRCDIR)/lisp.c
+HDRS = $(SRCDIR)/uefi.h $(SRCDIR)/lisp.h
 
 STAMP_DIR := .make-stamps
 IMAGE_STAMP := $(STAMP_DIR)/image-built
@@ -22,7 +23,7 @@ $(IMAGE_STAMP): Dockerfile
 
 image: $(IMAGE_STAMP)
 
-build: setup $(SRC) $(IMAGE_STAMP)
+build: setup $(SRC) $(HDRS) $(IMAGE_STAMP)
 	docker run --rm -v "$(PWD)":/workspace uefi-builder \
 		x86_64-w64-mingw32-gcc -nostdlib -mno-red-zone -shared \
 		-mno-stack-arg-probe \

@@ -1,0 +1,35 @@
+#ifndef OS_BOOT_DEV_LISP_H
+#define OS_BOOT_DEV_LISP_H
+
+#include "uefi.h"
+
+// --- Lisp Object System ---
+typedef UINT64 LispObject;
+
+#define LISP_INPUT_BUFFER_MAX 256
+
+// panic時にConOutへ出力するためのシステムテーブル。EfiMainが起動時に設定する
+extern EFI_SYSTEM_TABLE *g_system_table;
+
+// トップレベルの永続グローバル環境 (milestone 12)。EfiMainが起動時に
+// lisp_builtins_init()の結果で初期化する。defun/loadなど今後の特殊形式が
+// lisp_eval内部からここを直接書き換えて新しい束縛を追加すれば、その後の
+// すべてのREPL入力から見えるようになる
+extern LispObject global_env;
+
+// --- 文字入力 (milestone 6) ---
+extern char input_buffer[LISP_INPUT_BUFFER_MAX];
+extern UINTN input_length;
+
+void lisp_heap_init(UINT64 start, UINT64 size);
+void lisp_symbols_init(void);
+LispObject lisp_builtins_init(void);
+
+void lisp_read_line(EFI_SYSTEM_TABLE *SystemTable);
+LispObject lisp_read_from_buffer(const char *str);
+
+LispObject lisp_eval(LispObject expr, LispObject env);
+
+void lisp_print(EFI_SYSTEM_TABLE *SystemTable, LispObject obj);
+
+#endif // OS_BOOT_DEV_LISP_H
