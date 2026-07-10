@@ -355,6 +355,78 @@ void lisp_print_ascii(EFI_SYSTEM_TABLE *SystemTable, const char *str) {
 }
 
 
+// --- プリンター (milestone 7) ---
+
+// 10進数を表示する（符号付き。libcのitoa相当が無いため自前実装）
+void lisp_print_fixnum(EFI_SYSTEM_TABLE *SystemTable, long long value) {
+    char digits[24];
+    UINTN i = 0;
+    int negative = value < 0;
+    unsigned long long uval = negative ? (unsigned long long)(-value) : (unsigned long long)value;
+
+    do {
+        digits[i] = '0' + (char)(uval % 10);
+        i++;
+        uval /= 10;
+    } while (uval > 0);
+
+    if (negative) {
+        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"-");
+    }
+
+    // digitsには下位桁から積んでいるので、後ろから出力する
+    while (i > 0) {
+        i--;
+        CHAR16 ch[2] = { (CHAR16)digits[i], 0 };
+        SystemTable->ConOut->OutputString(SystemTable->ConOut, ch);
+    }
+}
+
+// LispObjectを人間が読める形式でコンソールに表示する。
+// fixnumは10進、symbolは名前、consは(a b c)または(a . b)形式、nilはnilと表示する
+void lisp_print(EFI_SYSTEM_TABLE *SystemTable, LispObject obj) {
+    if (obj == LISP_NIL) {
+        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"nil");
+        return;
+    }
+
+    if (lisp_is_fixnum(obj)) {
+        lisp_print_fixnum(SystemTable, lisp_fixnum_value(obj));
+        return;
+    }
+
+    if (lisp_is_symbol(obj)) {
+        lisp_print_ascii(SystemTable, lisp_symbol_cell(obj)->name);
+        return;
+    }
+
+    if (lisp_is_cons(obj)) {
+        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"(");
+
+        LispObject cur = obj;
+        int first = 1;
+        while (lisp_is_cons(cur)) {
+            if (!first) {
+                SystemTable->ConOut->OutputString(SystemTable->ConOut, L" ");
+            }
+            first = 0;
+            lisp_print(SystemTable, lisp_car(cur));
+            cur = lisp_cdr(cur);
+        }
+
+        if (cur != LISP_NIL) {
+            SystemTable->ConOut->OutputString(SystemTable->ConOut, L" . ");
+            lisp_print(SystemTable, cur);
+        }
+
+        SystemTable->ConOut->OutputString(SystemTable->ConOut, L")");
+        return;
+    }
+
+    lisp_panic(L"unknown lisp object type in printer");
+}
+
+
 // --- エントリポイント ---
 EFI_STATUS EFIAPI EfiMain(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
     g_system_table = SystemTable;
@@ -475,6 +547,31 @@ EFI_STATUS EFIAPI EfiMain(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable)
             lisp_read_line(SystemTable);
             SystemTable->ConOut->OutputString(SystemTable->ConOut, L"You typed: ");
             lisp_print_ascii(SystemTable, input_buffer);
+            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\n");
+
+            LispObject list123 = lisp_cons(lisp_make_fixnum(1),
+                lisp_cons(lisp_make_fixnum(2), lisp_cons(lisp_make_fixnum(3), LISP_NIL)));
+            LispObject dotted = lisp_cons(lisp_make_fixnum(1), lisp_make_fixnum(2));
+            LispObject negative = lisp_make_fixnum(-5);
+
+            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"print nil: ");
+            lisp_print(SystemTable, LISP_NIL);
+            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\n");
+
+            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"print (1 2 3): ");
+            lisp_print(SystemTable, list123);
+            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\n");
+
+            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"print (1 . 2): ");
+            lisp_print(SystemTable, dotted);
+            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\n");
+
+            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"print -5: ");
+            lisp_print(SystemTable, negative);
+            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\n");
+
+            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"print symbol foo: ");
+            lisp_print(SystemTable, sym_foo1);
             SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\n");
         } else {
             CHAR16 hex_status[20];
