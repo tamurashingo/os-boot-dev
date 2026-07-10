@@ -6,6 +6,7 @@ char memory_map_buffer[1024 * 256];
 // --- エントリポイント ---
 EFI_STATUS EFIAPI EfiMain(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
     g_system_table = SystemTable;
+    g_image_handle = ImageHandle;
 
     // clear screen
     SystemTable->ConOut->ClearScreen(SystemTable->ConOut);

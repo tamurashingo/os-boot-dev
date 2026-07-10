@@ -11,6 +11,10 @@ typedef UINT64 LispObject;
 // panic時にConOutへ出力するためのシステムテーブル。EfiMainが起動時に設定する
 extern EFI_SYSTEM_TABLE *g_system_table;
 
+// load組み込み関数がHandleProtocolでファイルシステムを取得する際に使う。
+// EfiMainが起動時に設定する (milestone 16)
+extern EFI_HANDLE g_image_handle;
+
 // トップレベルの永続グローバル環境 (milestone 12)。EfiMainが起動時に
 // lisp_builtins_init()の結果で初期化する。defun/loadなど今後の特殊形式が
 // lisp_eval内部からここを直接書き換えて新しい束縛を追加すれば、その後の

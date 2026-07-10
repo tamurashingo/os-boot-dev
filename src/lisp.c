@@ -81,6 +81,7 @@ static inline int lisp_is_string(LispObject obj) {
 static UINT64 lisp_heap_ptr;
 static UINT64 lisp_heap_end;
 EFI_SYSTEM_TABLE *g_system_table; // panic時にConOutへ出力するため
+EFI_HANDLE g_image_handle; // milestone 16: loadがHandleProtocolでファイルシステムを取得するため
 
 // エラーメッセージを出力して停止する。呼び出し元には戻らない
 void lisp_panic(CHAR16 *message) {
@@ -99,6 +100,12 @@ static inline void lisp_assert_cons(LispObject obj) {
 static inline void lisp_assert_symbol(LispObject obj) {
     if (!lisp_is_symbol(obj)) {
         lisp_panic(L"expected a symbol but got something else");
+    }
+}
+
+static inline void lisp_assert_string(LispObject obj) {
+    if (!lisp_is_string(obj)) {
+        lisp_panic(L"expected a string but got something else");
     }
 }
 
@@ -564,6 +571,14 @@ LispObject lisp_read_from_buffer(const char *str) {
     return lisp_read();
 }
 
+// 空白を読み飛ばした上でバッファ終端(0終端)に達しているかを調べる。lisp_read自体は
+// 単一のS式の読み取りを前提に終端をpanicとして扱うため変更せず、milestone 16のloadが
+// 複数のトップレベルS式を読み終える判定にのみこれを使う
+static int lisp_reader_at_end(void) {
+    lisp_reader_skip_ws();
+    return *lisp_reader_pos == '\0';
+}
+
 
 // --- 評価器 (milestone 9) ---
 
@@ -838,7 +853,74 @@ LispObject lisp_builtin_sub(LispObject args) {
     return lisp_make_fixnum(result);
 }
 
-// car/cdr/cons/eq/atom/+/- をグローバル環境に束縛して返す
+// milestone 16: (load "filename") がFAT32のESPから読み込んだファイル内容を
+// バッファ終端までトップレベルS式として順にglobal_envで評価する。最後に評価した
+// 値（ファイルが空ならlisp_sym_t）を返す
+static LispObject lisp_load_eval_buffer(const char *buf) {
+    lisp_reader_pos = buf;
+    LispObject result = lisp_sym_t;
+    while (!lisp_reader_at_end()) {
+        LispObject form = lisp_read();
+        result = lisp_eval(form, global_env);
+    }
+    return result;
+}
+
+static EFI_GUID lisp_guid_loaded_image = EFI_LOADED_IMAGE_PROTOCOL_GUID_VALUE;
+static EFI_GUID lisp_guid_simple_file_system = EFI_SIMPLE_FILE_SYSTEM_PROTOCOL_GUID_VALUE;
+
+#define LISP_LOAD_BUFFER_MAX 8192
+static char lisp_load_buffer[LISP_LOAD_BUFFER_MAX];
+
+// (load "filename"): EfiMainのImageHandle→LoadedImage→DeviceHandle→
+// SimpleFileSystemの順にHandleProtocolでたどり、ESPのルートディレクトリから
+// filenameを読み込んで内容を評価する。GetInfoでファイルサイズを問い合わせず、
+// 1回のReadで静的バッファに収まる分だけ読み取る（CLAUDE.mdの静的バッファ方針に従う）
+LispObject lisp_builtin_load(LispObject args) {
+    LispObject filename_obj = lisp_car(args);
+    lisp_assert_string(filename_obj);
+    LispClosure *filename = lisp_closure_cell(filename_obj);
+
+    CHAR16 wpath[LISP_STRING_READ_MAX];
+    UINTN i = 0;
+    for (; i < filename->str_len && i < LISP_STRING_READ_MAX - 1; i++) {
+        wpath[i] = (CHAR16)filename->str_data[i];
+    }
+    wpath[i] = 0;
+
+    EFI_BOOT_SERVICES *bs = g_system_table->BootServices;
+
+    EFI_LOADED_IMAGE_PROTOCOL *loaded_image;
+    if (bs->HandleProtocol(g_image_handle, &lisp_guid_loaded_image, (void **)&loaded_image) != 0) {
+        lisp_panic(L"load: failed to get loaded image protocol");
+    }
+
+    EFI_SIMPLE_FILE_SYSTEM_PROTOCOL *fs;
+    if (bs->HandleProtocol(loaded_image->DeviceHandle, &lisp_guid_simple_file_system, (void **)&fs) != 0) {
+        lisp_panic(L"load: failed to get simple file system protocol");
+    }
+
+    EFI_FILE_PROTOCOL *root;
+    if (fs->OpenVolume(fs, &root) != 0) {
+        lisp_panic(L"load: failed to open volume");
+    }
+
+    EFI_FILE_PROTOCOL *file;
+    if (root->Open(root, &file, wpath, EFI_FILE_MODE_READ, 0) != 0) {
+        lisp_panic(L"load: failed to open file");
+    }
+
+    UINTN size = LISP_LOAD_BUFFER_MAX - 1;
+    if (file->Read(file, &size, lisp_load_buffer) != 0) {
+        lisp_panic(L"load: failed to read file");
+    }
+    lisp_load_buffer[size] = '\0';
+    file->Close(file);
+
+    return lisp_load_eval_buffer(lisp_load_buffer);
+}
+
+// car/cdr/cons/eq/atom/+/-/load をグローバル環境に束縛して返す
 LispObject lisp_builtins_init(void) {
     LispObject env = LISP_NIL;
     env = lisp_env_extend(env, lisp_intern("car"), lisp_make_builtin(lisp_builtin_car));
@@ -848,5 +930,6 @@ LispObject lisp_builtins_init(void) {
     env = lisp_env_extend(env, lisp_intern("atom"), lisp_make_builtin(lisp_builtin_atom));
     env = lisp_env_extend(env, lisp_intern("+"), lisp_make_builtin(lisp_builtin_add));
     env = lisp_env_extend(env, lisp_intern("-"), lisp_make_builtin(lisp_builtin_sub));
+    env = lisp_env_extend(env, lisp_intern("load"), lisp_make_builtin(lisp_builtin_load));
     return env;
 }
