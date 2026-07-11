@@ -13,7 +13,7 @@
 // （空リストの終端とfalse相当を1つの値で表す、という一般的なLisp実装の簡略化）
 #define LISP_NIL ((LispObject)0)
 
-#define LISP_SYMBOL_NAME_MAX 32
+#define LISP_SYMBOL_NAME_MAX 64
 
 typedef struct {
     LispObject car;
@@ -22,6 +22,8 @@ typedef struct {
 
 typedef struct {
     char name[LISP_SYMBOL_NAME_MAX];
+    int is_special;   // milestone 18: defvar/defparameterで真になる動的変数フラグ
+    LispObject value; // is_specialが真の場合の現在の動的値。let/let*が退避・書き換えする
 } LispSymbol;
 
 typedef LispObject (*LispBuiltinFn)(LispObject args);
@@ -233,11 +235,22 @@ static int lisp_streq(const char *a, const char *b) {
 }
 
 // 同じ名前でintern済みのシンボルがあれば同一のLispObjectを返す（eqで比較可能にする）。
-// 無ければ新規に確保してテーブルに登録する
+// 無ければ新規に確保してテーブルに登録する。比較・格納の両方で先にLISP_SYMBOL_NAME_MAX-1文字に
+// 切り詰めてから扱うことで、name自体を切り詰めずにlisp_streqへ渡すと「格納済みの切り詰め済み名」
+// と「今回渡された切り詰め前のnama」が食い違って毎回別シンボルを生成してしまう
+// （呼ぶたびにeqが成立せずunbound variableになる）バグを避ける
 LispObject lisp_intern(const char *name) {
+    char truncated[LISP_SYMBOL_NAME_MAX];
+    UINTN len = 0;
+    while (name[len] != '\0' && len < LISP_SYMBOL_NAME_MAX - 1) {
+        truncated[len] = name[len];
+        len++;
+    }
+    truncated[len] = '\0';
+
     for (UINTN i = 0; i < lisp_symbol_count; i++) {
         LispSymbol *sym = lisp_symbol_cell(lisp_symbol_table[i]);
-        if (lisp_streq(sym->name, name)) {
+        if (lisp_streq(sym->name, truncated)) {
             return lisp_symbol_table[i];
         }
     }
@@ -248,11 +261,13 @@ LispObject lisp_intern(const char *name) {
 
     LispSymbol *sym = (LispSymbol *)lisp_alloc(sizeof(LispSymbol));
     UINTN i = 0;
-    while (name[i] != '\0' && i < LISP_SYMBOL_NAME_MAX - 1) {
-        sym->name[i] = name[i];
+    while (truncated[i] != '\0') {
+        sym->name[i] = truncated[i];
         i++;
     }
     sym->name[i] = '\0';
+    sym->is_special = 0;
+    sym->value = LISP_NIL;
 
     LispObject obj = ((LispObject)sym) | LISP_TAG_SYMBOL;
     lisp_symbol_table[lisp_symbol_count] = obj;
@@ -279,6 +294,8 @@ static LispObject lisp_sym_and;
 static LispObject lisp_sym_or;
 static LispObject lisp_sym_when;
 static LispObject lisp_sym_unless;
+static LispObject lisp_sym_defvar;
+static LispObject lisp_sym_defparameter;
 
 void lisp_symbols_init(void) {
     lisp_sym_t = lisp_intern("t");
@@ -299,6 +316,8 @@ void lisp_symbols_init(void) {
     lisp_sym_or = lisp_intern("or");
     lisp_sym_when = lisp_intern("when");
     lisp_sym_unless = lisp_intern("unless");
+    lisp_sym_defvar = lisp_intern("defvar");
+    lisp_sym_defparameter = lisp_intern("defparameter");
 }
 
 
@@ -628,6 +647,12 @@ LispObject lisp_env_extend(LispObject env, LispObject sym, LispObject value) {
 // 再帰呼び出しや、後から定義された他のdefun関数の呼び出しがすべてunbound variableに
 // なってしまう
 LispObject lisp_env_lookup(LispObject env, LispObject sym) {
+    // 動的変数(milestone 18)はenvチェーンに束縛を積まず、シンボル自身が持つvalueが
+    // 常に「今のダイナミックエクステントでの値」を表すため、alist探索より先に見る
+    if (lisp_symbol_cell(sym)->is_special) {
+        return lisp_symbol_cell(sym)->value;
+    }
+
     LispObject cur = env;
     while (lisp_is_cons(cur)) {
         LispObject pair = lisp_car(cur);
@@ -653,6 +678,12 @@ LispObject lisp_env_lookup(LispObject env, LispObject sym) {
 // 見つからなければlisp_env_lookupと同じ考え方でglobal_envも探す。どちらにも束縛が
 // 無ければlisp_env_lookupと同じくunbound variableとしてpanicする（新規変数の暗黙定義はしない）
 void lisp_env_set(LispObject env, LispObject sym, LispObject value) {
+    // 動的変数はlisp_env_lookupと同様、alistを経由せずシンボル自身のvalueを直接書き換える
+    if (lisp_symbol_cell(sym)->is_special) {
+        lisp_symbol_cell(sym)->value = value;
+        return;
+    }
+
     LispObject cur = env;
     while (lisp_is_cons(cur)) {
         LispObject pair = lisp_car(cur);
@@ -768,8 +799,8 @@ LispObject lisp_qq_expand(LispObject form, LispObject env) {
 }
 
 // exprをenv上で評価する。fixnum/nil/tは自己評価、symbolは変数参照、
-// consはquote/if/progn/let/let*/setq/cond/and/or/when/unless/lambdaなどの
-// 特殊形式または関数呼び出しとして扱う
+// consはquote/if/progn/let/let*/setq/cond/and/or/when/unless/defvar/defparameter/
+// lambdaなどの特殊形式または関数呼び出しとして扱う
 LispObject lisp_eval(LispObject expr, LispObject env) {
     if (lisp_is_fixnum(expr) || expr == LISP_NIL) {
         return expr;
@@ -813,32 +844,74 @@ LispObject lisp_eval(LispObject expr, LispObject env) {
         if (op == lisp_sym_let) {
             LispObject bindings = lisp_car(lisp_cdr(expr));
             LispObject body = lisp_cdr(lisp_cdr(expr));
-            LispObject new_env = env;
+            // フェーズ1: 各初期値式をletの外側のenvで評価する（束縛済みの他の変数を
+            // 参照できない、let*との違い）。動的変数の値もこの時点ではまだ書き換えない
+            // ため、他のbindingの初期値式が古い値を見るという並列束縛の意味を保つ
+            LispObject values = LISP_NIL; // (sym . value)のリスト（順序はどうでもよい）
             LispObject cur = bindings;
-            // 各初期値式はletの外側のenvで評価する（束縛済みの他の変数を参照できない、
-            // let*との違い）
             while (lisp_is_cons(cur)) {
                 LispObject binding = lisp_car(cur);
                 LispObject value = lisp_eval(lisp_car(lisp_cdr(binding)), env);
-                new_env = lisp_env_extend(new_env, lisp_car(binding), value);
+                values = lisp_cons(lisp_cons(lisp_car(binding), value), values);
                 cur = lisp_cdr(cur);
             }
-            return lisp_eval_progn(body, new_env);
+            // フェーズ2: 動的変数はシンボル自身のvalueを退避してから書き換え、
+            // 通常の変数はenvに積む
+            LispObject new_env = env;
+            LispObject saved_specials = LISP_NIL; // (sym . 退避した旧値)のリスト
+            cur = values;
+            while (lisp_is_cons(cur)) {
+                LispObject pair = lisp_car(cur);
+                LispObject sym = lisp_car(pair);
+                LispObject value = lisp_cdr(pair);
+                if (lisp_symbol_cell(sym)->is_special) {
+                    saved_specials = lisp_cons(lisp_cons(sym, lisp_symbol_cell(sym)->value), saved_specials);
+                    lisp_symbol_cell(sym)->value = value;
+                } else {
+                    new_env = lisp_env_extend(new_env, sym, value);
+                }
+                cur = lisp_cdr(cur);
+            }
+            LispObject result = lisp_eval_progn(body, new_env);
+            // letを抜ける際、動的変数はletに入る前の値へ必ず復元する
+            cur = saved_specials;
+            while (lisp_is_cons(cur)) {
+                LispObject pair = lisp_car(cur);
+                lisp_symbol_cell(lisp_car(pair))->value = lisp_cdr(pair);
+                cur = lisp_cdr(cur);
+            }
+            return result;
         }
 
         if (op == lisp_sym_let_star) {
             LispObject bindings = lisp_car(lisp_cdr(expr));
             LispObject body = lisp_cdr(lisp_cdr(expr));
             LispObject new_env = env;
+            LispObject saved_specials = LISP_NIL; // (sym . 退避した旧値)のリスト
             LispObject cur = bindings;
-            // let*は各初期値式をそれまでに束縛した変数が見える環境で評価する
+            // let*は各初期値式をそれまでに束縛した変数（動的変数を含む）が見える環境で
+            // 評価する。動的変数は書き換えが即座に反映されるため、new_envに積まなくても
+            // 以降の初期値式や本体から自然に見える
             while (lisp_is_cons(cur)) {
                 LispObject binding = lisp_car(cur);
+                LispObject sym = lisp_car(binding);
                 LispObject value = lisp_eval(lisp_car(lisp_cdr(binding)), new_env);
-                new_env = lisp_env_extend(new_env, lisp_car(binding), value);
+                if (lisp_symbol_cell(sym)->is_special) {
+                    saved_specials = lisp_cons(lisp_cons(sym, lisp_symbol_cell(sym)->value), saved_specials);
+                    lisp_symbol_cell(sym)->value = value;
+                } else {
+                    new_env = lisp_env_extend(new_env, sym, value);
+                }
                 cur = lisp_cdr(cur);
             }
-            return lisp_eval_progn(body, new_env);
+            LispObject result = lisp_eval_progn(body, new_env);
+            cur = saved_specials;
+            while (lisp_is_cons(cur)) {
+                LispObject pair = lisp_car(cur);
+                lisp_symbol_cell(lisp_car(pair))->value = lisp_cdr(pair);
+                cur = lisp_cdr(cur);
+            }
+            return result;
         }
 
         if (op == lisp_sym_setq) {
@@ -911,6 +984,30 @@ LispObject lisp_eval(LispObject expr, LispObject env) {
             LispObject params = lisp_car(lisp_cdr(expr));
             LispObject body = lisp_car(lisp_cdr(lisp_cdr(expr)));
             return lisp_make_closure(params, body, env);
+        }
+
+        if (op == lisp_sym_defvar) {
+            LispObject sym = lisp_car(lisp_cdr(expr));
+            lisp_assert_symbol(sym);
+            LispSymbol *cell = lisp_symbol_cell(sym);
+            // すでに動的変数として値を持つ場合は上書きしない（defvarをファイルの再loadで
+            // 再度実行しても状態が保たれる、というCommon Lispのdefvarと同じ挙動）
+            if (!cell->is_special) {
+                cell->value = lisp_eval(lisp_car(lisp_cdr(lisp_cdr(expr))), env);
+                cell->is_special = 1;
+            }
+            return sym;
+        }
+
+        if (op == lisp_sym_defparameter) {
+            LispObject sym = lisp_car(lisp_cdr(expr));
+            lisp_assert_symbol(sym);
+            LispObject value = lisp_eval(lisp_car(lisp_cdr(lisp_cdr(expr))), env);
+            LispSymbol *cell = lisp_symbol_cell(sym);
+            // defvarと異なり既存の値があっても常に上書きする
+            cell->value = value;
+            cell->is_special = 1;
+            return sym;
         }
 
         if (op == lisp_sym_defun) {
