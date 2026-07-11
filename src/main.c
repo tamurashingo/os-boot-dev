@@ -80,6 +80,7 @@ EFI_STATUS EFIAPI EfiMain(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable)
 
             lisp_heap_init(heap_start, max_free_size);
 
+            lisp_packages_init();
             lisp_symbols_init();
             global_env = lisp_builtins_init();
 

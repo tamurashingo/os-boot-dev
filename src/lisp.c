@@ -14,16 +14,28 @@
 #define LISP_NIL ((LispObject)0)
 
 #define LISP_SYMBOL_NAME_MAX 64
+#define LISP_PACKAGE_NAME_MAX 32
+#define LISP_MAX_PACKAGES 8
+#define LISP_MAX_SYMBOLS 256
 
 typedef struct {
     LispObject car;
     LispObject cdr;
 } LispCons;
 
+// milestone 23: パッケージ（common-lisp-user/keyword等）ごとに独立したシンボルテーブルを持つ
+typedef struct {
+    char name[LISP_PACKAGE_NAME_MAX];
+    LispObject symbols[LISP_MAX_SYMBOLS];
+    UINTN symbol_count;
+    int is_keyword_package; // 真なら自己評価し印字時に":"を前置する特別なパッケージ
+} LispPackage;
+
 typedef struct {
     char name[LISP_SYMBOL_NAME_MAX];
-    int is_special;   // milestone 18: defvar/defparameterで真になる動的変数フラグ
-    LispObject value; // is_specialが真の場合の現在の動的値。let/let*が退避・書き換えする
+    int is_special;      // milestone 18: defvar/defparameterで真になる動的変数フラグ
+    LispObject value;    // is_specialが真の場合の現在の動的値。let/let*が退避・書き換えする
+    LispPackage *package; // milestone 23: 属するパッケージ。gensymの未interned symbolはNULL
 } LispSymbol;
 
 typedef LispObject (*LispBuiltinFn)(LispObject args);
@@ -483,10 +495,6 @@ LispObject lisp_num_sub(LispObject a, LispObject b) {
     return lisp_num_add(a, lisp_num_negate(b));
 }
 
-#define LISP_MAX_SYMBOLS 256
-static LispObject lisp_symbol_table[LISP_MAX_SYMBOLS];
-static UINTN lisp_symbol_count = 0;
-
 static int lisp_streq(const char *a, const char *b) {
     while (*a != '\0' && *b != '\0') {
         if (*a != *b) {
@@ -498,12 +506,51 @@ static int lisp_streq(const char *a, const char *b) {
     return *a == *b;
 }
 
-// 同じ名前でintern済みのシンボルがあれば同一のLispObjectを返す（eqで比較可能にする）。
-// 無ければ新規に確保してテーブルに登録する。比較・格納の両方で先にLISP_SYMBOL_NAME_MAX-1文字に
+// milestone 23: パッケージの集合。common-lisp-user/keywordの2つで始まるが、将来
+// lisp_make_packageを追加で呼ぶだけで3つ目以降のパッケージを増やせる（LISP_MAX_PACKAGESの範囲内）
+static LispPackage lisp_packages[LISP_MAX_PACKAGES];
+static UINTN lisp_package_count = 0;
+static LispPackage *lisp_cl_user_package;
+static LispPackage *lisp_keyword_package;
+
+static LispPackage *lisp_make_package(const char *name, int is_keyword_package) {
+    if (lisp_package_count >= LISP_MAX_PACKAGES) {
+        lisp_panic(L"package table exhausted");
+    }
+    LispPackage *pkg = &lisp_packages[lisp_package_count];
+    UINTN i = 0;
+    while (name[i] != '\0' && i < LISP_PACKAGE_NAME_MAX - 1) {
+        pkg->name[i] = name[i];
+        i++;
+    }
+    pkg->name[i] = '\0';
+    pkg->symbol_count = 0;
+    pkg->is_keyword_package = is_keyword_package;
+    lisp_package_count++;
+    return pkg;
+}
+
+// 現時点ではLispからは使わない内部APIだが、将来の`find-package`相当の土台として用意しておく
+static LispPackage *lisp_find_package(const char *name) {
+    for (UINTN i = 0; i < lisp_package_count; i++) {
+        if (lisp_streq(lisp_packages[i].name, name)) {
+            return &lisp_packages[i];
+        }
+    }
+    return 0;
+}
+
+void lisp_packages_init(void) {
+    lisp_cl_user_package = lisp_make_package("common-lisp-user", 0);
+    lisp_keyword_package = lisp_make_package("keyword", 1);
+}
+
+// 同じ名前でintern済みのシンボルがpkg内にあれば同一のLispObjectを返す（eqで比較可能にする）。
+// 無ければ新規に確保してpkgのテーブルに登録する。比較・格納の両方で先にLISP_SYMBOL_NAME_MAX-1文字に
 // 切り詰めてから扱うことで、name自体を切り詰めずにlisp_streqへ渡すと「格納済みの切り詰め済み名」
 // と「今回渡された切り詰め前のnama」が食い違って毎回別シンボルを生成してしまう
 // （呼ぶたびにeqが成立せずunbound variableになる）バグを避ける
-LispObject lisp_intern(const char *name) {
+LispObject lisp_intern_in_package(LispPackage *pkg, const char *name) {
     char truncated[LISP_SYMBOL_NAME_MAX];
     UINTN len = 0;
     while (name[len] != '\0' && len < LISP_SYMBOL_NAME_MAX - 1) {
@@ -512,14 +559,14 @@ LispObject lisp_intern(const char *name) {
     }
     truncated[len] = '\0';
 
-    for (UINTN i = 0; i < lisp_symbol_count; i++) {
-        LispSymbol *sym = lisp_symbol_cell(lisp_symbol_table[i]);
+    for (UINTN i = 0; i < pkg->symbol_count; i++) {
+        LispSymbol *sym = lisp_symbol_cell(pkg->symbols[i]);
         if (lisp_streq(sym->name, truncated)) {
-            return lisp_symbol_table[i];
+            return pkg->symbols[i];
         }
     }
 
-    if (lisp_symbol_count >= LISP_MAX_SYMBOLS) {
+    if (pkg->symbol_count >= LISP_MAX_SYMBOLS) {
         lisp_panic(L"symbol table exhausted");
     }
 
@@ -532,18 +579,27 @@ LispObject lisp_intern(const char *name) {
     sym->name[i] = '\0';
     sym->is_special = 0;
     sym->value = LISP_NIL;
+    sym->package = pkg;
 
     LispObject obj = ((LispObject)sym) | LISP_TAG_SYMBOL;
-    lisp_symbol_table[lisp_symbol_count] = obj;
-    lisp_symbol_count++;
+    pkg->symbols[pkg->symbol_count] = obj;
+    pkg->symbol_count++;
     return obj;
 }
 
-// gensym専用 (milestone 20): lisp_symbol_tableに登録せず新規のLispSymbolを確保するだけの
-// シンボルを作る。eqはオブジェクトの同一性そのものであり、lisp_internの一致判定は
-// テーブルに載っているシンボルしか見つけられないため、テーブルに載せないことで
+LispObject lisp_intern(const char *name) {
+    return lisp_intern_in_package(lisp_cl_user_package, name);
+}
+
+static LispObject lisp_intern_keyword(const char *name) {
+    return lisp_intern_in_package(lisp_keyword_package, name);
+}
+
+// gensym専用 (milestone 20): どのパッケージのテーブルにも登録せず新規のLispSymbolを確保するだけの
+// シンボルを作る。eqはオブジェクトの同一性そのものであり、lisp_intern_in_packageの一致判定は
+// パッケージのテーブルに載っているシンボルしか見つけられないため、テーブルに載せないことで
 // 「名前が何であっても、reader/internを経由する限り絶対にeqにならない」ユニークな
-// シンボルになる
+// シンボルになる。CLのuninterned symbol（どのパッケージにも属さない）に相当するためpackageはNULL
 static LispObject lisp_make_uninterned_symbol(const char *name) {
     LispSymbol *sym = (LispSymbol *)lisp_alloc(sizeof(LispSymbol));
     UINTN i = 0;
@@ -554,6 +610,7 @@ static LispObject lisp_make_uninterned_symbol(const char *name) {
     sym->name[i] = '\0';
     sym->is_special = 0;
     sym->value = LISP_NIL;
+    sym->package = 0;
     return ((LispObject)sym) | LISP_TAG_SYMBOL;
 }
 
@@ -798,7 +855,12 @@ void lisp_print(EFI_SYSTEM_TABLE *SystemTable, LispObject obj) {
     }
 
     if (lisp_is_symbol(obj)) {
-        lisp_print_ascii(SystemTable, lisp_symbol_cell(obj)->name);
+        LispSymbol *sym = lisp_symbol_cell(obj);
+        // milestone 23: keywordパッケージのシンボルは":"を前置して印字する
+        if (sym->package != 0 && sym->package->is_keyword_package) {
+            lisp_print_ascii(SystemTable, ":");
+        }
+        lisp_print_ascii(SystemTable, sym->name);
         return;
     }
 
@@ -1044,6 +1106,10 @@ LispObject lisp_read(void) {
     }
     token[len] = '\0';
 
+    if (token[0] == ':') {
+        // milestone 23: ":foo"はkeywordパッケージへintern（先頭の":"はsymbol-nameに含めない）
+        return lisp_intern_keyword(token + 1);
+    }
     if (lisp_token_is_fixnum(token)) {
         return lisp_token_to_number(token);
     }
@@ -1302,7 +1368,9 @@ LispObject lisp_eval(LispObject expr, LispObject env) {
     }
 
     if (lisp_is_symbol(expr)) {
-        if (expr == lisp_sym_t) {
+        LispSymbol *cell = lisp_symbol_cell(expr);
+        // milestone 23: keywordパッケージのシンボルはtと同様に自己評価する
+        if (expr == lisp_sym_t || (cell->package != 0 && cell->package->is_keyword_package)) {
             return expr;
         }
         return lisp_env_lookup(env, expr);

@@ -26,6 +26,7 @@ extern char input_buffer[LISP_INPUT_BUFFER_MAX];
 extern UINTN input_length;
 
 void lisp_heap_init(UINT64 start, UINT64 size);
+void lisp_packages_init(void);
 void lisp_symbols_init(void);
 LispObject lisp_builtins_init(void);
 
