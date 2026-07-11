@@ -275,6 +275,24 @@ LispObject lisp_intern(const char *name) {
     return obj;
 }
 
+// gensym専用 (milestone 20): lisp_symbol_tableに登録せず新規のLispSymbolを確保するだけの
+// シンボルを作る。eqはオブジェクトの同一性そのものであり、lisp_internの一致判定は
+// テーブルに載っているシンボルしか見つけられないため、テーブルに載せないことで
+// 「名前が何であっても、reader/internを経由する限り絶対にeqにならない」ユニークな
+// シンボルになる
+static LispObject lisp_make_uninterned_symbol(const char *name) {
+    LispSymbol *sym = (LispSymbol *)lisp_alloc(sizeof(LispSymbol));
+    UINTN i = 0;
+    while (name[i] != '\0' && i < LISP_SYMBOL_NAME_MAX - 1) {
+        sym->name[i] = name[i];
+        i++;
+    }
+    sym->name[i] = '\0';
+    sym->is_special = 0;
+    sym->value = LISP_NIL;
+    return ((LispObject)sym) | LISP_TAG_SYMBOL;
+}
+
 // よく使う特別なシンボル（nilはLISP_NILの即値のまま。それ以外はここでintern）
 static LispObject lisp_sym_t;
 static LispObject lisp_sym_quote;
@@ -1238,6 +1256,47 @@ LispObject lisp_builtin_sub(LispObject args) {
     return lisp_make_fixnum(result);
 }
 
+// (gensym)または(gensym "prefix"): 呼ぶたびに一意な非intern済みシンボルを返す。
+// 名前は「prefix（省略時は"G"）+ カウンタの10進数字」で、マクロ展開時の変数捕捉回避用の
+// 名前として読みやすくする以外の意味は持たない（一意性そのものはlisp_make_uninterned_symbolが
+// テーブルに登録しないことで保証しており、この名前文字列自体に依存しない）
+static UINTN lisp_gensym_counter = 0;
+
+LispObject lisp_builtin_gensym(LispObject args) {
+    const char *prefix = "G";
+    if (lisp_is_cons(args)) {
+        LispObject prefix_obj = lisp_car(args);
+        lisp_assert_string(prefix_obj);
+        prefix = lisp_closure_cell(prefix_obj)->str_data;
+    }
+
+    char name[LISP_SYMBOL_NAME_MAX];
+    UINTN i = 0;
+    while (prefix[i] != '\0' && i < LISP_SYMBOL_NAME_MAX - 1) {
+        name[i] = prefix[i];
+        i++;
+    }
+
+    // カウンタを10進数字に変換する（lisp_print_fixnumと同様、下位桁から積んで逆順に書き出す）
+    char digits[24];
+    UINTN dcount = 0;
+    UINTN n = lisp_gensym_counter;
+    do {
+        digits[dcount] = '0' + (char)(n % 10);
+        dcount++;
+        n /= 10;
+    } while (n > 0);
+    while (dcount > 0 && i < LISP_SYMBOL_NAME_MAX - 1) {
+        dcount--;
+        name[i] = digits[dcount];
+        i++;
+    }
+    name[i] = '\0';
+
+    lisp_gensym_counter++;
+    return lisp_make_uninterned_symbol(name);
+}
+
 // milestone 16: (load "filename") がFAT32のESPから読み込んだファイル内容を
 // バッファ終端までトップレベルS式として順にglobal_envで評価する。最後に評価した
 // 値（ファイルが空ならlisp_sym_t）を返す
@@ -1316,5 +1375,6 @@ LispObject lisp_builtins_init(void) {
     env = lisp_env_extend(env, lisp_intern("+"), lisp_make_builtin(lisp_builtin_add));
     env = lisp_env_extend(env, lisp_intern("-"), lisp_make_builtin(lisp_builtin_sub));
     env = lisp_env_extend(env, lisp_intern("load"), lisp_make_builtin(lisp_builtin_load));
+    env = lisp_env_extend(env, lisp_intern("gensym"), lisp_make_builtin(lisp_builtin_gensym));
     return env;
 }
