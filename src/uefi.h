@@ -89,6 +89,40 @@ typedef EFI_STATUS (EFIAPI *EFI_HANDLE_PROTOCOL)(
     void **Interface
 );
 
+// milestone 25: sleep相当のLisp関数実装のために必要
+typedef void *EFI_EVENT;
+typedef UINTN EFI_TPL;
+
+typedef enum {
+    TimerCancel,
+    TimerPeriodic,
+    TimerRelative
+} EFI_TIMER_DELAY;
+
+#define EVT_TIMER 0x80000000
+#define TPL_APPLICATION 4
+
+typedef void (EFIAPI *EFI_EVENT_NOTIFY)(EFI_EVENT Event, void *Context);
+
+typedef EFI_STATUS (EFIAPI *EFI_CREATE_EVENT)(
+    UINT32 Type,
+    EFI_TPL NotifyTpl,
+    EFI_EVENT_NOTIFY NotifyFunction,
+    void *NotifyContext,
+    EFI_EVENT *Event
+);
+typedef EFI_STATUS (EFIAPI *EFI_SET_TIMER)(
+    EFI_EVENT Event,
+    EFI_TIMER_DELAY Type,
+    UINT64 TriggerTime
+);
+typedef EFI_STATUS (EFIAPI *EFI_WAIT_FOR_EVENT)(
+    UINTN NumberOfEvents,
+    EFI_EVENT *Event,
+    UINTN *Index
+);
+typedef EFI_STATUS (EFIAPI *EFI_CLOSE_EVENT)(EFI_EVENT Event);
+
 typedef struct _EFI_BOOT_SERVICES {
     EFI_TABLE_HEADER Hdr;
 
@@ -101,11 +135,11 @@ typedef struct _EFI_BOOT_SERVICES {
     void *AllocatePool;
     void *FreePool;
 
-    void *CreateEvent;
-    void *SetTimer;
-    void *WaitForEvent;
+    EFI_CREATE_EVENT CreateEvent;
+    EFI_SET_TIMER SetTimer;
+    EFI_WAIT_FOR_EVENT WaitForEvent;
     void *SignalEvent;
-    void *CloseEvent;
+    EFI_CLOSE_EVENT CloseEvent;
     void *CheckEvent;
 
     void *InstallProtocolInterface;

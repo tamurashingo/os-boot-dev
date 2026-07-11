@@ -1913,6 +1913,38 @@ LispObject lisp_builtin_load(LispObject args) {
     return lisp_load_eval_buffer(lisp_load_buffer);
 }
 
+// (sleep seconds): CreateEvent(EVT_TIMER)で使い捨てのタイマーイベントを作り、
+// SetTimer(TimerRelative)でseconds秒後(UEFIネイティブ単位=100ns)に発火するよう
+// セットし、WaitForEventでブロックして待つ。secondsはfixnum/bignum/floatいずれも
+// 受け付ける(milestone22の数値タワーのlisp_number_to_doubleを再利用、CLのsleepと
+// 同じ「秒単位・小数可」の意味を保つ)
+LispObject lisp_builtin_sleep(LispObject args) {
+    LispObject seconds_obj = lisp_car(args);
+    lisp_assert_number(seconds_obj);
+    double seconds = lisp_number_to_double(seconds_obj);
+    if (seconds < 0.0) {
+        seconds = 0.0;
+    }
+    UINT64 trigger_time = (UINT64)(seconds * 10000000.0); // 100ns単位
+
+    EFI_BOOT_SERVICES *bs = g_system_table->BootServices;
+
+    EFI_EVENT timer_event;
+    if (bs->CreateEvent(EVT_TIMER, TPL_APPLICATION, (void *)0, (void *)0, &timer_event) != 0) {
+        lisp_panic(L"sleep: failed to create timer event");
+    }
+    if (bs->SetTimer(timer_event, TimerRelative, trigger_time) != 0) {
+        lisp_panic(L"sleep: failed to set timer");
+    }
+    UINTN index;
+    if (bs->WaitForEvent(1, &timer_event, &index) != 0) {
+        lisp_panic(L"sleep: failed to wait for event");
+    }
+    bs->CloseEvent(timer_event);
+
+    return LISP_NIL;
+}
+
 // car/cdr/cons/eq/atom/+/-/load をグローバル環境に束縛して返す
 LispObject lisp_builtins_init(void) {
     LispObject env = LISP_NIL;
@@ -1924,6 +1956,7 @@ LispObject lisp_builtins_init(void) {
     env = lisp_env_extend(env, lisp_intern("+"), lisp_make_builtin(lisp_builtin_add));
     env = lisp_env_extend(env, lisp_intern("-"), lisp_make_builtin(lisp_builtin_sub));
     env = lisp_env_extend(env, lisp_intern("load"), lisp_make_builtin(lisp_builtin_load));
+    env = lisp_env_extend(env, lisp_intern("sleep"), lisp_make_builtin(lisp_builtin_sleep));
     env = lisp_env_extend(env, lisp_intern("gensym"), lisp_make_builtin(lisp_builtin_gensym));
     env = lisp_env_extend(env, lisp_intern("macroexpand-1"), lisp_make_builtin(lisp_builtin_macroexpand_1));
 
