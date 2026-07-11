@@ -36,6 +36,11 @@ typedef struct {
     int is_macro; // 真ならdefmacro由来のマクロ（呼び出し時に引数を評価しない）
     char *str_data; // NULLなら文字列ではない。非NULLなら文字列データ（0終端）へのポインタ
     UINTN str_len;  // str_dataが指す文字列の長さ（終端の'\0'を含まない）
+    int is_float;       // milestone 22: 真ならfloat_valueが有効なfloatオブジェクト
+    double float_value;
+    UINT32 *big_digits; // milestone 22: 非NULLならbignum。2^32進の桁配列（[0]が最下位、先頭ゼロ桁はtrim済み）
+    UINTN big_len;       // big_digitsの有効桁数
+    int big_negative;    // 真なら負数（0は常にfixnumで表すため、bignumが0を表すことはない）
 } LispClosure;
 
 static inline LispObject lisp_make_fixnum(long long value) {
@@ -80,6 +85,19 @@ static inline int lisp_is_string(LispObject obj) {
     return lisp_is_closure(obj) && lisp_closure_cell(obj)->str_data != 0;
 }
 
+// float/bignumも同じくLISP_TAG_CLOSUREを共有するescape hatch（milestone 22）
+static inline int lisp_is_float(LispObject obj) {
+    return lisp_is_closure(obj) && lisp_closure_cell(obj)->is_float;
+}
+
+static inline int lisp_is_bignum(LispObject obj) {
+    return lisp_is_closure(obj) && lisp_closure_cell(obj)->big_digits != 0;
+}
+
+static inline int lisp_is_number(LispObject obj) {
+    return lisp_is_fixnum(obj) || lisp_is_float(obj) || lisp_is_bignum(obj);
+}
+
 static UINT64 lisp_heap_ptr;
 static UINT64 lisp_heap_end;
 EFI_SYSTEM_TABLE *g_system_table; // panic時にConOutへ出力するため
@@ -108,6 +126,12 @@ static inline void lisp_assert_symbol(LispObject obj) {
 static inline void lisp_assert_string(LispObject obj) {
     if (!lisp_is_string(obj)) {
         lisp_panic(L"expected a string but got something else");
+    }
+}
+
+static inline void lisp_assert_number(LispObject obj) {
+    if (!lisp_is_number(obj)) {
+        lisp_panic(L"expected a number but got something else");
     }
 }
 
@@ -169,6 +193,11 @@ LispObject lisp_make_closure(LispObject params, LispObject body, LispObject env)
     closure->is_macro = 0;
     closure->str_data = 0;
     closure->str_len = 0;
+    closure->is_float = 0;
+    closure->float_value = 0.0;
+    closure->big_digits = 0;
+    closure->big_len = 0;
+    closure->big_negative = 0;
     return ((LispObject)closure) | LISP_TAG_CLOSURE;
 }
 
@@ -181,6 +210,11 @@ LispObject lisp_make_builtin(LispBuiltinFn fn) {
     closure->is_macro = 0;
     closure->str_data = 0;
     closure->str_len = 0;
+    closure->is_float = 0;
+    closure->float_value = 0.0;
+    closure->big_digits = 0;
+    closure->big_len = 0;
+    closure->big_negative = 0;
     return ((LispObject)closure) | LISP_TAG_CLOSURE;
 }
 
@@ -195,6 +229,11 @@ LispObject lisp_make_macro(LispObject params, LispObject body, LispObject env) {
     closure->is_macro = 1;
     closure->str_data = 0;
     closure->str_len = 0;
+    closure->is_float = 0;
+    closure->float_value = 0.0;
+    closure->big_digits = 0;
+    closure->big_len = 0;
+    closure->big_negative = 0;
     return ((LispObject)closure) | LISP_TAG_CLOSURE;
 }
 
@@ -216,7 +255,232 @@ LispObject lisp_make_string(const char *chars, UINTN len) {
     buf[len] = '\0';
     closure->str_data = buf;
     closure->str_len = len;
+    closure->is_float = 0;
+    closure->float_value = 0.0;
+    closure->big_digits = 0;
+    closure->big_len = 0;
+    closure->big_negative = 0;
     return ((LispObject)closure) | LISP_TAG_CLOSURE;
+}
+
+#define LISP_BIGNUM_MAX_LIMBS 64
+
+// floatオブジェクトを作る（milestone 22）。LISP_TAG_CLOSUREのescape hatchを再利用する
+LispObject lisp_make_float(double value) {
+    LispClosure *closure = (LispClosure *)lisp_alloc(sizeof(LispClosure));
+    closure->params = LISP_NIL;
+    closure->body = LISP_NIL;
+    closure->env = LISP_NIL;
+    closure->builtin = 0;
+    closure->is_macro = 0;
+    closure->str_data = 0;
+    closure->str_len = 0;
+    closure->is_float = 1;
+    closure->float_value = value;
+    closure->big_digits = 0;
+    closure->big_len = 0;
+    closure->big_negative = 0;
+    return ((LispObject)closure) | LISP_TAG_CLOSURE;
+}
+
+// bignumオブジェクトを作る（milestone 22）。digitsはlen個の有効桁（先頭ゼロ桁は
+// trim済みでlen>=1であること）をヒープにコピーする。fixnum範囲に収まるかどうかの
+// 判定は行わない生のコンストラクタなので、通常はlisp_make_number_from_magnitude経由で
+// 呼ぶこと（正規化を保証するため）
+LispObject lisp_make_bignum(const UINT32 *digits, UINTN len, int negative) {
+    LispClosure *closure = (LispClosure *)lisp_alloc(sizeof(LispClosure));
+    closure->params = LISP_NIL;
+    closure->body = LISP_NIL;
+    closure->env = LISP_NIL;
+    closure->builtin = 0;
+    closure->is_macro = 0;
+    closure->str_data = 0;
+    closure->str_len = 0;
+    closure->is_float = 0;
+    closure->float_value = 0.0;
+    UINT32 *buf = (UINT32 *)lisp_alloc(len * sizeof(UINT32));
+    for (UINTN i = 0; i < len; i++) {
+        buf[i] = digits[i];
+    }
+    closure->big_digits = buf;
+    closure->big_len = len;
+    closure->big_negative = negative;
+    return ((LispObject)closure) | LISP_TAG_CLOSURE;
+}
+
+// 桁配列(digits, len)と符号(negative)がfixnum表現範囲に収まるならfixnumを、
+// 収まらなければbignumをboxして返す。bignum生成の正規化された唯一の入り口とする
+// （「小さい結果は必ずfixnum」という不変条件を保ち、eq比較を成立させるため）
+LispObject lisp_make_number_from_magnitude(const UINT32 *digits, UINTN len, int negative) {
+    while (len > 0 && digits[len - 1] == 0) {
+        len--;
+    }
+    if (len == 0) {
+        return lisp_make_fixnum(0); // 0は常にfixnum（符号は無視する）
+    }
+    if (len <= 2) {
+        UINT64 mag = digits[0];
+        if (len == 2) {
+            mag |= ((UINT64)digits[1]) << 32;
+        }
+        // fixnumは(value << 2)が64bitに収まる範囲、すなわち[-2^61, 2^61-1]まで表現できる
+        UINT64 max_mag = negative ? ((UINT64)1 << 61) : (((UINT64)1 << 61) - 1);
+        if (mag <= max_mag) {
+            long long value = negative ? -(long long)mag : (long long)mag;
+            return lisp_make_fixnum(value);
+        }
+    }
+    return lisp_make_bignum(digits, len, negative);
+}
+
+// 絶対値の加算(schoolbook algorithm、2^32進)。out capacityは
+// max(alen,blen)+1以上であること。戻り値は書き込んだ桁数
+static UINTN lisp_bignum_add_mag(const UINT32 *a, UINTN alen, const UINT32 *b, UINTN blen, UINT32 *out) {
+    UINTN n = (alen > blen) ? alen : blen;
+    UINT64 carry = 0;
+    UINTN i;
+    for (i = 0; i < n; i++) {
+        UINT64 av = (i < alen) ? a[i] : 0;
+        UINT64 bv = (i < blen) ? b[i] : 0;
+        UINT64 sum = av + bv + carry;
+        out[i] = (UINT32)sum;
+        carry = sum >> 32;
+    }
+    if (carry != 0) {
+        out[i] = (UINT32)carry;
+        i++;
+    }
+    return i;
+}
+
+// 絶対値の減算。|a|>=|b|であることが前提（呼び出し側でcompareして保証する）。
+// out capacityはalen以上であること。戻り値は先頭ゼロ桁をtrimした後の桁数
+static UINTN lisp_bignum_sub_mag(const UINT32 *a, UINTN alen, const UINT32 *b, UINTN blen, UINT32 *out) {
+    long long borrow = 0;
+    for (UINTN i = 0; i < alen; i++) {
+        long long av = a[i];
+        long long bv = (i < blen) ? b[i] : 0;
+        long long diff = av - bv - borrow;
+        if (diff < 0) {
+            diff += ((long long)1 << 32);
+            borrow = 1;
+        } else {
+            borrow = 0;
+        }
+        out[i] = (UINT32)diff;
+    }
+    UINTN len = alen;
+    while (len > 0 && out[len - 1] == 0) {
+        len--;
+    }
+    return len;
+}
+
+// 絶対値の比較。1: |a|>|b|, 0: 等しい, -1: |a|<|b|
+static int lisp_bignum_compare_mag(const UINT32 *a, UINTN alen, const UINT32 *b, UINTN blen) {
+    if (alen != blen) {
+        return (alen > blen) ? 1 : -1;
+    }
+    for (UINTN idx = alen; idx > 0; idx--) {
+        UINTN i = idx - 1;
+        if (a[i] != b[i]) {
+            return (a[i] > b[i]) ? 1 : -1;
+        }
+    }
+    return 0;
+}
+
+// objの絶対値の桁配列と符号を得る。fixnumならtmp(要素数2以上)に展開して返し、
+// bignumなら内部の桁配列をそのまま返す（floatは呼び出し禁止、呼び出し前に
+// lisp_is_floatで分岐しておくこと）
+static const UINT32 *lisp_number_magnitude(LispObject obj, UINT32 *tmp, UINTN *out_len, int *out_negative) {
+    if (lisp_is_fixnum(obj)) {
+        long long value = lisp_fixnum_value(obj);
+        *out_negative = value < 0;
+        UINT64 mag = (value < 0) ? (UINT64)(-value) : (UINT64)value;
+        tmp[0] = (UINT32)(mag & 0xFFFFFFFFULL);
+        tmp[1] = (UINT32)(mag >> 32);
+        *out_len = (tmp[1] != 0) ? 2 : ((tmp[0] != 0) ? 1 : 0);
+        return tmp;
+    }
+    LispClosure *cell = lisp_closure_cell(obj);
+    *out_negative = cell->big_negative;
+    *out_len = cell->big_len;
+    return cell->big_digits;
+}
+
+// obj(fixnum/bignum/float)をdoubleに変換する。bignumは上位桁から順に
+// doubleへ積み上げるため、doubleの仮数部(53bit)を超える桁は丸め誤差が生じる
+// （float混在時の昇格専用の変換であり、既知の精度限界として許容する）
+static double lisp_number_to_double(LispObject obj) {
+    if (lisp_is_float(obj)) {
+        return lisp_closure_cell(obj)->float_value;
+    }
+    if (lisp_is_fixnum(obj)) {
+        return (double)lisp_fixnum_value(obj);
+    }
+    LispClosure *cell = lisp_closure_cell(obj);
+    double result = 0.0;
+    for (UINTN idx = cell->big_len; idx > 0; idx--) {
+        result = result * 4294967296.0 + (double)cell->big_digits[idx - 1];
+    }
+    return cell->big_negative ? -result : result;
+}
+
+// 汎用の数値加算。fixnum/bignum/floatのどの組み合わせでも受け付ける（milestone 22の
+// 型混在昇格規則の中核）: どちらかがfloatならdoubleで計算してfloatを返す。それ以外は
+// 絶対値配列の加減算(符号が同じなら加算、異なれば大きい方から小さい方を引く)を行い、
+// 結果をlisp_make_number_from_magnitudeで正規化する（fixnum範囲に収まればfixnumへ戻す）
+LispObject lisp_num_add(LispObject a, LispObject b) {
+    if (lisp_is_float(a) || lisp_is_float(b)) {
+        return lisp_make_float(lisp_number_to_double(a) + lisp_number_to_double(b));
+    }
+
+    UINT32 ta[2], tb[2];
+    UINTN alen, blen;
+    int aneg, bneg;
+    const UINT32 *ad = lisp_number_magnitude(a, ta, &alen, &aneg);
+    const UINT32 *bd = lisp_number_magnitude(b, tb, &blen, &bneg);
+
+    UINTN cap = (alen > blen ? alen : blen) + 1;
+    if (cap > LISP_BIGNUM_MAX_LIMBS) {
+        lisp_panic(L"bignum overflow: magnitude too large");
+    }
+
+    UINT32 out[LISP_BIGNUM_MAX_LIMBS];
+    UINTN outlen;
+    int outneg;
+    if (aneg == bneg) {
+        outlen = lisp_bignum_add_mag(ad, alen, bd, blen, out);
+        outneg = aneg;
+    } else {
+        int cmp = lisp_bignum_compare_mag(ad, alen, bd, blen);
+        if (cmp >= 0) {
+            outlen = lisp_bignum_sub_mag(ad, alen, bd, blen, out);
+            outneg = aneg;
+        } else {
+            outlen = lisp_bignum_sub_mag(bd, blen, ad, alen, out);
+            outneg = bneg;
+        }
+    }
+    return lisp_make_number_from_magnitude(out, outlen, outneg);
+}
+
+// 符号反転（unary -）。fixnum/bignumは絶対値をそのまま符号だけ反転して正規化し直す
+// （fixnumのmin/max境界の非対称性はlisp_make_number_from_magnitudeが吸収する）
+LispObject lisp_num_negate(LispObject a) {
+    if (lisp_is_float(a)) {
+        return lisp_make_float(-lisp_closure_cell(a)->float_value);
+    }
+    UINT32 ta[2];
+    UINTN alen;
+    int aneg;
+    const UINT32 *ad = lisp_number_magnitude(a, ta, &alen, &aneg);
+    return lisp_make_number_from_magnitude(ad, alen, !aneg);
+}
+
+LispObject lisp_num_sub(LispObject a, LispObject b) {
+    return lisp_num_add(a, lisp_num_negate(b));
 }
 
 #define LISP_MAX_SYMBOLS 256
@@ -430,6 +694,86 @@ void lisp_print_fixnum(EFI_SYSTEM_TABLE *SystemTable, long long value) {
     }
 }
 
+// digits(len個、2^32進)をdivisor(32bit以下の小さい数)で割り、商をdigitsに
+// 上書きする(最上位桁からの長除法)。戻り値は余り
+static UINT32 lisp_bignum_divmod_small(UINT32 *digits, UINTN len, UINT32 divisor) {
+    UINT64 remainder = 0;
+    for (UINTN idx = len; idx > 0; idx--) {
+        UINTN i = idx - 1;
+        UINT64 cur = (remainder << 32) | digits[i];
+        digits[i] = (UINT32)(cur / divisor);
+        remainder = cur % divisor;
+    }
+    return (UINT32)remainder;
+}
+
+// bignumを10進文字列として表示する（libcの多倍長→10進変換相当が無いため自前実装。
+// 桁配列を10で繰り返し割って余りを集めることで、下位桁から順に10進の1桁を取り出す）
+void lisp_print_bignum(EFI_SYSTEM_TABLE *SystemTable, LispClosure *big) {
+    UINT32 scratch[LISP_BIGNUM_MAX_LIMBS];
+    UINTN len = big->big_len;
+    for (UINTN i = 0; i < len; i++) {
+        scratch[i] = big->big_digits[i];
+    }
+
+    char decimal[LISP_BIGNUM_MAX_LIMBS * 10 + 2]; // 64桁*32bit ≒ 617桁+符号分の余裕
+    UINTN dcount = 0;
+    while (len > 0) {
+        UINT32 rem = lisp_bignum_divmod_small(scratch, len, 10);
+        decimal[dcount] = '0' + (char)rem;
+        dcount++;
+        while (len > 0 && scratch[len - 1] == 0) {
+            len--;
+        }
+    }
+
+    if (big->big_negative) {
+        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"-");
+    }
+    while (dcount > 0) {
+        dcount--;
+        CHAR16 ch[2] = { (CHAR16)decimal[dcount], 0 };
+        SystemTable->ConOut->OutputString(SystemTable->ConOut, ch);
+    }
+}
+
+// floatを固定小数点形式で表示する（指数表記は扱わない簡略化）。整数部はlisp_print_fixnumを
+// 再利用し、小数部は10進6桁を手計算で求め、末尾の'0'は1桁残るまでtrimする
+// （libcのsprintf/%f相当が無いため自前実装。値がlong longで表せない極端な大きさのfloatは
+// 想定していない）
+void lisp_print_float(EFI_SYSTEM_TABLE *SystemTable, double value) {
+    int negative = value < 0.0;
+    double v = negative ? -value : value;
+    long long int_part = (long long)v;
+    double frac = v - (double)int_part;
+
+    if (negative) {
+        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"-");
+    }
+    lisp_print_fixnum(SystemTable, int_part);
+    SystemTable->ConOut->OutputString(SystemTable->ConOut, L".");
+
+    char frac_digits[6];
+    for (UINTN i = 0; i < 6; i++) {
+        frac *= 10.0;
+        int d = (int)frac;
+        if (d > 9) {
+            d = 9; // 浮動小数点誤差の防御
+        }
+        frac_digits[i] = '0' + (char)d;
+        frac -= d;
+    }
+
+    UINTN show = 6;
+    while (show > 1 && frac_digits[show - 1] == '0') {
+        show--;
+    }
+    for (UINTN i = 0; i < show; i++) {
+        CHAR16 ch[2] = { (CHAR16)frac_digits[i], 0 };
+        SystemTable->ConOut->OutputString(SystemTable->ConOut, ch);
+    }
+}
+
 // LispObjectを人間が読める形式でコンソールに表示する。
 // fixnumは10進、symbolは名前、consは(a b c)または(a . b)形式、nilはnilと表示する
 void lisp_print(EFI_SYSTEM_TABLE *SystemTable, LispObject obj) {
@@ -440,6 +784,16 @@ void lisp_print(EFI_SYSTEM_TABLE *SystemTable, LispObject obj) {
 
     if (lisp_is_fixnum(obj)) {
         lisp_print_fixnum(SystemTable, lisp_fixnum_value(obj));
+        return;
+    }
+
+    if (lisp_is_float(obj)) {
+        lisp_print_float(SystemTable, lisp_closure_cell(obj)->float_value);
+        return;
+    }
+
+    if (lisp_is_bignum(obj)) {
+        lisp_print_bignum(SystemTable, lisp_closure_cell(obj));
         return;
     }
 
@@ -534,13 +888,76 @@ static int lisp_token_is_fixnum(const char *token) {
     return 1;
 }
 
-static long long lisp_token_to_fixnum(const char *token) {
+// トークンを数値オブジェクトへ変換する。桁を読みながら直接桁配列へ積む
+// （mag = mag*10+digit）ため、long longの範囲を超える長い整数リテラルも
+// 正しくbignumとして読める（milestone 22より前は`long long value = value*10+digit`で
+// 一旦組み立ててからlisp_make_fixnumに渡していたため、fixnum表現範囲を超える
+// リテラルが符号ビットの位置に食い込んで値が化ける不具合があった）。
+// 結果はlisp_make_number_from_magnitudeで正規化するので、小さい値は自動的にfixnumになる
+static LispObject lisp_token_to_number(const char *token) {
     int negative = token[0] == '-';
     UINTN i = negative ? 1 : 0;
-    long long value = 0;
+    UINT32 mag[LISP_BIGNUM_MAX_LIMBS];
+    UINTN len = 0;
     for (; token[i] != '\0'; i++) {
-        value = value * 10 + (token[i] - '0');
+        UINT32 digit = (UINT32)(token[i] - '0');
+        UINT64 carry = digit;
+        for (UINTN j = 0; j < len; j++) {
+            UINT64 v = (UINT64)mag[j] * 10 + carry;
+            mag[j] = (UINT32)v;
+            carry = v >> 32;
+        }
+        if (carry != 0) {
+            if (len >= LISP_BIGNUM_MAX_LIMBS) {
+                lisp_panic(L"number literal overflow: too many digits");
+            }
+            mag[len] = (UINT32)carry;
+            len++;
+        }
     }
+    return lisp_make_number_from_magnitude(mag, len, negative);
+}
+
+// トークンが（先頭の"-"を許した）"digit+.digit+"形式のfloatリテラルかどうかを判定する
+// (milestone 22)。".5"や"5."（整数部・小数部いずれかの省略）や指数表記("1e10")は
+// 扱わない簡略化
+static int lisp_token_is_float(const char *token) {
+    UINTN i = (token[0] == '-') ? 1 : 0;
+    UINTN int_digits = 0;
+    while (token[i] >= '0' && token[i] <= '9') {
+        i++;
+        int_digits++;
+    }
+    if (int_digits == 0 || token[i] != '.') {
+        return 0;
+    }
+    i++;
+    UINTN frac_digits = 0;
+    while (token[i] >= '0' && token[i] <= '9') {
+        i++;
+        frac_digits++;
+    }
+    return frac_digits > 0 && token[i] == '\0';
+}
+
+// libcのatof/strtod相当が無いため自前実装。整数部→小数部の順に手で桁を積む
+static double lisp_token_to_float(const char *token) {
+    int negative = token[0] == '-';
+    UINTN i = negative ? 1 : 0;
+    double int_part = 0.0;
+    while (token[i] >= '0' && token[i] <= '9') {
+        int_part = int_part * 10.0 + (double)(token[i] - '0');
+        i++;
+    }
+    i++; // '.'を読み飛ばす
+    double frac_part = 0.0;
+    double scale = 0.1;
+    while (token[i] >= '0' && token[i] <= '9') {
+        frac_part += (double)(token[i] - '0') * scale;
+        scale *= 0.1;
+        i++;
+    }
+    double value = int_part + frac_part;
     return negative ? -value : value;
 }
 
@@ -628,7 +1045,10 @@ LispObject lisp_read(void) {
     token[len] = '\0';
 
     if (lisp_token_is_fixnum(token)) {
-        return lisp_make_fixnum(lisp_token_to_fixnum(token));
+        return lisp_token_to_number(token);
+    }
+    if (lisp_token_is_float(token)) {
+        return lisp_make_float(lisp_token_to_float(token));
     }
     if (lisp_streq(token, "nil")) {
         return LISP_NIL; // nilはintern済みシンボルではなく即値LISP_NILそのものを返す
@@ -1247,18 +1667,17 @@ LispObject lisp_builtin_atom(LispObject args) {
     return lisp_is_cons(lisp_car(args)) ? LISP_NIL : lisp_sym_t;
 }
 
+// milestone 22: fixnum/bignum/floatの型混在に対応（昇格規則はlisp_num_add参照）
 LispObject lisp_builtin_add(LispObject args) {
-    long long sum = 0;
+    LispObject acc = lisp_make_fixnum(0);
     LispObject cur = args;
     while (lisp_is_cons(cur)) {
         LispObject v = lisp_car(cur);
-        if (!lisp_is_fixnum(v)) {
-            lisp_panic(L"+ expects fixnum arguments");
-        }
-        sum += lisp_fixnum_value(v);
+        lisp_assert_number(v);
+        acc = lisp_num_add(acc, v);
         cur = lisp_cdr(cur);
     }
-    return lisp_make_fixnum(sum);
+    return acc;
 }
 
 LispObject lisp_builtin_sub(LispObject args) {
@@ -1266,23 +1685,19 @@ LispObject lisp_builtin_sub(LispObject args) {
         lisp_panic(L"- requires at least 1 argument");
     }
     LispObject first = lisp_car(args);
-    if (!lisp_is_fixnum(first)) {
-        lisp_panic(L"- expects fixnum arguments");
-    }
-    long long result = lisp_fixnum_value(first);
+    lisp_assert_number(first);
     LispObject cur = lisp_cdr(args);
     if (!lisp_is_cons(cur)) {
-        return lisp_make_fixnum(-result); // 単項: 符号反転
+        return lisp_num_negate(first); // 単項: 符号反転
     }
+    LispObject acc = first;
     while (lisp_is_cons(cur)) {
         LispObject v = lisp_car(cur);
-        if (!lisp_is_fixnum(v)) {
-            lisp_panic(L"- expects fixnum arguments");
-        }
-        result -= lisp_fixnum_value(v);
+        lisp_assert_number(v);
+        acc = lisp_num_sub(acc, v);
         cur = lisp_cdr(cur);
     }
-    return lisp_make_fixnum(result);
+    return acc;
 }
 
 // (gensym)または(gensym "prefix"): 呼ぶたびに一意な非intern済みシンボルを返す。
