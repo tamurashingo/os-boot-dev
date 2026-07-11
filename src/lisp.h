@@ -36,6 +36,16 @@ LispObject lisp_read_from_buffer(const char *str);
 LispObject lisp_eval(LispObject expr, LispObject env);
 LispObject lisp_eval_toplevel(LispObject expr);
 
-void lisp_print(EFI_SYSTEM_TABLE *SystemTable, LispObject obj);
+// --- 出力ストリーム (milestone 24) ---
+// 関数ポインタ+contextという最小限のインターフェース。将来、文字列バッファへ
+// 書き込むストリームなど別の出力先を追加する際は、writeに別実装を渡すだけで済む
+typedef struct {
+    void (*write)(void *ctx, const char *str);
+    void *ctx;
+} LispOutputStream;
+
+LispOutputStream lisp_make_console_stream(EFI_SYSTEM_TABLE *SystemTable);
+
+void lisp_print(LispOutputStream *stream, LispObject obj);
 
 #endif // OS_BOOT_DEV_LISP_H

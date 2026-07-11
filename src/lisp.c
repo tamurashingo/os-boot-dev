@@ -711,8 +711,10 @@ void lisp_read_line(EFI_SYSTEM_TABLE *SystemTable) {
     input_buffer[input_length] = '\0';
 }
 
-// ASCII文字列(8bit char)をCHAR16に変換してコンソールへ出力する
-void lisp_print_ascii(EFI_SYSTEM_TABLE *SystemTable, const char *str) {
+// milestone 24: 出力ストリームのコンソール実装。ASCII文字列(8bit char)をCHAR16に
+// 変換してコンソールへ出力する
+static void lisp_console_stream_write(void *ctx, const char *str) {
+    EFI_SYSTEM_TABLE *SystemTable = (EFI_SYSTEM_TABLE *)ctx;
     CHAR16 buf[LISP_INPUT_BUFFER_MAX];
     UINTN i = 0;
     while (str[i] != '\0' && i < LISP_INPUT_BUFFER_MAX - 1) {
@@ -723,11 +725,21 @@ void lisp_print_ascii(EFI_SYSTEM_TABLE *SystemTable, const char *str) {
     SystemTable->ConOut->OutputString(SystemTable->ConOut, buf);
 }
 
+LispOutputStream lisp_make_console_stream(EFI_SYSTEM_TABLE *SystemTable) {
+    LispOutputStream stream = { lisp_console_stream_write, (void *)SystemTable };
+    return stream;
+}
+
+// ASCII文字列(8bit char)をストリームへ書き込む
+void lisp_print_ascii(LispOutputStream *stream, const char *str) {
+    stream->write(stream->ctx, str);
+}
+
 
 // --- プリンター (milestone 7) ---
 
 // 10進数を表示する（符号付き。libcのitoa相当が無いため自前実装）
-void lisp_print_fixnum(EFI_SYSTEM_TABLE *SystemTable, long long value) {
+void lisp_print_fixnum(LispOutputStream *stream, long long value) {
     char digits[24];
     UINTN i = 0;
     int negative = value < 0;
@@ -740,14 +752,14 @@ void lisp_print_fixnum(EFI_SYSTEM_TABLE *SystemTable, long long value) {
     } while (uval > 0);
 
     if (negative) {
-        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"-");
+        lisp_print_ascii(stream, "-");
     }
 
     // digitsには下位桁から積んでいるので、後ろから出力する
     while (i > 0) {
         i--;
-        CHAR16 ch[2] = { (CHAR16)digits[i], 0 };
-        SystemTable->ConOut->OutputString(SystemTable->ConOut, ch);
+        char ch[2] = { digits[i], 0 };
+        lisp_print_ascii(stream, ch);
     }
 }
 
@@ -766,7 +778,7 @@ static UINT32 lisp_bignum_divmod_small(UINT32 *digits, UINTN len, UINT32 divisor
 
 // bignumを10進文字列として表示する（libcの多倍長→10進変換相当が無いため自前実装。
 // 桁配列を10で繰り返し割って余りを集めることで、下位桁から順に10進の1桁を取り出す）
-void lisp_print_bignum(EFI_SYSTEM_TABLE *SystemTable, LispClosure *big) {
+void lisp_print_bignum(LispOutputStream *stream, LispClosure *big) {
     UINT32 scratch[LISP_BIGNUM_MAX_LIMBS];
     UINTN len = big->big_len;
     for (UINTN i = 0; i < len; i++) {
@@ -785,12 +797,12 @@ void lisp_print_bignum(EFI_SYSTEM_TABLE *SystemTable, LispClosure *big) {
     }
 
     if (big->big_negative) {
-        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"-");
+        lisp_print_ascii(stream, "-");
     }
     while (dcount > 0) {
         dcount--;
-        CHAR16 ch[2] = { (CHAR16)decimal[dcount], 0 };
-        SystemTable->ConOut->OutputString(SystemTable->ConOut, ch);
+        char ch[2] = { decimal[dcount], 0 };
+        lisp_print_ascii(stream, ch);
     }
 }
 
@@ -798,17 +810,17 @@ void lisp_print_bignum(EFI_SYSTEM_TABLE *SystemTable, LispClosure *big) {
 // 再利用し、小数部は10進6桁を手計算で求め、末尾の'0'は1桁残るまでtrimする
 // （libcのsprintf/%f相当が無いため自前実装。値がlong longで表せない極端な大きさのfloatは
 // 想定していない）
-void lisp_print_float(EFI_SYSTEM_TABLE *SystemTable, double value) {
+void lisp_print_float(LispOutputStream *stream, double value) {
     int negative = value < 0.0;
     double v = negative ? -value : value;
     long long int_part = (long long)v;
     double frac = v - (double)int_part;
 
     if (negative) {
-        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"-");
+        lisp_print_ascii(stream, "-");
     }
-    lisp_print_fixnum(SystemTable, int_part);
-    SystemTable->ConOut->OutputString(SystemTable->ConOut, L".");
+    lisp_print_fixnum(stream, int_part);
+    lisp_print_ascii(stream, ".");
 
     char frac_digits[6];
     for (UINTN i = 0; i < 6; i++) {
@@ -826,31 +838,31 @@ void lisp_print_float(EFI_SYSTEM_TABLE *SystemTable, double value) {
         show--;
     }
     for (UINTN i = 0; i < show; i++) {
-        CHAR16 ch[2] = { (CHAR16)frac_digits[i], 0 };
-        SystemTable->ConOut->OutputString(SystemTable->ConOut, ch);
+        char ch[2] = { frac_digits[i], 0 };
+        lisp_print_ascii(stream, ch);
     }
 }
 
 // LispObjectを人間が読める形式でコンソールに表示する。
 // fixnumは10進、symbolは名前、consは(a b c)または(a . b)形式、nilはnilと表示する
-void lisp_print(EFI_SYSTEM_TABLE *SystemTable, LispObject obj) {
+void lisp_print(LispOutputStream *stream, LispObject obj) {
     if (obj == LISP_NIL) {
-        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"nil");
+        lisp_print_ascii(stream, "nil");
         return;
     }
 
     if (lisp_is_fixnum(obj)) {
-        lisp_print_fixnum(SystemTable, lisp_fixnum_value(obj));
+        lisp_print_fixnum(stream, lisp_fixnum_value(obj));
         return;
     }
 
     if (lisp_is_float(obj)) {
-        lisp_print_float(SystemTable, lisp_closure_cell(obj)->float_value);
+        lisp_print_float(stream, lisp_closure_cell(obj)->float_value);
         return;
     }
 
     if (lisp_is_bignum(obj)) {
-        lisp_print_bignum(SystemTable, lisp_closure_cell(obj));
+        lisp_print_bignum(stream, lisp_closure_cell(obj));
         return;
     }
 
@@ -858,46 +870,46 @@ void lisp_print(EFI_SYSTEM_TABLE *SystemTable, LispObject obj) {
         LispSymbol *sym = lisp_symbol_cell(obj);
         // milestone 23: keywordパッケージのシンボルは":"を前置して印字する
         if (sym->package != 0 && sym->package->is_keyword_package) {
-            lisp_print_ascii(SystemTable, ":");
+            lisp_print_ascii(stream, ":");
         }
-        lisp_print_ascii(SystemTable, sym->name);
+        lisp_print_ascii(stream, sym->name);
         return;
     }
 
     if (lisp_is_cons(obj)) {
-        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"(");
+        lisp_print_ascii(stream, "(");
 
         LispObject cur = obj;
         int first = 1;
         while (lisp_is_cons(cur)) {
             if (!first) {
-                SystemTable->ConOut->OutputString(SystemTable->ConOut, L" ");
+                lisp_print_ascii(stream, " ");
             }
             first = 0;
-            lisp_print(SystemTable, lisp_car(cur));
+            lisp_print(stream, lisp_car(cur));
             cur = lisp_cdr(cur);
         }
 
         if (cur != LISP_NIL) {
-            SystemTable->ConOut->OutputString(SystemTable->ConOut, L" . ");
-            lisp_print(SystemTable, cur);
+            lisp_print_ascii(stream, " . ");
+            lisp_print(stream, cur);
         }
 
-        SystemTable->ConOut->OutputString(SystemTable->ConOut, L")");
+        lisp_print_ascii(stream, ")");
         return;
     }
 
     if (lisp_is_closure(obj)) {
         if (lisp_closure_cell(obj)->str_data != 0) {
-            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\"");
-            lisp_print_ascii(SystemTable, lisp_closure_cell(obj)->str_data);
-            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\"");
+            lisp_print_ascii(stream, "\"");
+            lisp_print_ascii(stream, lisp_closure_cell(obj)->str_data);
+            lisp_print_ascii(stream, "\"");
         } else if (lisp_closure_cell(obj)->builtin != 0) {
-            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"#<builtin>");
+            lisp_print_ascii(stream, "#<builtin>");
         } else if (lisp_closure_cell(obj)->is_macro) {
-            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"#<macro>");
+            lisp_print_ascii(stream, "#<macro>");
         } else {
-            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"#<closure>");
+            lisp_print_ascii(stream, "#<closure>");
         }
         return;
     }

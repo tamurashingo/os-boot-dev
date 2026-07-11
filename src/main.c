@@ -86,6 +86,8 @@ EFI_STATUS EFIAPI EfiMain(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable)
 
             SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\nMinimal Lisp REPL. Type an expression and press Enter.\r\n");
 
+            LispOutputStream console_stream = lisp_make_console_stream(SystemTable);
+
             for (;;) {
                 SystemTable->ConOut->OutputString(SystemTable->ConOut, L"> ");
                 lisp_read_line(SystemTable);
@@ -94,7 +96,7 @@ EFI_STATUS EFIAPI EfiMain(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable)
                 }
                 LispObject expr = lisp_read_from_buffer(input_buffer);
                 LispObject result = lisp_eval_toplevel(expr);
-                lisp_print(SystemTable, result);
+                lisp_print(&console_stream, result);
                 SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\n");
             }
         } else {
