@@ -1827,6 +1827,25 @@ LispObject lisp_builtin_atom(LispObject args) {
     return lisp_is_cons(lisp_car(args)) ? LISP_NIL : lisp_sym_t;
 }
 
+// (rplaca cons-cell new-car): cons-cellのcarをnew-carへ破壊的に書き換え、cons-cell自身を
+// 返す（milestone 27。CommonLispのrplacaと同じ「書き換えたコンスセル自身を返す」仕様で、
+// svsetがvalueを返すのとは異なる）。既存のlisp_set_carがlisp_assert_consを内包しているため
+// 追加の型検証は不要
+LispObject lisp_builtin_rplaca(LispObject args) {
+    LispObject cell = lisp_car(args);
+    LispObject value = lisp_car(lisp_cdr(args));
+    lisp_set_car(cell, value);
+    return cell;
+}
+
+// (rplacd cons-cell new-cdr): cons-cellのcdrをnew-cdrへ破壊的に書き換え、cons-cell自身を返す
+LispObject lisp_builtin_rplacd(LispObject args) {
+    LispObject cell = lisp_car(args);
+    LispObject value = lisp_car(lisp_cdr(args));
+    lisp_set_cdr(cell, value);
+    return cell;
+}
+
 // milestone 22: fixnum/bignum/floatの型混在に対応（昇格規則はlisp_num_add参照）
 LispObject lisp_builtin_add(LispObject args) {
     LispObject acc = lisp_make_fixnum(0);
@@ -2087,6 +2106,8 @@ LispObject lisp_builtins_init(void) {
     env = lisp_env_extend(env, lisp_intern("cons"), lisp_make_builtin(lisp_builtin_cons));
     env = lisp_env_extend(env, lisp_intern("eq"), lisp_make_builtin(lisp_builtin_eq));
     env = lisp_env_extend(env, lisp_intern("atom"), lisp_make_builtin(lisp_builtin_atom));
+    env = lisp_env_extend(env, lisp_intern("rplaca"), lisp_make_builtin(lisp_builtin_rplaca));
+    env = lisp_env_extend(env, lisp_intern("rplacd"), lisp_make_builtin(lisp_builtin_rplacd));
     env = lisp_env_extend(env, lisp_intern("+"), lisp_make_builtin(lisp_builtin_add));
     env = lisp_env_extend(env, lisp_intern("-"), lisp_make_builtin(lisp_builtin_sub));
     env = lisp_env_extend(env, lisp_intern("load"), lisp_make_builtin(lisp_builtin_load));
