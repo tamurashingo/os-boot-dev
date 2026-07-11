@@ -53,6 +53,8 @@ typedef struct {
     UINT32 *big_digits; // milestone 22: 非NULLならbignum。2^32進の桁配列（[0]が最下位、先頭ゼロ桁はtrim済み）
     UINTN big_len;       // big_digitsの有効桁数
     int big_negative;    // 真なら負数（0は常にfixnumで表すため、bignumが0を表すことはない）
+    LispObject *vec_data; // milestone 26: 非NULLならvector。要素配列（vec_len個）へのポインタ
+    UINTN vec_len;         // vec_dataが指す要素数
 } LispClosure;
 
 static inline LispObject lisp_make_fixnum(long long value) {
@@ -106,6 +108,11 @@ static inline int lisp_is_bignum(LispObject obj) {
     return lisp_is_closure(obj) && lisp_closure_cell(obj)->big_digits != 0;
 }
 
+// vectorも同じくLISP_TAG_CLOSUREを共有するescape hatch（milestone 26、22と同じ方針）
+static inline int lisp_is_vector(LispObject obj) {
+    return lisp_is_closure(obj) && lisp_closure_cell(obj)->vec_data != 0;
+}
+
 static inline int lisp_is_number(LispObject obj) {
     return lisp_is_fixnum(obj) || lisp_is_float(obj) || lisp_is_bignum(obj);
 }
@@ -144,6 +151,21 @@ static inline void lisp_assert_string(LispObject obj) {
 static inline void lisp_assert_number(LispObject obj) {
     if (!lisp_is_number(obj)) {
         lisp_panic(L"expected a number but got something else");
+    }
+}
+
+static inline void lisp_assert_vector(LispObject obj) {
+    if (!lisp_is_vector(obj)) {
+        lisp_panic(L"expected a vector but got something else");
+    }
+}
+
+// milestone 26: make-vectorの長さ・svref/svsetのindexはfixnumでなければならない
+// （float/bignumのタグ付きポインタをlisp_fixnum_valueで解釈すると値が破損するため、
+// lisp_assert_numberでは不十分）
+static inline void lisp_assert_fixnum(LispObject obj) {
+    if (!lisp_is_fixnum(obj)) {
+        lisp_panic(L"expected a fixnum but got something else");
     }
 }
 
@@ -210,6 +232,8 @@ LispObject lisp_make_closure(LispObject params, LispObject body, LispObject env)
     closure->big_digits = 0;
     closure->big_len = 0;
     closure->big_negative = 0;
+    closure->vec_data = 0;
+    closure->vec_len = 0;
     return ((LispObject)closure) | LISP_TAG_CLOSURE;
 }
 
@@ -227,6 +251,8 @@ LispObject lisp_make_builtin(LispBuiltinFn fn) {
     closure->big_digits = 0;
     closure->big_len = 0;
     closure->big_negative = 0;
+    closure->vec_data = 0;
+    closure->vec_len = 0;
     return ((LispObject)closure) | LISP_TAG_CLOSURE;
 }
 
@@ -246,6 +272,8 @@ LispObject lisp_make_macro(LispObject params, LispObject body, LispObject env) {
     closure->big_digits = 0;
     closure->big_len = 0;
     closure->big_negative = 0;
+    closure->vec_data = 0;
+    closure->vec_len = 0;
     return ((LispObject)closure) | LISP_TAG_CLOSURE;
 }
 
@@ -272,6 +300,8 @@ LispObject lisp_make_string(const char *chars, UINTN len) {
     closure->big_digits = 0;
     closure->big_len = 0;
     closure->big_negative = 0;
+    closure->vec_data = 0;
+    closure->vec_len = 0;
     return ((LispObject)closure) | LISP_TAG_CLOSURE;
 }
 
@@ -292,6 +322,8 @@ LispObject lisp_make_float(double value) {
     closure->big_digits = 0;
     closure->big_len = 0;
     closure->big_negative = 0;
+    closure->vec_data = 0;
+    closure->vec_len = 0;
     return ((LispObject)closure) | LISP_TAG_CLOSURE;
 }
 
@@ -317,6 +349,36 @@ LispObject lisp_make_bignum(const UINT32 *digits, UINTN len, int negative) {
     closure->big_digits = buf;
     closure->big_len = len;
     closure->big_negative = negative;
+    closure->vec_data = 0;
+    closure->vec_len = 0;
+    return ((LispObject)closure) | LISP_TAG_CLOSURE;
+}
+
+// vectorオブジェクトを作る（milestone 26）。LISP_TAG_CLOSUREのescape hatchを
+// milestone15/22と同様に再利用し、新しいタグは追加しない。要素配列はLispClosure本体とは
+// 別にlisp_allocでヒープ上へ確保し、全要素をfillで初期化する。len==0の場合、lisp_allocは
+// 次の割り当てと同じアドレスを返すことがあるが、vec_lenが0のためvec_dataを実際に
+// 読み書きするコードは存在せず問題ない
+LispObject lisp_make_vector(UINTN len, LispObject fill) {
+    LispClosure *closure = (LispClosure *)lisp_alloc(sizeof(LispClosure));
+    closure->params = LISP_NIL;
+    closure->body = LISP_NIL;
+    closure->env = LISP_NIL;
+    closure->builtin = 0;
+    closure->is_macro = 0;
+    closure->str_data = 0;
+    closure->str_len = 0;
+    closure->is_float = 0;
+    closure->float_value = 0.0;
+    closure->big_digits = 0;
+    closure->big_len = 0;
+    closure->big_negative = 0;
+    LispObject *buf = (LispObject *)lisp_alloc(len * sizeof(LispObject));
+    for (UINTN i = 0; i < len; i++) {
+        buf[i] = fill;
+    }
+    closure->vec_data = buf;
+    closure->vec_len = len;
     return ((LispObject)closure) | LISP_TAG_CLOSURE;
 }
 
@@ -843,6 +905,19 @@ void lisp_print_float(LispOutputStream *stream, double value) {
     }
 }
 
+// vectorを#(elem1 elem2 ...)形式で表示する（milestone 26）。各要素はlisp_printを
+// 再帰呼び出しして表示する（consのリスト表示と同じ再帰構造）
+static void lisp_print_vector(LispOutputStream *stream, LispClosure *vec) {
+    lisp_print_ascii(stream, "#(");
+    for (UINTN i = 0; i < vec->vec_len; i++) {
+        if (i != 0) {
+            lisp_print_ascii(stream, " ");
+        }
+        lisp_print(stream, vec->vec_data[i]);
+    }
+    lisp_print_ascii(stream, ")");
+}
+
 // LispObjectを人間が読める形式でコンソールに表示する。
 // fixnumは10進、symbolは名前、consは(a b c)または(a . b)形式、nilはnilと表示する
 void lisp_print(LispOutputStream *stream, LispObject obj) {
@@ -863,6 +938,11 @@ void lisp_print(LispOutputStream *stream, LispObject obj) {
 
     if (lisp_is_bignum(obj)) {
         lisp_print_bignum(stream, lisp_closure_cell(obj));
+        return;
+    }
+
+    if (lisp_is_vector(obj)) {
+        lisp_print_vector(stream, lisp_closure_cell(obj));
         return;
     }
 
@@ -1821,6 +1901,60 @@ LispObject lisp_builtin_gensym(LispObject args) {
     return lisp_make_uninterned_symbol(name);
 }
 
+// (make-vector length) または (make-vector length fill): lengthの長さの新しいvectorを
+// 作る（milestone 26）。fill省略時は各要素をnilで初期化する
+LispObject lisp_builtin_make_vector(LispObject args) {
+    LispObject len_obj = lisp_car(args);
+    lisp_assert_fixnum(len_obj);
+    long long len = lisp_fixnum_value(len_obj);
+    if (len < 0) {
+        lisp_panic(L"make-vector: length must not be negative");
+    }
+
+    LispObject fill = LISP_NIL;
+    LispObject rest = lisp_cdr(args);
+    if (lisp_is_cons(rest)) {
+        fill = lisp_car(rest);
+    }
+    return lisp_make_vector((UINTN)len, fill);
+}
+
+// (svref vector index): index番目の要素を返す。範囲外は即座にpanicする
+// （condition systemが無く、範囲外を素通しさせるとヒープ上の隣接オブジェクトを
+// 誤って読むことになるため、他のlisp_assert_*・heap exhausted等と同じ
+// 「不変条件違反は即panic」方針に合わせる）
+LispObject lisp_builtin_svref(LispObject args) {
+    LispObject vec = lisp_car(args);
+    lisp_assert_vector(vec);
+    LispObject idx_obj = lisp_car(lisp_cdr(args));
+    lisp_assert_fixnum(idx_obj);
+    long long idx = lisp_fixnum_value(idx_obj);
+
+    LispClosure *cell = lisp_closure_cell(vec);
+    if (idx < 0 || (UINTN)idx >= cell->vec_len) {
+        lisp_panic(L"svref: index out of range");
+    }
+    return cell->vec_data[idx];
+}
+
+// (svset vector index value): index番目の要素をvalueに破壊的に書き換え、
+// valueを返す（CommonLispの(setf (svref vector index) value)相当）
+LispObject lisp_builtin_svset(LispObject args) {
+    LispObject vec = lisp_car(args);
+    lisp_assert_vector(vec);
+    LispObject idx_obj = lisp_car(lisp_cdr(args));
+    lisp_assert_fixnum(idx_obj);
+    LispObject value = lisp_car(lisp_cdr(lisp_cdr(args)));
+    long long idx = lisp_fixnum_value(idx_obj);
+
+    LispClosure *cell = lisp_closure_cell(vec);
+    if (idx < 0 || (UINTN)idx >= cell->vec_len) {
+        lisp_panic(L"svset: index out of range");
+    }
+    cell->vec_data[idx] = value;
+    return value;
+}
+
 // *macroexpand-hook*のデフォルト値 (milestone 21)。実際の展開処理（マクロの仮引数への
 // 束縛→本文評価）はここに閉じている。呼び出し規約はCLの*macroexpand-hook*
 // （展開器・フォーム・環境の3引数）に合わせたが、このLispのマクロはCLの「関数」とは異なり
@@ -1958,6 +2092,9 @@ LispObject lisp_builtins_init(void) {
     env = lisp_env_extend(env, lisp_intern("load"), lisp_make_builtin(lisp_builtin_load));
     env = lisp_env_extend(env, lisp_intern("sleep"), lisp_make_builtin(lisp_builtin_sleep));
     env = lisp_env_extend(env, lisp_intern("gensym"), lisp_make_builtin(lisp_builtin_gensym));
+    env = lisp_env_extend(env, lisp_intern("make-vector"), lisp_make_builtin(lisp_builtin_make_vector));
+    env = lisp_env_extend(env, lisp_intern("svref"), lisp_make_builtin(lisp_builtin_svref));
+    env = lisp_env_extend(env, lisp_intern("svset"), lisp_make_builtin(lisp_builtin_svset));
     env = lisp_env_extend(env, lisp_intern("macroexpand-1"), lisp_make_builtin(lisp_builtin_macroexpand_1));
 
     // *macroexpand-hook*をdefvarと同じ形（is_special=1 + 初期値）で直接セットアップする
