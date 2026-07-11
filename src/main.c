@@ -83,6 +83,7 @@ EFI_STATUS EFIAPI EfiMain(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable)
             lisp_packages_init();
             lisp_symbols_init();
             global_env = lisp_builtins_init();
+            lisp_load_boot_file("stdlib.lisp"); // milestone 29: 標準ライブラリを起動時に読み込む
 
             SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\nMinimal Lisp REPL. Type an expression and press Enter.\r\n");
 

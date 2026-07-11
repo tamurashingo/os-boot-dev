@@ -29,6 +29,7 @@ void lisp_heap_init(UINT64 start, UINT64 size);
 void lisp_packages_init(void);
 void lisp_symbols_init(void);
 LispObject lisp_builtins_init(void);
+void lisp_load_boot_file(const char *filename); // milestone 29
 
 void lisp_read_line(EFI_SYSTEM_TABLE *SystemTable);
 LispObject lisp_read_from_buffer(const char *str);

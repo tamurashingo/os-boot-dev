@@ -1329,6 +1329,14 @@ LispObject lisp_env_bind_params(LispObject params, LispObject args, LispObject e
         params = lisp_cdr(params);
         args = lisp_cdr(args);
     }
+    // milestone 29: 仮引数リストがsymbol一つだけ（(lambda args ...)/(defun f args ...)）
+    // の場合、残りの実引数をリストのままそのsymbolへ束縛する（可変長引数）。
+    // (a b . rest)のドット対記法はリーダーが対応していないため、この「仮引数全体が
+    // 単一のsymbol」という形だけをサポートする
+    if (params != LISP_NIL && lisp_is_symbol(params)) {
+        env = lisp_env_extend(env, params, args);
+        return env;
+    }
     if (args != LISP_NIL) {
         lisp_panic(L"too many arguments");
     }
@@ -1895,6 +1903,38 @@ LispObject lisp_builtin_sub(LispObject args) {
     return acc;
 }
 
+// aが負数かどうかを判定する（fixnum/float/bignumの3表現に対応）。milestone22の
+// lisp_num_addなどと同じ「is_float→is_bignum→fixnum」の判定順に合わせる
+static int lisp_number_is_negative(LispObject a) {
+    if (lisp_is_float(a)) {
+        return lisp_closure_cell(a)->float_value < 0.0;
+    }
+    if (lisp_is_bignum(a)) {
+        return lisp_closure_cell(a)->big_negative;
+    }
+    return lisp_fixnum_value(a) < 0;
+}
+
+// (< a b c ...): 隣接するペアがすべてa<bを満たせばt、そうでなければnilを返す
+// （CLの多引数<と同じ「単調増加」判定）。差の符号をlisp_number_is_negativeで見るだけで
+// fixnum/bignum/floatの型混在をすべてlisp_num_subの既存の昇格規則に委譲できる。milestone
+// 29でこれ以外の比較演算子（>/=/<=/>=/zerop等）はstdlib.lisp側でこの<から導出する
+LispObject lisp_builtin_lt(LispObject args) {
+    LispObject cur = args;
+    lisp_assert_number(lisp_car(cur));
+    while (lisp_is_cons(lisp_cdr(cur))) {
+        LispObject a = lisp_car(cur);
+        LispObject b = lisp_car(lisp_cdr(cur));
+        lisp_assert_number(b);
+        LispObject diff = lisp_num_sub(a, b);
+        if (!lisp_number_is_negative(diff)) {
+            return LISP_NIL;
+        }
+        cur = lisp_cdr(cur);
+    }
+    return lisp_sym_t;
+}
+
 // (gensym)または(gensym "prefix"): 呼ぶたびに一意な非intern済みシンボルを返す。
 // 名前は「prefix（省略時は"G"）+ カウンタの10進数字」で、マクロ展開時の変数捕捉回避用の
 // 名前として読みやすくする以外の意味は持たない（一意性そのものはlisp_make_uninterned_symbolが
@@ -2082,6 +2122,18 @@ LispObject lisp_builtin_load(LispObject args) {
     return lisp_load_eval_buffer(lisp_load_buffer);
 }
 
+// milestone 29: EfiMainが起動時に標準ライブラリファイルを読み込むための入口。
+// lisp_builtin_loadはLisp文字列オブジェクトの引数リストを要求するので、
+// Cの文字列リテラルからそれを組み立てるだけの薄いラッパー
+void lisp_load_boot_file(const char *filename) {
+    UINTN len = 0;
+    while (filename[len] != '\0') {
+        len++;
+    }
+    LispObject args = lisp_cons(lisp_make_string(filename, len), LISP_NIL);
+    lisp_builtin_load(args);
+}
+
 // (sleep seconds): CreateEvent(EVT_TIMER)で使い捨てのタイマーイベントを作り、
 // SetTimer(TimerRelative)でseconds秒後(UEFIネイティブ単位=100ns)に発火するよう
 // セットし、WaitForEventでブロックして待つ。secondsはfixnum/bignum/floatいずれも
@@ -2127,6 +2179,7 @@ LispObject lisp_builtins_init(void) {
     env = lisp_env_extend(env, lisp_intern("hash-code"), lisp_make_builtin(lisp_builtin_hash_code));
     env = lisp_env_extend(env, lisp_intern("+"), lisp_make_builtin(lisp_builtin_add));
     env = lisp_env_extend(env, lisp_intern("-"), lisp_make_builtin(lisp_builtin_sub));
+    env = lisp_env_extend(env, lisp_intern("<"), lisp_make_builtin(lisp_builtin_lt));
     env = lisp_env_extend(env, lisp_intern("load"), lisp_make_builtin(lisp_builtin_load));
     env = lisp_env_extend(env, lisp_intern("sleep"), lisp_make_builtin(lisp_builtin_sleep));
     env = lisp_env_extend(env, lisp_intern("gensym"), lisp_make_builtin(lisp_builtin_gensym));
