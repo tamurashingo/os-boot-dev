@@ -33,6 +33,7 @@ void lisp_read_line(EFI_SYSTEM_TABLE *SystemTable);
 LispObject lisp_read_from_buffer(const char *str);
 
 LispObject lisp_eval(LispObject expr, LispObject env);
+LispObject lisp_eval_toplevel(LispObject expr);
 
 void lisp_print(EFI_SYSTEM_TABLE *SystemTable, LispObject obj);
 

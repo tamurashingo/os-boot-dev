@@ -92,7 +92,7 @@ EFI_STATUS EFIAPI EfiMain(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable)
                     continue;
                 }
                 LispObject expr = lisp_read_from_buffer(input_buffer);
-                LispObject result = lisp_eval(expr, global_env);
+                LispObject result = lisp_eval_toplevel(expr);
                 lisp_print(SystemTable, result);
                 SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\n");
             }

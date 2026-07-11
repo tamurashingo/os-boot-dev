@@ -296,6 +296,8 @@ static LispObject lisp_sym_when;
 static LispObject lisp_sym_unless;
 static LispObject lisp_sym_defvar;
 static LispObject lisp_sym_defparameter;
+static LispObject lisp_sym_block;
+static LispObject lisp_sym_return_from;
 
 void lisp_symbols_init(void) {
     lisp_sym_t = lisp_intern("t");
@@ -318,6 +320,8 @@ void lisp_symbols_init(void) {
     lisp_sym_unless = lisp_intern("unless");
     lisp_sym_defvar = lisp_intern("defvar");
     lisp_sym_defparameter = lisp_intern("defparameter");
+    lisp_sym_block = lisp_intern("block");
+    lisp_sym_return_from = lisp_intern("return-from");
 }
 
 
@@ -636,6 +640,16 @@ static int lisp_reader_at_end(void) {
 // マイルストーン9のlisp_env_bind_paramsのままで変更しない）
 LispObject global_env = LISP_NIL;
 
+// 非局所脱出の進行中シグナル (milestone 19)。setjmp/longjmpが使えないため、
+// return-fromが「対象タグ＋値」をここにセットしてから通常のLispObjectとして
+// 呼び出し元へ返り、以降のすべての評価経路（lisp_eval_progn/lisp_eval_list/
+// lisp_eval各分岐）はlisp_evalの戻り値を使う前にこのタグを確認し、セットされていれば
+// 残りの評価をせず即座にそのまま呼び出し元へ伝播する。対応するblockがタグの一致を見て
+// LISP_NILに戻すことでシグナルを捕捉する。LISP_NILは「脱出は発生していない」を表すため、
+// blockのタグとしてLISP_NILそのもの（nil）を使うことはできない
+static LispObject lisp_return_tag = LISP_NIL;
+static LispObject lisp_return_value = LISP_NIL;
+
 // symをvalueに束縛したペアをenvの先頭に追加した新しい環境を返す
 LispObject lisp_env_extend(LispObject env, LispObject sym, LispObject value) {
     return lisp_cons(lisp_cons(sym, value), env);
@@ -731,6 +745,9 @@ LispObject lisp_eval_list(LispObject list, LispObject env) {
         return LISP_NIL;
     }
     LispObject head = lisp_eval(lisp_car(list), env);
+    if (lisp_return_tag != LISP_NIL) {
+        return head; // milestone 19: 非局所脱出中は残りの引数を評価せずそのまま伝播する
+    }
     LispObject tail = lisp_eval_list(lisp_cdr(list), env);
     return lisp_cons(head, tail);
 }
@@ -741,6 +758,9 @@ LispObject lisp_eval_progn(LispObject forms, LispObject env) {
     LispObject result = LISP_NIL;
     while (lisp_is_cons(forms)) {
         result = lisp_eval(lisp_car(forms), env);
+        if (lisp_return_tag != LISP_NIL) {
+            return result; // milestone 19: 非局所脱出中は残りのformを評価せずそのまま伝播する
+        }
         forms = lisp_cdr(forms);
     }
     return result;
@@ -789,11 +809,17 @@ LispObject lisp_qq_expand(LispObject form, LispObject env) {
 
     if (lisp_is_cons(head) && lisp_car(head) == lisp_sym_unquote_splicing) {
         LispObject spliced = lisp_eval(lisp_car(lisp_cdr(head)), env);
+        if (lisp_return_tag != LISP_NIL) {
+            return spliced; // milestone 19: ,@内でのreturn-fromをそのまま伝播する
+        }
         LispObject rest = lisp_qq_expand(lisp_cdr(form), env);
         return lisp_append(spliced, rest);
     }
 
     LispObject expanded_head = lisp_qq_expand(head, env);
+    if (lisp_return_tag != LISP_NIL) {
+        return expanded_head; // milestone 19
+    }
     LispObject expanded_tail = lisp_qq_expand(lisp_cdr(form), env);
     return lisp_cons(expanded_head, expanded_tail);
 }
@@ -826,6 +852,9 @@ LispObject lisp_eval(LispObject expr, LispObject env) {
 
         if (op == lisp_sym_if) {
             LispObject test = lisp_eval(lisp_car(lisp_cdr(expr)), env);
+            if (lisp_return_tag != LISP_NIL) {
+                return test; // milestone 19
+            }
             LispObject rest = lisp_cdr(lisp_cdr(expr));
             if (test != LISP_NIL) {
                 return lisp_eval(lisp_car(rest), env);
@@ -852,6 +881,10 @@ LispObject lisp_eval(LispObject expr, LispObject env) {
             while (lisp_is_cons(cur)) {
                 LispObject binding = lisp_car(cur);
                 LispObject value = lisp_eval(lisp_car(lisp_cdr(binding)), env);
+                if (lisp_return_tag != LISP_NIL) {
+                    // milestone 19: まだ何も束縛・書き換えていないのでそのまま伝播してよい
+                    return value;
+                }
                 values = lisp_cons(lisp_cons(lisp_car(binding), value), values);
                 cur = lisp_cdr(cur);
             }
@@ -889,6 +922,8 @@ LispObject lisp_eval(LispObject expr, LispObject env) {
             LispObject new_env = env;
             LispObject saved_specials = LISP_NIL; // (sym . 退避した旧値)のリスト
             LispObject cur = bindings;
+            LispObject result = LISP_NIL;
+            int aborted = 0; // milestone 19: 初期値式の評価中に非局所脱出が起きたか
             // let*は各初期値式をそれまでに束縛した変数（動的変数を含む）が見える環境で
             // 評価する。動的変数は書き換えが即座に反映されるため、new_envに積まなくても
             // 以降の初期値式や本体から自然に見える
@@ -896,6 +931,13 @@ LispObject lisp_eval(LispObject expr, LispObject env) {
                 LispObject binding = lisp_car(cur);
                 LispObject sym = lisp_car(binding);
                 LispObject value = lisp_eval(lisp_car(lisp_cdr(binding)), new_env);
+                if (lisp_return_tag != LISP_NIL) {
+                    // すでに書き換えた動的変数がある可能性があるため、ループを抜けて
+                    // 下のsaved_specials復元処理を必ず通してから伝播する
+                    result = value;
+                    aborted = 1;
+                    break;
+                }
                 if (lisp_symbol_cell(sym)->is_special) {
                     saved_specials = lisp_cons(lisp_cons(sym, lisp_symbol_cell(sym)->value), saved_specials);
                     lisp_symbol_cell(sym)->value = value;
@@ -904,7 +946,9 @@ LispObject lisp_eval(LispObject expr, LispObject env) {
                 }
                 cur = lisp_cdr(cur);
             }
-            LispObject result = lisp_eval_progn(body, new_env);
+            if (!aborted) {
+                result = lisp_eval_progn(body, new_env);
+            }
             cur = saved_specials;
             while (lisp_is_cons(cur)) {
                 LispObject pair = lisp_car(cur);
@@ -918,6 +962,9 @@ LispObject lisp_eval(LispObject expr, LispObject env) {
             LispObject sym = lisp_car(lisp_cdr(expr));
             lisp_assert_symbol(sym);
             LispObject value = lisp_eval(lisp_car(lisp_cdr(lisp_cdr(expr))), env);
+            if (lisp_return_tag != LISP_NIL) {
+                return value; // milestone 19: 代入前に脱出。書き換えは行わない
+            }
             lisp_env_set(env, sym, value);
             return value;
         }
@@ -927,6 +974,9 @@ LispObject lisp_eval(LispObject expr, LispObject env) {
             while (lisp_is_cons(clauses)) {
                 LispObject clause = lisp_car(clauses);
                 LispObject test = lisp_eval(lisp_car(clause), env);
+                if (lisp_return_tag != LISP_NIL) {
+                    return test; // milestone 19
+                }
                 if (test != LISP_NIL) {
                     LispObject body = lisp_cdr(clause);
                     if (body == LISP_NIL) {
@@ -944,6 +994,9 @@ LispObject lisp_eval(LispObject expr, LispObject env) {
             LispObject result = lisp_sym_t; // (and)はtを返す
             while (lisp_is_cons(forms)) {
                 result = lisp_eval(lisp_car(forms), env);
+                if (lisp_return_tag != LISP_NIL) {
+                    return result; // milestone 19
+                }
                 if (result == LISP_NIL) {
                     return LISP_NIL; // 短絡評価: 以降のformは評価しない
                 }
@@ -956,6 +1009,9 @@ LispObject lisp_eval(LispObject expr, LispObject env) {
             LispObject forms = lisp_cdr(expr);
             while (lisp_is_cons(forms)) {
                 LispObject result = lisp_eval(lisp_car(forms), env);
+                if (lisp_return_tag != LISP_NIL) {
+                    return result; // milestone 19
+                }
                 if (result != LISP_NIL) {
                     return result; // 短絡評価: 最初にnilでない値が出た時点で返す
                 }
@@ -966,6 +1022,9 @@ LispObject lisp_eval(LispObject expr, LispObject env) {
 
         if (op == lisp_sym_when) {
             LispObject test = lisp_eval(lisp_car(lisp_cdr(expr)), env);
+            if (lisp_return_tag != LISP_NIL) {
+                return test; // milestone 19
+            }
             if (test == LISP_NIL) {
                 return LISP_NIL;
             }
@@ -974,10 +1033,42 @@ LispObject lisp_eval(LispObject expr, LispObject env) {
 
         if (op == lisp_sym_unless) {
             LispObject test = lisp_eval(lisp_car(lisp_cdr(expr)), env);
+            if (lisp_return_tag != LISP_NIL) {
+                return test; // milestone 19
+            }
             if (test != LISP_NIL) {
                 return LISP_NIL;
             }
             return lisp_eval_progn(lisp_cdr(lisp_cdr(expr)), env);
+        }
+
+        if (op == lisp_sym_block) {
+            LispObject tag = lisp_car(lisp_cdr(expr));
+            lisp_assert_symbol(tag);
+            LispObject body = lisp_cdr(lisp_cdr(expr));
+            LispObject result = lisp_eval_progn(body, env);
+            if (lisp_return_tag == tag) {
+                // 自分宛のシグナルを捕捉する。他のタグ宛（外側のblock用）ならreturn_tagを
+                // 残したままresultをそのまま返し、呼び出し元へ伝播させる
+                lisp_return_tag = LISP_NIL;
+                return lisp_return_value;
+            }
+            return result;
+        }
+
+        if (op == lisp_sym_return_from) {
+            LispObject tag = lisp_car(lisp_cdr(expr));
+            lisp_assert_symbol(tag);
+            LispObject value_forms = lisp_cdr(lisp_cdr(expr));
+            LispObject value = (value_forms == LISP_NIL) ? LISP_NIL : lisp_eval(lisp_car(value_forms), env);
+            if (lisp_return_tag != LISP_NIL) {
+                // value式の評価中に別のreturn-fromが先に発生した場合は、そちらを優先して
+                // そのまま伝播する（このreturn-fromの本体は実行されなかったことになる）
+                return value;
+            }
+            lisp_return_tag = tag;
+            lisp_return_value = value;
+            return value;
         }
 
         if (op == lisp_sym_lambda) {
@@ -993,7 +1084,11 @@ LispObject lisp_eval(LispObject expr, LispObject env) {
             // すでに動的変数として値を持つ場合は上書きしない（defvarをファイルの再loadで
             // 再度実行しても状態が保たれる、というCommon Lispのdefvarと同じ挙動）
             if (!cell->is_special) {
-                cell->value = lisp_eval(lisp_car(lisp_cdr(lisp_cdr(expr))), env);
+                LispObject value = lisp_eval(lisp_car(lisp_cdr(lisp_cdr(expr))), env);
+                if (lisp_return_tag != LISP_NIL) {
+                    return value; // milestone 19: 代入前に脱出。is_specialを立てない
+                }
+                cell->value = value;
                 cell->is_special = 1;
             }
             return sym;
@@ -1003,6 +1098,9 @@ LispObject lisp_eval(LispObject expr, LispObject env) {
             LispObject sym = lisp_car(lisp_cdr(expr));
             lisp_assert_symbol(sym);
             LispObject value = lisp_eval(lisp_car(lisp_cdr(lisp_cdr(expr))), env);
+            if (lisp_return_tag != LISP_NIL) {
+                return value; // milestone 19
+            }
             LispSymbol *cell = lisp_symbol_cell(sym);
             // defvarと異なり既存の値があっても常に上書きする
             cell->value = value;
@@ -1033,6 +1131,9 @@ LispObject lisp_eval(LispObject expr, LispObject env) {
         }
 
         LispObject fn = lisp_eval(op, env);
+        if (lisp_return_tag != LISP_NIL) {
+            return fn; // milestone 19: 呼び出す関数式自体の評価中に脱出した
+        }
 
         // マクロ呼び出しは引数を評価せず、未評価の式のまま仮引数に束縛して
         // マクロ本文を評価する（マクロ展開）。展開結果は呼び出し元のenvで
@@ -1041,10 +1142,16 @@ LispObject lisp_eval(LispObject expr, LispObject env) {
             LispClosure *macro = lisp_closure_cell(fn);
             LispObject expand_env = lisp_env_bind_params(macro->params, lisp_cdr(expr), macro->env);
             LispObject expansion = lisp_eval(macro->body, expand_env);
+            if (lisp_return_tag != LISP_NIL) {
+                return expansion; // milestone 19: マクロ展開自体の評価中に脱出した
+            }
             return lisp_eval(expansion, env);
         }
 
         LispObject args = lisp_eval_list(lisp_cdr(expr), env);
+        if (lisp_return_tag != LISP_NIL) {
+            return args; // milestone 19: 引数評価中に脱出。呼び出しは行わない
+        }
         return lisp_apply(fn, args);
     }
 
@@ -1053,6 +1160,19 @@ LispObject lisp_eval(LispObject expr, LispObject env) {
     }
 
     lisp_panic(L"cannot evaluate this object");
+}
+
+// REPLの1行、またはloadの1トップレベル式としてexprをglobal_env上で評価する。
+// return-fromの脱出シグナルが対応するblockに一度も捕捉されずここまで残っている場合、
+// タグが指す実行中のblockが存在しないというユーザー側の誤りなのでpanicする。
+// これをせずに素通しすると、残ったシグナルが次の入力の評価を最初の一歩で
+// 打ち切ってしまい、以降すべての評価が無言で壊れる (milestone 19)
+LispObject lisp_eval_toplevel(LispObject expr) {
+    LispObject result = lisp_eval(expr, global_env);
+    if (lisp_return_tag != LISP_NIL) {
+        lisp_panic(L"return-from: no enclosing block for this tag");
+    }
+    return result;
 }
 
 
@@ -1126,7 +1246,7 @@ static LispObject lisp_load_eval_buffer(const char *buf) {
     LispObject result = lisp_sym_t;
     while (!lisp_reader_at_end()) {
         LispObject form = lisp_read();
-        result = lisp_eval(form, global_env);
+        result = lisp_eval_toplevel(form);
     }
     return result;
 }
