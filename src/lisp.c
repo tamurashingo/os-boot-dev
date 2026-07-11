@@ -316,6 +316,7 @@ static LispObject lisp_sym_defvar;
 static LispObject lisp_sym_defparameter;
 static LispObject lisp_sym_block;
 static LispObject lisp_sym_return_from;
+static LispObject lisp_sym_macroexpand_hook;
 
 void lisp_symbols_init(void) {
     lisp_sym_t = lisp_intern("t");
@@ -340,6 +341,7 @@ void lisp_symbols_init(void) {
     lisp_sym_defparameter = lisp_intern("defparameter");
     lisp_sym_block = lisp_intern("block");
     lisp_sym_return_from = lisp_intern("return-from");
+    lisp_sym_macroexpand_hook = lisp_intern("*macroexpand-hook*");
 }
 
 
@@ -797,6 +799,35 @@ LispObject lisp_apply(LispObject fn, LispObject args) {
     return lisp_eval(closure->body, call_env);
 }
 
+// (macroexpand-1 form): マクロ呼び出しの外側の呼び出し1回分だけを展開する (milestone 21)。
+// これまでlisp_evalのマクロ呼び出し分岐に直接埋め込まれていた「呼び出し式を評価してマクロ
+// クロージャか確認し、本体を評価して展開結果を得る」処理を独立した関数として切り出したもので、
+// lisp_eval自身と組み込みmacroexpand-1の両方がこれを呼ぶ。マクロ呼び出しでなければexprを
+// そのまま（同じオブジェクトとして、eqが真になる形で）返す。多値が無いこのLispでは
+// CLの2番目の戻り値`expanded-p`を返せないため、代わりに`(eq form (macroexpand-1 form))`で
+// 「展開されなかった」ことを判定できる、という設計上の約束にしている。
+// 実際の展開処理そのものは*macroexpand-hook*（デフォルトはlisp_default_macroexpand_hook）に
+// 委譲する
+LispObject lisp_macroexpand_1(LispObject expr, LispObject env) {
+    if (!lisp_is_cons(expr)) {
+        return expr;
+    }
+
+    LispObject op = lisp_car(expr);
+    LispObject fn = lisp_eval(op, env);
+    if (lisp_return_tag != LISP_NIL) {
+        return fn; // milestone 19: 呼び出し式自体の評価中に脱出した
+    }
+
+    if (!lisp_is_closure(fn) || !lisp_closure_cell(fn)->is_macro) {
+        return expr; // マクロ呼び出しではない
+    }
+
+    LispObject hook = lisp_symbol_cell(lisp_sym_macroexpand_hook)->value;
+    LispObject hook_args = lisp_cons(fn, lisp_cons(expr, lisp_cons(env, LISP_NIL)));
+    return lisp_apply(hook, hook_args);
+}
+
 // リストaの末尾にリストbを連結した新しいリストを返す（aは破壊しない）。
 // quasiquoteの",@"展開でのみ使う内部ヘルパー
 LispObject lisp_append(LispObject a, LispObject b) {
@@ -1154,12 +1185,10 @@ LispObject lisp_eval(LispObject expr, LispObject env) {
         }
 
         // マクロ呼び出しは引数を評価せず、未評価の式のまま仮引数に束縛して
-        // マクロ本文を評価する（マクロ展開）。展開結果は呼び出し元のenvで
-        // 通常のevalにかける（2段階評価）
+        // マクロ本文を評価する（マクロ展開、milestone 21で切り出したlisp_macroexpand_1に
+        // 委譲）。展開結果は呼び出し元のenvで通常のevalにかける（2段階評価）
         if (lisp_is_closure(fn) && lisp_closure_cell(fn)->is_macro) {
-            LispClosure *macro = lisp_closure_cell(fn);
-            LispObject expand_env = lisp_env_bind_params(macro->params, lisp_cdr(expr), macro->env);
-            LispObject expansion = lisp_eval(macro->body, expand_env);
+            LispObject expansion = lisp_macroexpand_1(expr, env);
             if (lisp_return_tag != LISP_NIL) {
                 return expansion; // milestone 19: マクロ展開自体の評価中に脱出した
             }
@@ -1297,6 +1326,31 @@ LispObject lisp_builtin_gensym(LispObject args) {
     return lisp_make_uninterned_symbol(name);
 }
 
+// *macroexpand-hook*のデフォルト値 (milestone 21)。実際の展開処理（マクロの仮引数への
+// 束縛→本文評価）はここに閉じている。呼び出し規約はCLの*macroexpand-hook*
+// （展開器・フォーム・環境の3引数）に合わせたが、このLispのマクロはCLの「関数」とは異なり
+// ユーザー定義マクロのLispClosureそのものを1番目の引数（展開器）として直接渡す。
+// 3番目のenv引数はCLとの見た目を合わせるためだけに受け取り実際には使わない
+// （macroletが無く、マクロは常に自分の定義時の環境macro->envに閉じているため、
+// 呼び出し元の環境は展開結果に影響しない）
+LispObject lisp_default_macroexpand_hook(LispObject args) {
+    LispObject macro_obj = lisp_car(args);
+    LispObject form = lisp_car(lisp_cdr(args));
+    LispClosure *macro = lisp_closure_cell(macro_obj);
+    LispObject expand_env = lisp_env_bind_params(macro->params, lisp_cdr(form), macro->env);
+    return lisp_eval(macro->body, expand_env);
+}
+
+// (macroexpand-1 form): formがマクロ呼び出しならlisp_macroexpand_1で1段展開した結果を返す。
+// マクロ呼び出しでなければformをそのまま返す。展開結果を実行せずに確認できるため、
+// マクロのデバッグ用途に使う。CLのmacroexpand-1と異なり、このLispにはmacroletが無く
+// レキシカルなマクロ環境という概念自体が存在しないため、2番目のenv引数は受け取らず
+// 常にglobal_envで展開する
+LispObject lisp_builtin_macroexpand_1(LispObject args) {
+    LispObject form = lisp_car(args);
+    return lisp_macroexpand_1(form, global_env);
+}
+
 // milestone 16: (load "filename") がFAT32のESPから読み込んだファイル内容を
 // バッファ終端までトップレベルS式として順にglobal_envで評価する。最後に評価した
 // 値（ファイルが空ならlisp_sym_t）を返す
@@ -1376,5 +1430,14 @@ LispObject lisp_builtins_init(void) {
     env = lisp_env_extend(env, lisp_intern("-"), lisp_make_builtin(lisp_builtin_sub));
     env = lisp_env_extend(env, lisp_intern("load"), lisp_make_builtin(lisp_builtin_load));
     env = lisp_env_extend(env, lisp_intern("gensym"), lisp_make_builtin(lisp_builtin_gensym));
+    env = lisp_env_extend(env, lisp_intern("macroexpand-1"), lisp_make_builtin(lisp_builtin_macroexpand_1));
+
+    // *macroexpand-hook*をdefvarと同じ形（is_special=1 + 初期値）で直接セットアップする
+    // (milestone 21)。動的変数はenvチェーンに束縛を積まないため、global_envへの
+    // lisp_env_extendは不要
+    LispSymbol *hook_cell = lisp_symbol_cell(lisp_sym_macroexpand_hook);
+    hook_cell->value = lisp_make_builtin(lisp_default_macroexpand_hook);
+    hook_cell->is_special = 1;
+
     return env;
 }
