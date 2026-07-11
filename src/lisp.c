@@ -1846,6 +1846,22 @@ LispObject lisp_builtin_rplacd(LispObject args) {
     return cell;
 }
 
+// hash-codeが返す値がlisp_make_fixnumで常に有効な非負fixnumになるようにするための
+// マスク（下位61bit。62bit目以降を捨てることで符号ビットの復元を保証する。milestone28）
+#define LISP_HASH_CODE_MASK 0x1FFFFFFFFFFFFFFFULL
+
+// (hash-code object): objectのタグ付きポインタ表現（fixnumなら値そのもの、ヒープ
+// オブジェクトならアドレス）の下位61bitを取り出しfixnumとして返す、アイデンティティ
+// ベースのハッシュ関数（milestone 28）。eqは`==`によるビット比較そのものなので、
+// 「eqなら同じhash-code」という不変条件は型ごとの分岐を書かずに自動的に満たされる。
+// マスクによる情報落ちで別オブジェクトが同じ値になる（衝突する）ことはハッシュ関数
+// として許容範囲であり、一意性は保証しない
+LispObject lisp_builtin_hash_code(LispObject args) {
+    LispObject obj = lisp_car(args);
+    long long h = (long long)(((UINT64)obj) & LISP_HASH_CODE_MASK);
+    return lisp_make_fixnum(h);
+}
+
 // milestone 22: fixnum/bignum/floatの型混在に対応（昇格規則はlisp_num_add参照）
 LispObject lisp_builtin_add(LispObject args) {
     LispObject acc = lisp_make_fixnum(0);
@@ -2108,6 +2124,7 @@ LispObject lisp_builtins_init(void) {
     env = lisp_env_extend(env, lisp_intern("atom"), lisp_make_builtin(lisp_builtin_atom));
     env = lisp_env_extend(env, lisp_intern("rplaca"), lisp_make_builtin(lisp_builtin_rplaca));
     env = lisp_env_extend(env, lisp_intern("rplacd"), lisp_make_builtin(lisp_builtin_rplacd));
+    env = lisp_env_extend(env, lisp_intern("hash-code"), lisp_make_builtin(lisp_builtin_hash_code));
     env = lisp_env_extend(env, lisp_intern("+"), lisp_make_builtin(lisp_builtin_add));
     env = lisp_env_extend(env, lisp_intern("-"), lisp_make_builtin(lisp_builtin_sub));
     env = lisp_env_extend(env, lisp_intern("load"), lisp_make_builtin(lisp_builtin_load));
