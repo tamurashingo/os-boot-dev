@@ -484,6 +484,8 @@ EFI_STATUS EFIAPI EfiMain(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable)
             lisp_vm_closure_selftest_run(SystemTable); // milestone 38: VMクロージャ生成・upvalue自己テスト
             lisp_vm_integrated_selftest_run(SystemTable); // milestone 39: プリミティブ最適化命令+目標1総合自己テスト
 
+            lisp_load_init_file(); // milestone 47: EFI/BOOT/init.lispがあれば読み込む(無ければ何もしない)
+
             SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\nMinimal Lisp REPL. Type an expression and press Enter.\r\n");
 
             LispOutputStream console_stream = lisp_make_console_stream(SystemTable);

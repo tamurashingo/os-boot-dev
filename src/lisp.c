@@ -2842,6 +2842,29 @@ void lisp_load_boot_file(const char *filename) {
     lisp_builtin_load(args);
 }
 
+// milestone47: REPL開始直前に、BOOTX64.EFIと同じディレクトリ(EFI/BOOT/)にある
+// init.lispをユーザ配置ファイルとして読み込む。pythonでシリアルを操作せずに
+// write-lineでテスト結果を出力する自動テストを起動時に実行できるようにする目的。
+// lisp_builtin_loadと違い、ファイルが存在しない場合はpanicせず何もしない
+// （init.lispの配置は任意なため）
+void lisp_load_init_file(void) {
+    EFI_FILE_PROTOCOL *root = lisp_open_esp_root();
+
+    EFI_FILE_PROTOCOL *file;
+    if (root->Open(root, &file, L"EFI\\BOOT\\init.lisp", EFI_FILE_MODE_READ, 0) != 0) {
+        return;
+    }
+
+    UINTN size = LISP_LOAD_BUFFER_MAX - 1;
+    if (file->Read(file, &size, lisp_load_buffer) != 0) {
+        lisp_panic(L"init.lisp: failed to read file");
+    }
+    lisp_load_buffer[size] = '\0';
+    file->Close(file);
+
+    lisp_load_eval_buffer(lisp_load_buffer);
+}
+
 // (sleep seconds): CreateEvent(EVT_TIMER)で使い捨てのタイマーイベントを作り、
 // SetTimer(TimerRelative)でseconds秒後(UEFIネイティブ単位=100ns)に発火するよう
 // セットし、WaitForEventでブロックして待つ。secondsはfixnum/bignum/floatいずれも
