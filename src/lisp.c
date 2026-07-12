@@ -2596,6 +2596,84 @@ LispObject lisp_builtin_svset(LispObject args) {
     return value;
 }
 
+// milestone 46: compile-expr(Lisp側)が生成したbytecode/constants/upvalue-descsの
+// リストから実際のVMコンパイル済み関数を組み立てる検証用ブリッジ。固定長のCローカル配列に
+// 一旦積んでからlisp_make_compiled等へ渡す（load時のlisp_load_bufferと同じ「静的/固定長の
+// スクラッチ領域を使う」方針）。constants引数の各要素は呼び出し元(lisp/stdlib.lispの
+// vm-materialize-constants)が事前に再帰展開済みである前提で、ここではネストしたlambdaの
+// テンプレートリストをそれ以上辿らない
+#define VM_BRIDGE_MAX_BYTECODE 256
+#define VM_BRIDGE_MAX_CONSTANTS 64
+#define VM_BRIDGE_MAX_UPVALUES 32
+
+// (vm-make-closure nargs bytecode-list constants-list upvalue-descs-list) -> 実行可能な
+// コンパイル済み関数オブジェクト。upvalue-descs-listの各要素は(kind . index)のcons
+LispObject lisp_builtin_vm_make_closure(LispObject args) {
+    LispObject nargs_obj = lisp_car(args);
+    LispObject bytecode_list = lisp_car(lisp_cdr(args));
+    LispObject constants_list = lisp_car(lisp_cdr(lisp_cdr(args)));
+    LispObject upvalue_descs_list = lisp_car(lisp_cdr(lisp_cdr(lisp_cdr(args))));
+
+    lisp_assert_fixnum(nargs_obj);
+    UINTN nargs = (UINTN)lisp_fixnum_value(nargs_obj);
+
+    unsigned char bytecode[VM_BRIDGE_MAX_BYTECODE];
+    UINTN bytecode_len = 0;
+    LispObject cur = bytecode_list;
+    while (lisp_is_cons(cur)) {
+        if (bytecode_len >= VM_BRIDGE_MAX_BYTECODE) {
+            lisp_panic(L"vm-make-closure: bytecode too long");
+        }
+        LispObject b = lisp_car(cur);
+        lisp_assert_fixnum(b);
+        bytecode[bytecode_len++] = (unsigned char)lisp_fixnum_value(b);
+        cur = lisp_cdr(cur);
+    }
+
+    LispObject constants[VM_BRIDGE_MAX_CONSTANTS];
+    UINTN constants_len = 0;
+    cur = constants_list;
+    while (lisp_is_cons(cur)) {
+        if (constants_len >= VM_BRIDGE_MAX_CONSTANTS) {
+            lisp_panic(L"vm-make-closure: too many constants");
+        }
+        constants[constants_len++] = lisp_car(cur);
+        cur = lisp_cdr(cur);
+    }
+
+    LispObject fn = lisp_make_compiled(bytecode, bytecode_len, constants, constants_len, nargs);
+
+    UINTN kinds[VM_BRIDGE_MAX_UPVALUES];
+    UINTN indices[VM_BRIDGE_MAX_UPVALUES];
+    UINTN upvalue_count = 0;
+    cur = upvalue_descs_list;
+    while (lisp_is_cons(cur)) {
+        if (upvalue_count >= VM_BRIDGE_MAX_UPVALUES) {
+            lisp_panic(L"vm-make-closure: too many upvalue descriptors");
+        }
+        LispObject desc = lisp_car(cur);
+        LispObject kind_obj = lisp_car(desc);
+        LispObject index_obj = lisp_cdr(desc);
+        lisp_assert_fixnum(kind_obj);
+        lisp_assert_fixnum(index_obj);
+        kinds[upvalue_count] = (UINTN)lisp_fixnum_value(kind_obj);
+        indices[upvalue_count] = (UINTN)lisp_fixnum_value(index_obj);
+        upvalue_count++;
+        cur = lisp_cdr(cur);
+    }
+    if (upvalue_count > 0) {
+        lisp_compiled_set_upvalue_descs(fn, lisp_make_upvalue_descs(kinds, indices, upvalue_count));
+    }
+
+    return fn;
+}
+
+// (vm-exec fn): vm-make-closureが返したコンパイル済み関数を引数無しの新規フレームとして
+// 実行し、結果を返す（lisp_vm_execの薄いラッパー）
+LispObject lisp_builtin_vm_exec(LispObject args) {
+    return lisp_vm_exec(lisp_car(args));
+}
+
 // *macroexpand-hook*のデフォルト値 (milestone 21)。実際の展開処理（マクロの仮引数への
 // 束縛→本文評価）はここに閉じている。呼び出し規約はCLの*macroexpand-hook*
 // （展開器・フォーム・環境の3引数）に合わせたが、このLispのマクロはCLの「関数」とは異なり
@@ -2639,8 +2717,9 @@ static EFI_GUID lisp_guid_simple_file_system = EFI_SIMPLE_FILE_SYSTEM_PROTOCOL_G
 
 // milestone 41: lisp/stdlib.lispがコメントを含めて8192byteを超えたため、無警告で
 // 末尾が読み捨てられる(truncateされてもlisp_load_eval_buffer側はEOFとして正常終了する
-// ため検知できない)事故を防ぐ目的で32768byteへ拡張した
-#define LISP_LOAD_BUFFER_MAX 32768
+// ため検知できない)事故を防ぐ目的で32768byteへ拡張した。milestone46でstdlib.lispが
+// 再び32768byteを超えたため65536byteへ再拡張した(同じ理由の再発)
+#define LISP_LOAD_BUFFER_MAX 65536
 static char lisp_load_buffer[LISP_LOAD_BUFFER_MAX];
 
 // (load "filename"): EfiMainのImageHandle→LoadedImage→DeviceHandle→
@@ -2757,6 +2836,8 @@ LispObject lisp_builtins_init(void) {
     env = lisp_env_extend(env, lisp_intern("svref"), lisp_make_builtin(lisp_builtin_svref));
     env = lisp_env_extend(env, lisp_intern("svset"), lisp_make_builtin(lisp_builtin_svset));
     env = lisp_env_extend(env, lisp_intern("macroexpand-1"), lisp_make_builtin(lisp_builtin_macroexpand_1));
+    env = lisp_env_extend(env, lisp_intern("vm-make-closure"), lisp_make_builtin(lisp_builtin_vm_make_closure));
+    env = lisp_env_extend(env, lisp_intern("vm-exec"), lisp_make_builtin(lisp_builtin_vm_exec));
 
     // *macroexpand-hook*をdefvarと同じ形（is_special=1 + 初期値）で直接セットアップする
     // (milestone 21)。動的変数はenvチェーンに束縛を積まないため、global_envへの

@@ -475,10 +475,23 @@
 ; コンパイル結果を実際のLispClosureとして直接構築することはできない(milestone35
 ; 以降のCブリッジ builtinがまだ存在しない)。そのためmilestone41のbytecode変換
 ; (assemble)と同じ考え方で、「このlambdaを実体化するのに必要な情報一式」を
-; (nargs bytecode constants upvalue-descs)という素のLispリストにまとめ、それを
-; ひとつの値として外側ctxの定数プールに登録するにとどめる。この入れ子リストを
-; 実際のLispClosureテンプレートへ組み立てる処理はmilestone46の検証用ブリッジに
-; 委ねる(milestone41の「バイト列への変換はここでは行わない」という制約と同じ理由)
+; (closure-template nargs bytecode constants upvalue-descs)という素のLispリストに
+; まとめ、それをひとつの値として外側ctxの定数プールに登録するにとどめる。先頭に
+; 'closure-templateという印を置くのは、milestone46のvm-materialize-constantsが
+; 「定数プール中のどの値がまだ実体化していないlambdaテンプレートか」を、
+; (quote (a b))のような単なるデータのリストと区別するために必要(データのリストが
+; 偶然この形に一致する可能性は、この検証専用ブリッジの対象範囲では無視できる)。
+; この入れ子リストを実際のLispClosureへ組み立てる処理はmilestone46のvm-make-closure
+; ビルトインに委ねる(milestone41の「バイト列への変換はここでは行わない」という
+; 制約と同じ理由)。
+;
+; compile-exprは常に「スタックに値を1つpushするコード」を返すだけで、OP_RETURNは
+; 発行しない(milestone42-45はバイトコードIRの構造検証止まりで実際にlisp_vm_execへ
+; 渡していなかったため、この欠落はmilestone46でOP_RETURNが無いまま関数末尾を素通り
+; してbytecode配列の外側の未定義バイトを命令として読んでしまう(unknown VM opcode
+; panic)まで発覚しなかった)。そのため本体コードの末尾に明示的にOP_RETURNを1つ
+; 追加し、milestone35以降の手動バイトコード同様「最後は必ずOP_RETURNで終わる」
+; 規約に合わせる
 (defun compile-lambda (form ctx scope)
   (let ((params (car (cdr form)))
         (body (car (cdr (cdr form)))))
@@ -486,8 +499,10 @@
       (let ((inner-scope (compile-make-scope (compile-lambda-param-locals params 0)
                                               (compile-make-captures)
                                               scope)))
-        (let ((body-code (assemble (compile-expr body inner-ctx inner-scope))))
-          (let ((package (list (compile-env-length params)
+        (let ((body-code (assemble (compile-concat (compile-expr body inner-ctx inner-scope)
+                                                    (list (list *op-return*))))))
+          (let ((package (list 'closure-template
+                                (compile-env-length params)
                                 body-code
                                 (compile-ctx-constants inner-ctx)
                                 (compile-ctx-constants (captures-desc-ctx (scope-captures inner-scope))))))
@@ -533,8 +548,21 @@
                   (compile-expr (car (cdr (cdr form))) ctx scope)
                   (list (list *op-eq*))))
 
+; OP_ADDはmilestone35からVMに存在する基本命令だが、milestone39のインライン化対象
+; (OP_CONS/OP_CAR/OP_CDR/OP_EQ)には含まれていなかったため、+を関数呼び出しとして
+; 書いてもこれまでのcompile-exprでは呼び出す先が存在しなかった(未束縛symbolの
+; 自己評価フォールバックでsymbol '+自体がOP_CALLに渡り、実行時にpanicする)。
+; milestone46の統合検証で算術を含むケースを再現するために、cons/car/cdr/eqと
+; 同じ形でOP_ADDへの直接コンパイルを追加する。加算は可換なのでpop順自体に
+; 意味はないが、他のプリミティブと同じ「左の式を先にコンパイルする(先にpushする)」
+; 規則に合わせる
+(defun compile-add (form ctx scope)
+  (compile-concat (compile-expr (car (cdr form)) ctx scope)
+                  (compile-expr (car (cdr (cdr form))) ctx scope)
+                  (list (list *op-add*))))
+
 ; atomは(既にレキシカル束縛の有無を確認する)compile-variable-refに委ねる。
-; cons/car/cdr/eqはインライン化された専用命令へ、それ以外の形式(carがsymbol
+; cons/car/cdr/eq/+はインライン化された専用命令へ、それ以外の形式(carがsymbol
 ; でもlambda式でも構わない)はすべて汎用の関数呼び出しcompile-callへコンパイル
 ; する。これにより「未対応の形式」は無くなり、milestone42のt節に残っていた
 ; 明示的なnilフォールバックは不要になった
@@ -546,8 +574,57 @@
     ((eq (car form) 'let) (compile-let form ctx scope))
     ((eq (car form) 'setq) (compile-setq form ctx scope))
     ((eq (car form) 'lambda) (compile-lambda form ctx scope))
+    ((eq (car form) '+) (compile-add form ctx scope))
     ((eq (car form) 'cons) (compile-cons form ctx scope))
     ((eq (car form) 'car) (compile-car form ctx scope))
     ((eq (car form) 'cdr) (compile-cdr form ctx scope))
     ((eq (car form) 'eq) (compile-eq form ctx scope))
     (t (compile-call form ctx scope))))
+
+; --- 統合検証: compile-and-run (milestone 46, documents/lisp_vm.md 目標2完了) ---
+; compile-expr(Lisp側)が返すのはIR/データ(バイトコードは整数のリスト、定数プールは
+; Lispの値のリストで、その中に未実体化のlambdaテンプレート(closure-template)が
+; 混在しうる)であり、実際のLispClosureはまだ1つも構築されていない。C側に新設した
+; vm-make-closure/vm-execの2ビルトイン(milestone35以降で用意済みのlisp_make_compiled/
+; lisp_vm_exec/lisp_make_upvalue_descs/lisp_compiled_set_upvalue_descsの薄いラッパー)
+; を使い、定数プールの中身を末端から順に実体化してからvm-make-closureで組み立てる
+
+; consはatomの否定と同じ(atomはconsとnilの両方でtを返すため、nilはclosure-template-pの
+; 対象にならないよう先にnilでないことを確認する必要はない: (car nil)を呼ぶ前に
+; (not (atom c))がnilでconsであることを保証してから短絡評価するので安全)
+(defun closure-template-p (c)
+  (and (not (atom c)) (eq (car c) 'closure-template)))
+
+; constants-list中の各要素を実体化する。closure-templateならvm-materialize-templateで
+; 再帰的に実際のLispClosureへ、それ以外の値(数値・symbol・cons・文字列等)はそのまま返す
+(defun vm-materialize-constants (constants)
+  (if (null constants)
+      nil
+      (cons (vm-materialize-constant (car constants))
+            (vm-materialize-constants (cdr constants)))))
+
+(defun vm-materialize-constant (c)
+  (if (closure-template-p c)
+      (vm-materialize-template c)
+      c))
+
+; (closure-template nargs bytecode constants upvalue-descs)の構造から、constantsを
+; 先に(再帰的に)実体化してからvm-make-closureへ渡し、実際のLispClosureを1つ作る
+(defun vm-materialize-template (template)
+  (let ((nargs (car (cdr template)))
+        (bytecode (car (cdr (cdr template))))
+        (constants (car (cdr (cdr (cdr template)))))
+        (upvalue-descs (car (cdr (cdr (cdr (cdr template)))))))
+    (vm-make-closure nargs bytecode (vm-materialize-constants constants) upvalue-descs)))
+
+; exprをcompile-expr+assembleでトップレベル(nargs=0、upvalue無し)のbytecode/constants
+; へコンパイルし、定数プールを実体化してvm-make-closureで実際のLispClosureを組み立て、
+; vm-execで実行した結果を返す。目標1(milestone34-39)で手動バイトコードとして検証した
+; ケース群を、compile-expr経由の同じS式から生成したバイトコードで再現するための
+; 検証専用の橋渡し。compile-lambdaの本体コンパイルと同様、compile-expr自体は
+; OP_RETURNを発行しないため、末尾に明示的に1つ追加する
+(defun compile-and-run (expr)
+  (let ((ctx (compile-make-ctx)))
+    (let ((bytecode (assemble (compile-concat (compile-expr expr ctx (compile-make-top-scope))
+                                               (list (list *op-return*))))))
+      (vm-exec (vm-make-closure 0 bytecode (vm-materialize-constants (compile-ctx-constants ctx)) nil)))))
