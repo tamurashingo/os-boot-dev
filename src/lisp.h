@@ -143,6 +143,15 @@ int lisp_vm_gc_root_selftest(void);
 #define OP_STORE_UPVALUE 11   // スタック最上位をpopし、次の1byteが指すupvalues[index]のボックスへ
                                // rplaca相当で書き込む
 
+// --- VMプリミティブ最適化命令 (milestone 39) ---
+// 頻出する組み込み関数を、関数呼び出し（OP_CALL）を経由せず直接VM命令として実行する。
+// 目標1の最終マイルストンであり、他の全オペコードと組み合わせた総合検証を行う
+#define OP_CONS 12   // スタック最上位2要素をpopし（先にpushした方をcar、後にpushした方をcdrとする）、
+                      // lisp_cons(car, cdr)をpushする
+#define OP_CAR  13    // スタック最上位をpopし、car()をpushする
+#define OP_CDR  14    // スタック最上位をpopし、cdr()をpushする
+#define OP_EQ   15    // スタック最上位2要素をpopし、ポインタ同値ならt、そうでなければnilをpushする
+
 // bytecode(bytecode_len byte)とconstants(constants_len個のLispObject)を保持するVM
 // コンパイル済み関数オブジェクトを作る（LispClosureのescape hatch方式、milestone15/22/26と
 // 同じ前例）。どちらも呼び出し元のバッファをヒープへコピーするので、呼び出し後は

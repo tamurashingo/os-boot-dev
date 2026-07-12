@@ -1619,6 +1619,28 @@ static LispObject lisp_vm_run(LispClosure *cl, UINTN fp) {
                 lisp_set_car(upvalues_cell->vec_data[idx], value);
                 break;
             }
+            case OP_CONS: {
+                LispObject cdr_val = lisp_vm_pop();
+                LispObject car_val = lisp_vm_pop();
+                lisp_vm_push(lisp_cons(car_val, cdr_val));
+                break;
+            }
+            case OP_CAR: {
+                LispObject x = lisp_vm_pop();
+                lisp_vm_push(lisp_car(x));
+                break;
+            }
+            case OP_CDR: {
+                LispObject x = lisp_vm_pop();
+                lisp_vm_push(lisp_cdr(x));
+                break;
+            }
+            case OP_EQ: {
+                LispObject b = lisp_vm_pop();
+                LispObject a = lisp_vm_pop();
+                lisp_vm_push((a == b) ? lisp_sym_t : LISP_NIL);
+                break;
+            }
             case OP_RETURN: {
                 LispObject result = lisp_vm_pop();
                 vm_sp = fp;

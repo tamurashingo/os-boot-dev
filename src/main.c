@@ -255,6 +255,121 @@ static void lisp_vm_closure_selftest_run(EFI_SYSTEM_TABLE *SystemTable) {
     }
 }
 
+// --- VM総合自己テスト: プリミティブ最適化命令+目標1全機能の組み合わせ (milestone 39) ---
+// f(self, n, counter) を手動バイトコードで構築する。nがeq 0（新設OP_EQ）でなければ、
+// counter()（クロージャ呼び出し+upvalue読み書き）でstepを取り、cons(n, step)（新設OP_CONS）
+// をローカル変数としてボックス化し、car/cdr（新設OP_CAR/OP_CDR）でnとstepを取り出し、
+// n+(-1)（OP_ADD、負の定数による減算相当）した値・counter・自分自身を引数に自己適用方式
+// （milestone37）で再帰呼び出し（OP_CALL）し、carval+cdrval+recを返す。milestone37と異なり
+// OP_EQで0との真の比較ができるため、今回は見せかけではない実際のfixnum減算による停止判定になっている
+//   [0]  OP_LOAD_LOCAL 1       ; n をpush
+//   [2]  OP_CONST 0             ; 0 をpush
+//   [4]  OP_EQ                    ; n==0 ?
+//   [5]  OP_JUMP_IF_FALSE 10   ; 等しくなければelseへ
+//   [7]  OP_CONST 0             ; 基底部: 0 をpush
+//   [9]  OP_RETURN
+//   [10] OP_LOAD_LOCAL 1       ; n をpush
+//   [12] OP_LOAD_LOCAL 2       ; counter をpush
+//   [14] OP_CALL 0                ; step = counter()
+//   [16] OP_CONS                  ; pair = cons(n, step)
+//   [17] OP_MAKE_LOCAL           ; local3 = box(pair)
+//   [18] OP_LOAD_LOCAL 3       ; pair をpush
+//   [20] OP_CAR                    ; carval = car(pair)  (== n)
+//   [21] OP_LOAD_LOCAL 3       ; pair をpush
+//   [23] OP_CDR                    ; cdrval = cdr(pair)  (== step)
+//   [24] OP_LOAD_LOCAL 0       ; self をpush（再帰呼び出しのarg1）
+//   [26] OP_LOAD_LOCAL 1       ; n をpush
+//   [28] OP_CONST 1             ; -1 をpush
+//   [30] OP_ADD                    ; n + (-1)   （再帰呼び出しのarg2）
+//   [31] OP_LOAD_LOCAL 2       ; counter をpush（再帰呼び出しのarg3）
+//   [33] OP_LOAD_LOCAL 0       ; self をpush（再帰呼び出しの関数参照）
+//   [35] OP_CALL 3                ; rec = self(self, n-1, counter)
+//   [37] OP_ADD                    ; cdrval + rec
+//   [38] OP_ADD                    ; carval + (cdrval + rec)
+//   [39] OP_RETURN
+static void lisp_vm_integrated_selftest_run(EFI_SYSTEM_TABLE *SystemTable) {
+    unsigned char inc_code[] = {
+        OP_LOAD_UPVALUE, 0,
+        OP_CONST, 0,
+        OP_ADD,
+        OP_STORE_UPVALUE, 0,
+        OP_LOAD_UPVALUE, 0,
+        OP_RETURN
+    };
+    LispObject one = lisp_read_from_buffer("1");
+    LispObject inc_constants[1] = { one };
+    LispObject inc = lisp_make_compiled(inc_code, sizeof(inc_code), inc_constants, 1, 0);
+    UINTN desc_kinds[1] = { 0 };
+    UINTN desc_indices[1] = { 0 };
+    lisp_compiled_set_upvalue_descs(inc, lisp_make_upvalue_descs(desc_kinds, desc_indices, 1));
+
+    unsigned char make_counter_code[] = {
+        OP_MAKE_CLOSURE, 0,
+        OP_RETURN
+    };
+    LispObject make_counter_constants[1] = { inc };
+    LispObject make_counter = lisp_make_compiled(make_counter_code, sizeof(make_counter_code),
+                                                  make_counter_constants, 1, 1);
+
+    unsigned char f_code[] = {
+        OP_LOAD_LOCAL, 1,
+        OP_CONST, 0,
+        OP_EQ,
+        OP_JUMP_IF_FALSE, 10,
+        OP_CONST, 0,
+        OP_RETURN,
+        OP_LOAD_LOCAL, 1,
+        OP_LOAD_LOCAL, 2,
+        OP_CALL, 0,
+        OP_CONS,
+        OP_MAKE_LOCAL,
+        OP_LOAD_LOCAL, 3,
+        OP_CAR,
+        OP_LOAD_LOCAL, 3,
+        OP_CDR,
+        OP_LOAD_LOCAL, 0,
+        OP_LOAD_LOCAL, 1,
+        OP_CONST, 1,
+        OP_ADD,
+        OP_LOAD_LOCAL, 2,
+        OP_LOAD_LOCAL, 0,
+        OP_CALL, 3,
+        OP_ADD,
+        OP_ADD,
+        OP_RETURN
+    };
+    LispObject zero = lisp_read_from_buffer("0");
+    LispObject neg_one = lisp_read_from_buffer("-1");
+    LispObject f_constants[2] = { zero, neg_one };
+    LispObject f = lisp_make_compiled(f_code, sizeof(f_code), f_constants, 2, 3);
+
+    // driver: counter=make-counter(0)をf呼び出しのちょうどarg3の位置に積んでから
+    // f(f, 3, counter)を呼び出す
+    unsigned char driver_code[] = {
+        OP_CONST, 0,
+        OP_CONST, 1,
+        OP_CONST, 2,
+        OP_CONST, 3,
+        OP_CALL, 1,
+        OP_CONST, 0,
+        OP_CALL, 3,
+        OP_RETURN
+    };
+    LispObject three = lisp_read_from_buffer("3");
+    LispObject driver_constants[4] = { f, three, zero, make_counter };
+    LispObject driver = lisp_make_compiled(driver_code, sizeof(driver_code), driver_constants, 4, 0);
+
+    LispObject result = lisp_vm_exec(driver);
+    LispObject expected = lisp_read_from_buffer("12");
+
+    if (result == expected) {
+        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"VM integrated self-test: PASS\r\n");
+    } else {
+        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"VM integrated self-test: FAIL\r\n");
+        for (;;) {}
+    }
+}
+
 static void lisp_setjmp_selftest(EFI_SYSTEM_TABLE *SystemTable) {
     lisp_jmp_buf buf;
     volatile UINT64 marker = 0xDEADBEEFCAFEULL;
@@ -367,6 +482,7 @@ EFI_STATUS EFIAPI EfiMain(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable)
             lisp_vm_control_flow_selftest_run(SystemTable); // milestone 36: VM制御フロー・ボックス化ローカル変数自己テスト
             lisp_vm_call_selftest_run(SystemTable); // milestone 37: VM関数呼び出し・スタックフレーム自己テスト
             lisp_vm_closure_selftest_run(SystemTable); // milestone 38: VMクロージャ生成・upvalue自己テスト
+            lisp_vm_integrated_selftest_run(SystemTable); // milestone 39: プリミティブ最適化命令+目標1総合自己テスト
 
             SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\nMinimal Lisp REPL. Type an expression and press Enter.\r\n");
 
