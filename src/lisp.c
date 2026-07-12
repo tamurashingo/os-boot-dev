@@ -2722,10 +2722,31 @@ static EFI_GUID lisp_guid_simple_file_system = EFI_SIMPLE_FILE_SYSTEM_PROTOCOL_G
 #define LISP_LOAD_BUFFER_MAX 65536
 static char lisp_load_buffer[LISP_LOAD_BUFFER_MAX];
 
-// (load "filename"): EfiMainのImageHandle→LoadedImage→DeviceHandle→
-// SimpleFileSystemの順にHandleProtocolでたどり、ESPのルートディレクトリから
-// filenameを読み込んで内容を評価する。GetInfoでファイルサイズを問い合わせず、
-// 1回のReadで静的バッファに収まる分だけ読み取る（CLAUDE.mdの静的バッファ方針に従う）
+// (load)と(write-file)共通: EfiMainのImageHandle→LoadedImage→DeviceHandle→
+// SimpleFileSystemの順にHandleProtocolでたどり、ESPのルートディレクトリを開く
+static EFI_FILE_PROTOCOL *lisp_open_esp_root(void) {
+    EFI_BOOT_SERVICES *bs = g_system_table->BootServices;
+
+    EFI_LOADED_IMAGE_PROTOCOL *loaded_image;
+    if (bs->HandleProtocol(g_image_handle, &lisp_guid_loaded_image, (void **)&loaded_image) != 0) {
+        lisp_panic(L"failed to get loaded image protocol");
+    }
+
+    EFI_SIMPLE_FILE_SYSTEM_PROTOCOL *fs;
+    if (bs->HandleProtocol(loaded_image->DeviceHandle, &lisp_guid_simple_file_system, (void **)&fs) != 0) {
+        lisp_panic(L"failed to get simple file system protocol");
+    }
+
+    EFI_FILE_PROTOCOL *root;
+    if (fs->OpenVolume(fs, &root) != 0) {
+        lisp_panic(L"failed to open volume");
+    }
+    return root;
+}
+
+// (load "filename"): ESPのルートディレクトリからfilenameを読み込んで内容を評価する。
+// GetInfoでファイルサイズを問い合わせず、1回のReadで静的バッファに収まる分だけ読み取る
+// （CLAUDE.mdの静的バッファ方針に従う）
 LispObject lisp_builtin_load(LispObject args) {
     LispObject filename_obj = lisp_car(args);
     lisp_assert_string(filename_obj);
@@ -2738,22 +2759,7 @@ LispObject lisp_builtin_load(LispObject args) {
     }
     wpath[i] = 0;
 
-    EFI_BOOT_SERVICES *bs = g_system_table->BootServices;
-
-    EFI_LOADED_IMAGE_PROTOCOL *loaded_image;
-    if (bs->HandleProtocol(g_image_handle, &lisp_guid_loaded_image, (void **)&loaded_image) != 0) {
-        lisp_panic(L"load: failed to get loaded image protocol");
-    }
-
-    EFI_SIMPLE_FILE_SYSTEM_PROTOCOL *fs;
-    if (bs->HandleProtocol(loaded_image->DeviceHandle, &lisp_guid_simple_file_system, (void **)&fs) != 0) {
-        lisp_panic(L"load: failed to get simple file system protocol");
-    }
-
-    EFI_FILE_PROTOCOL *root;
-    if (fs->OpenVolume(fs, &root) != 0) {
-        lisp_panic(L"load: failed to open volume");
-    }
+    EFI_FILE_PROTOCOL *root = lisp_open_esp_root();
 
     EFI_FILE_PROTOCOL *file;
     if (root->Open(root, &file, wpath, EFI_FILE_MODE_READ, 0) != 0) {
@@ -2768,6 +2774,60 @@ LispObject lisp_builtin_load(LispObject args) {
     file->Close(file);
 
     return lisp_load_eval_buffer(lisp_load_buffer);
+}
+
+// (write-file "filename" content): ESPのルートディレクトリにfilenameを新規作成
+// （既存ならEFI_FILE_MODE_CREATEにより開いて上書き）し、Lisp文字列contentの
+// str_data/str_lenをそのままEFI_FILE_WRITEへ渡す。テスト結果をファイルへ書き出す
+// ことで、ホスト側はesp_dirを監視するだけでテストの終了・成否（PASS/FAIL等）を
+// 確認できるようになる（シリアル出力のパースが不要になる）
+LispObject lisp_builtin_write_file(LispObject args) {
+    LispObject filename_obj = lisp_car(args);
+    LispObject content_obj = lisp_car(lisp_cdr(args));
+    lisp_assert_string(filename_obj);
+    lisp_assert_string(content_obj);
+    LispClosure *filename = lisp_closure_cell(filename_obj);
+    LispClosure *content = lisp_closure_cell(content_obj);
+
+    CHAR16 wpath[LISP_STRING_READ_MAX];
+    UINTN i = 0;
+    for (; i < filename->str_len && i < LISP_STRING_READ_MAX - 1; i++) {
+        wpath[i] = (CHAR16)filename->str_data[i];
+    }
+    wpath[i] = 0;
+
+    EFI_FILE_PROTOCOL *root = lisp_open_esp_root();
+
+    EFI_FILE_PROTOCOL *file;
+    if (root->Open(root, &file, wpath,
+                   EFI_FILE_MODE_READ | EFI_FILE_MODE_WRITE | EFI_FILE_MODE_CREATE, 0) != 0) {
+        lisp_panic(L"write-file: failed to open file");
+    }
+
+    UINTN size = content->str_len;
+    if (file->Write(file, &size, content->str_data) != 0) {
+        lisp_panic(L"write-file: failed to write file");
+    }
+    file->Close(file);
+
+    return lisp_sym_t;
+}
+
+// (write-line "text"): 文字列をそのままシリアルコンソールへ改行付きで出力する。
+// write-fileはQEMUのvvfat(fat:rw:)が書き込みをホストへコミットする際に内容を
+// 破損させる問題があり自動テストの結果通知には使えないため、代わりにこちらを使う。
+// REPLの評価結果の自動echoとは別に、テスト側が明示的にPASS/FAIL等の区切りを
+// 出力できるようにする
+LispObject lisp_builtin_write_line(LispObject args) {
+    LispObject content_obj = lisp_car(args);
+    lisp_assert_string(content_obj);
+    LispClosure *content = lisp_closure_cell(content_obj);
+
+    LispOutputStream stream = lisp_make_console_stream(g_system_table);
+    lisp_print_ascii(&stream, content->str_data);
+    lisp_print_ascii(&stream, "\r\n");
+
+    return lisp_sym_t;
 }
 
 // milestone 29: EfiMainが起動時に標準ライブラリファイルを読み込むための入口。
@@ -2829,6 +2889,8 @@ LispObject lisp_builtins_init(void) {
     env = lisp_env_extend(env, lisp_intern("-"), lisp_make_builtin(lisp_builtin_sub));
     env = lisp_env_extend(env, lisp_intern("<"), lisp_make_builtin(lisp_builtin_lt));
     env = lisp_env_extend(env, lisp_intern("load"), lisp_make_builtin(lisp_builtin_load));
+    env = lisp_env_extend(env, lisp_intern("write-file"), lisp_make_builtin(lisp_builtin_write_file));
+    env = lisp_env_extend(env, lisp_intern("write-line"), lisp_make_builtin(lisp_builtin_write_line));
     env = lisp_env_extend(env, lisp_intern("sleep"), lisp_make_builtin(lisp_builtin_sleep));
     env = lisp_env_extend(env, lisp_intern("gensym"), lisp_make_builtin(lisp_builtin_gensym));
     env = lisp_env_extend(env, lisp_intern("gc"), lisp_make_builtin(lisp_builtin_gc));
