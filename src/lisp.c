@@ -2637,7 +2637,10 @@ static LispObject lisp_load_eval_buffer(const char *buf) {
 static EFI_GUID lisp_guid_loaded_image = EFI_LOADED_IMAGE_PROTOCOL_GUID_VALUE;
 static EFI_GUID lisp_guid_simple_file_system = EFI_SIMPLE_FILE_SYSTEM_PROTOCOL_GUID_VALUE;
 
-#define LISP_LOAD_BUFFER_MAX 8192
+// milestone 41: lisp/stdlib.lispがコメントを含めて8192byteを超えたため、無警告で
+// 末尾が読み捨てられる(truncateされてもlisp_load_eval_buffer側はEOFとして正常終了する
+// ため検知できない)事故を防ぐ目的で32768byteへ拡張した
+#define LISP_LOAD_BUFFER_MAX 32768
 static char lisp_load_buffer[LISP_LOAD_BUFFER_MAX];
 
 // (load "filename"): EfiMainのImageHandle→LoadedImage→DeviceHandle→

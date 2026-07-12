@@ -134,3 +134,90 @@
 ; 全て消し去ってから本番のコード生成に渡す。本番のコード生成(compile-expr、
 ; milestone42以降)はまだ存在しないため、現時点では展開結果をそのまま返す
 (defun compile (form) (macroexpand-all form))
+
+; --- バイトコード中間表現とアセンブラ (milestone 41, documents/lisp_vm.md 目標2) ---
+; compile-expr(milestone42以降)はジャンプ先の絶対バイト位置を生成時にはまだ知らない
+; (if/letなどのコンパイルでは「後で出てくる位置」へ前方参照でジャンプする必要がある)。
+; そこで一旦「ラベル付き命令リスト」という中間表現(IR)へコンパイルし、アセンブラが
+; 全命令のバイト長からラベルの絶対位置を確定させてから、最終的なバイト列を組み立てる。
+;
+; IRは命令のリスト。各要素は次のいずれかの形:
+;   (label name)          -- 現在位置にnameというラベルを置く。バイトは出力しない
+;   (opcode)               -- オペランド無しの1byte命令(例: (OP_ADD)、(OP_RETURN))
+;   (opcode n)              -- オペランドnをそのままバイト値として使う2byte命令
+;                              (例: (OP_CONST 0)、(OP_LOAD_LOCAL 1))
+;   (opcode (ref name))    -- オペランドがラベルnameの絶対バイト位置に解決される2byte命令
+;                              (OP_JUMP/OP_JUMP_IF_FALSE用)
+; オペランドがfixnumかラベル参照(ref name)かは、consかどうか(atom)で判別できるため、
+; symbolp/numberpのような型判定ビルトインが無くても実装できる(fixnum/symbolはどちらも
+; atomだが、ref参照は常にconsになるよう意図的にIRの形を選んでいる)。
+;
+; opcode番号はsrc/lisp.hのOP_*マクロと必ず一致させる(C側と手で同期を保つ必要がある)
+(defvar *op-const*         0)
+(defvar *op-add*           1)
+(defvar *op-return*        2)
+(defvar *op-jump*           3)
+(defvar *op-jump-if-false*  4)
+(defvar *op-load-local*     5)
+(defvar *op-store-local*    6)
+(defvar *op-make-local*     7)
+(defvar *op-call*           8)
+(defvar *op-make-closure*   9)
+(defvar *op-load-upvalue*  10)
+(defvar *op-store-upvalue* 11)
+(defvar *op-cons*          12)
+(defvar *op-car*           13)
+(defvar *op-cdr*           14)
+(defvar *op-eq*            15)
+
+(defun asm-label-p (instr) (eq (car instr) 'label))
+
+; ラベル定義は0byte、オペランド無し命令は1byte、オペランド有り命令は2byte
+(defun asm-instr-length (instr)
+  (if (null (cdr instr)) 1 2))
+
+; instrsを先頭から辿り、各labelの出現位置(先頭からの絶対バイトオフセット)を
+; ((name . offset) ...)というalistとして集める。ラベル自身はバイトを消費しないため、
+; ラベル定義に出会っても現在のoffsetをそのまま次の再帰へ渡す
+(defun asm-collect-labels (instrs offset)
+  (if (null instrs)
+      nil
+      (let ((instr (car instrs)))
+        (if (asm-label-p instr)
+            (cons (cons (car (cdr instr)) offset)
+                  (asm-collect-labels (cdr instrs) offset))
+            (asm-collect-labels (cdr instrs) (+ offset (asm-instr-length instr)))))))
+
+; 見つからない場合はlabelsがnilになり(car nil)が自然にpanicする(存在しないラベル名は
+; コンパイラ側のバグであり、nth等と同様にここでは防御的なチェックを行わない)
+(defun asm-label-offset (name labels)
+  (if (eq (car (car labels)) name)
+      (cdr (car labels))
+      (asm-label-offset name (cdr labels))))
+
+(defun asm-resolve-operand (operand labels)
+  (if (atom operand)
+      operand
+      (asm-label-offset (car (cdr operand)) labels)))
+
+; 1命令分のバイト列を返す(ラベル定義はnil、すなわち0byte)
+(defun asm-emit-instr (instr labels)
+  (if (asm-label-p instr)
+      nil
+      (if (null (cdr instr))
+          (list (car instr))
+          (list (car instr) (asm-resolve-operand (car (cdr instr)) labels)))))
+
+(defun asm-emit-all (instrs labels)
+  (if (null instrs)
+      nil
+      (append (asm-emit-instr (car instrs) labels)
+              (asm-emit-all (cdr instrs) labels))))
+
+; assembleはラベル付き命令リストIRを受け取り、ラベル参照をすべて絶対バイト位置へ解決した
+; 上でフラットなバイト値(fixnum)のリストを返す。まだ生バイト列バッファへの変換ビルトインは
+; 存在しないため(milestone46で導入予定の検証用ブリッジまで不要)、ここではLispのリストを
+; そのままbytecode表現として使う
+(defun assemble (instrs)
+  (let ((labels (asm-collect-labels instrs 0)))
+    (asm-emit-all instrs labels)))
