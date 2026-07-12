@@ -94,4 +94,13 @@ int lisp_heap_low(void);
 // または(gc)組み込み関数からの明示的な呼び出し）以外では呼ばないこと
 UINTN lisp_gc(void);
 
+// --- スタックマシン型VM (milestone 34) ---
+
+// vm_stack（VMのデータスタック、lisp.c内のstaticなグローバル配列）がlisp_gc_mark_rootsの
+// ルート集合に正しく含まれているかを検証する自己テスト。新規consをvm_stackへ積んだ状態でGCを
+// 実行し、その後さらに複数のconsを確保してフリーリストの再利用を強制する。ルート統合が
+// 正しければ元のconsの内容は上書きされず、誤っていれば再利用時に上書きされ検出できる。
+// 真なら成功
+int lisp_vm_gc_root_selftest(void);
+
 #endif // OS_BOOT_DEV_LISP_H

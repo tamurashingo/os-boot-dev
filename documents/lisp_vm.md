@@ -53,7 +53,7 @@ escape hatch」方式を踏襲する。
 
 | # | マイルストーン | 状態 | 主な内容 |
 |---|---|---|---|
-| 34 | VMデータスタックの確保とGCルート統合 | 未着手 | `LispObject vm_stack[VM_STACK_SIZE]`と現在のスタックポインタ`vm_sp`をグローバルに確保する。`lisp_gc_mark_roots`（milestone33）に`vm_stack[0..vm_sp)`を走査して各要素を`lisp_gc_mark`する処理を追加し、スタック上に置かれた中間値がGCで誤って回収されないことを検証する。 |
+| 34 | VMデータスタックの確保とGCルート統合 | ✅完了 | `src/lisp.c`に`LispObject vm_stack[VM_STACK_SIZE]`（`VM_STACK_SIZE=1024`）と`vm_sp`をstaticなグローバルとして確保。`lisp_gc_mark_roots`に`vm_stack[0..vm_sp)`を走査して各要素を`lisp_gc_mark`する処理を追加した。検証用に`lisp_vm_gc_root_selftest`（vm_stackのみから参照されるconsを積んでGCを実行し、その後大量にconsを確保してフリーリスト再利用を強制、元のconsが上書きされていないことを確認する）を追加し、`src/main.c`の起動時自己テスト群（milestone30のsetjmp自己テストと同様、毎回起動時に実行）に組み込んだ。QEMU/OVMF上で`VM stack GC root self-test: PASS`を確認済み。 |
 | 35 | オペコード定義とVM実行ループの最小実装 | 未着手 | `OP_CONST`/`OP_ADD`/`OP_RETURN`の3命令のみを定義し、`lisp_vm_exec`の`switch(*pc++)`ループを実装する。コンパイル結果を保持する型として`LispClosure`へ`bytecode`（生バイト列）/`bytecode_len`/`constants`（既存ベクタ機構を再利用したLispObjectのベクタ）/`constants_len`/`nargs`を追加する（escape hatch方式、新タグは増やさない）。手動で構築した`OP_CONST 1, OP_CONST 2, OP_ADD, OP_RETURN`相当のバイトコード配列を`lisp_vm_exec`に渡し、`3`が返ることをQEMUで検証する。 |
 | 36 | 制御フロー命令とボックス化ローカル変数の基盤 | 未着手 | `OP_JUMP <offset>`/`OP_JUMP_IF_FALSE <offset>`、および`OP_LOAD_LOCAL <i>`/`OP_STORE_LOCAL <i>`/`OP_MAKE_LOCAL`を追加する。ローカル変数はフレームスロットに生の値を直接置かず、既存の`cons`をボックス（`car`=値、`cdr`はNIL固定）として再利用し1段の間接参照を挟む設計をここで導入する（milestone38のクロージャ捕捉で外側変数の共有ミューテーションを正しく扱うための前段）。VM実行状態にフレームポインタ`FP`の概念を追加する。手動バイトコードでif相当の条件分岐とローカル変数の読み書きを検証する。 |
 | 37 | 関数呼び出し命令とスタックフレーム構築 | 未着手 | `OP_CALL <nargs>`と`OP_RETURN`の呼び出し規約を拡張する。呼び出し元は生の引数値を`vm_stack`に積み、`OP_CALL`のC実装側が新しいフレームの先頭`nargs`個をその場でボックス化する（`vm_stack[FP+i] = cons(vm_stack[FP+i], NIL)`）。手動バイトコードで再帰的な関数呼び出し（例: 階乗計算）を構築し検証する。 |

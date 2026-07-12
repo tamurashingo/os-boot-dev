@@ -1324,7 +1324,18 @@ LispObject global_env = LISP_NIL;
 static LispObject lisp_return_tag = LISP_NIL;
 static LispObject lisp_return_value = LISP_NIL;
 
+// --- スタックマシン型VM (milestone 34) ---
+
+// VMのデータスタック。固定長でグローバルに確保する（ヒープ確保ではなくバンプアロケータの
+// 外側にある生配列。関数呼び出し前後のスタックフレームやOP_CALLの呼び出し規約もmilestone37以降
+// ここに積む想定）。vm_spは次に値を積む位置（スタック上の要素数）を指し、vm_stack[0..vm_sp)が
+// 現在有効な要素
+#define VM_STACK_SIZE 1024
+static LispObject vm_stack[VM_STACK_SIZE];
+static UINTN vm_sp = 0;
+
 // --- マーク＆スイープGC (milestone 33) ---
+// (lisp_vm_gc_root_selftestはlisp_gc定義後、本セクション末尾に置く)
 
 // objから到達可能な全オブジェクトのgc_markedを立てる。既にマーク済みなら即座に戻ることで
 // rplaca/rplacdで作れる循環参照でも無限再帰・無限ループしない。長いリストのcdr鎖は確保数に
@@ -1379,7 +1390,9 @@ static void lisp_gc_mark(LispObject obj) {
 // closureがマークされた時点でそのenvも連動して辿られる）、全パッケージに登録された全シンボル
 // （t等の特殊シンボルキャッシュもすべてこの中に含まれるため個別マークは不要）、非局所脱出用の
 // シグナル（return-fromのタグ不一致panicがこの2つをクリアしない既知の挙動があるため、保守的に
-// 常に生きているとみなす）
+// 常に生きているとみなす）、およびVMデータスタック（milestone34。vm_stack[0..vm_sp)には
+// lisp_vm_execが評価中の中間値が生のLispObjectとして置かれるため、Cローカル変数と同様GCの
+// 追跡対象外になってしまう。ここでルートに加えないとバンプ確保のたびに回収されてしまう）
 static void lisp_gc_mark_roots(void) {
     lisp_gc_mark(global_env);
     for (UINTN i = 0; i < lisp_package_count; i++) {
@@ -1390,6 +1403,9 @@ static void lisp_gc_mark_roots(void) {
     }
     lisp_gc_mark(lisp_return_tag);
     lisp_gc_mark(lisp_return_value);
+    for (UINTN i = 0; i < vm_sp; i++) {
+        lisp_gc_mark(vm_stack[i]);
+    }
 }
 
 // lisp_all_objects_headを1回走査し、マーク済みは生存リストへ戻し（マークビットは次回に向けて
@@ -1429,6 +1445,27 @@ static UINTN lisp_gc_sweep(void) {
 UINTN lisp_gc(void) {
     lisp_gc_mark_roots();
     return lisp_gc_sweep();
+}
+
+// milestone 34: vm_stackがlisp_gc_mark_rootsのルート集合に正しく含まれているかを検証する。
+// vm_stack以外からは全く参照されない新規consを積んでGCを実行し、その後さらにconsをいくつも
+// 確保してフリーリストの再利用を強制する。ルート統合が正しければobjのcar/cdrはGCの前後で
+// 変化せず、誤っていればobjのセルがフリーリストへ戻り後続の確保で上書きされて検出できる
+int lisp_vm_gc_root_selftest(void) {
+    LispObject obj = lisp_cons(lisp_make_fixnum(111), lisp_make_fixnum(222));
+    vm_stack[0] = obj;
+    vm_sp = 1;
+    lisp_gc();
+    vm_sp = 0; // 検証専用の一時的な積み込みなので、確認前に戻しておく
+
+    for (UINTN i = 0; i < 64; i++) {
+        lisp_cons(lisp_make_fixnum(0), lisp_make_fixnum(0));
+    }
+
+    if (!lisp_is_cons(obj)) {
+        return 0;
+    }
+    return lisp_car(obj) == lisp_make_fixnum(111) && lisp_cdr(obj) == lisp_make_fixnum(222);
 }
 
 // symをvalueに束縛したペアをenvの先頭に追加した新しい環境を返す
