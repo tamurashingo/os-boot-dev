@@ -84,4 +84,14 @@ extern lisp_jmp_buf *lisp_active_trap;
 // 常にfor(;;){}でハングし続ける（lisp_panicと違いlongjmpしない）
 void lisp_panic_fatal(CHAR16 *message);
 
+// --- マーク＆スイープGC (milestone 33) ---
+// ヒープのバンプ側残り容量が総量の20%未満なら真を返す。EfiMainのREPLループが
+// 毎ループ先頭でこれを見て、真の場合のみlisp_gc()を呼ぶ（評価中には呼ばない——
+// Cコールスタック上の一時参照を正確に追跡できないため、安全地点はREPLループ先頭に限る）
+int lisp_heap_low(void);
+
+// マーク＆スイープGCを1回実行し、回収したオブジェクト数を返す。安全地点（REPLループ先頭、
+// または(gc)組み込み関数からの明示的な呼び出し）以外では呼ばないこと
+UINTN lisp_gc(void);
+
 #endif // OS_BOOT_DEV_LISP_H

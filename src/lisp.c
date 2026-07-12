@@ -128,6 +128,7 @@ static inline int lisp_is_number(LispObject obj) {
 
 static UINT64 lisp_heap_ptr;
 static UINT64 lisp_heap_end;
+static UINT64 lisp_heap_total; // milestone 33: lisp_heap_lowがヒープ使用率を判定するための総量
 EFI_SYSTEM_TABLE *g_system_table; // panic時にConOutへ出力するため
 EFI_HANDLE g_image_handle; // milestone 16: loadがHandleProtocolでファイルシステムを取得するため
 
@@ -198,6 +199,14 @@ static inline void lisp_assert_fixnum(LispObject obj) {
 void lisp_heap_init(UINT64 start, UINT64 size) {
     lisp_heap_ptr = (start + 15) & ~15ULL; // 16byte境界に切り上げ（タグ用に下位ビットを空ける）
     lisp_heap_end = start + size;
+    lisp_heap_total = size;
+}
+
+// milestone 33: バンプ側の残り容量が総量の20%未満ならGCを検討すべきタイミングとみなす
+// （フリーリストに再利用可能なスロットがあっても見ないため近似だが、GCはバンプ枯渇を防ぐ
+// ための仕組みなのでバンプ残量を指標にするのは妥当）
+int lisp_heap_low(void) {
+    return (lisp_heap_end - lisp_heap_ptr) < (lisp_heap_total / 5);
 }
 
 // ヒープからsizeバイトを切り出す（解放・GCなしのバンプアロケータ）。
@@ -216,12 +225,36 @@ void *lisp_alloc(UINTN size) {
 // 追跡リストの先頭。milestone33のGCスイープフェーズがここから全走査する
 static LispObject lisp_all_objects_head = LISP_NIL;
 
-// lisp_allocでsizeバイト確保し、先頭フィールド(gc_next, offset 0)でlisp_all_objects_headへ
-// 連結してからtag付きLispObjectとして返す生ポインタを返す。gc_next/gc_markedの初期化も
-// ここで行う（呼び出し側が個別に初期化する必要はない）。3構造体で先頭2フィールドの型・順序が
-// 揃っていることが前提（LispCons/LispSymbol/LispClosureの定義コメント参照）
+// milestone 33: タグ別フリーリストの先頭。sweepで未マークだったオブジェクトをここへ
+// 戻し、lisp_alloc_trackedがバンプ確保の前にここから再利用する。gc_next（offset 0）を
+// 「追跡リストの次」と「フリーリストの次」の両方の用途で再利用する（生死は排他なので
+// フィールドが競合することはない）
+static LispObject lisp_free_cons = LISP_NIL;
+static LispObject lisp_free_symbol = LISP_NIL;
+static LispObject lisp_free_closure = LISP_NIL;
+
+static LispObject *lisp_free_list_for_tag(UINT64 tag) {
+    switch (tag) {
+        case LISP_TAG_CONS:   return &lisp_free_cons;
+        case LISP_TAG_SYMBOL: return &lisp_free_symbol;
+        default:              return &lisp_free_closure; // LISP_TAG_CLOSURE
+    }
+}
+
+// 対応するフリーリストにスロットがあればそれを再利用し、無ければlisp_allocでバンプ確保する。
+// 確保後は先頭フィールド(gc_next, offset 0)でlisp_all_objects_headへ連結してからtag付き
+// LispObjectとして返す生ポインタを返す。gc_next/gc_markedの初期化もここで行う（呼び出し側が
+// 個別に初期化する必要はない）。3構造体で先頭2フィールドの型・順序が揃っていることが前提
+// （LispCons/LispSymbol/LispClosureの定義コメント参照）
 static void *lisp_alloc_tracked(UINTN size, UINT64 tag) {
-    void *ptr = lisp_alloc(size);
+    LispObject *free_head = lisp_free_list_for_tag(tag);
+    void *ptr;
+    if (*free_head != LISP_NIL) {
+        ptr = (void *)(*free_head & ~LISP_TAG_MASK);
+        *free_head = *(LispObject *)ptr; // gc_nextを辿って次のフリーノードへ
+    } else {
+        ptr = lisp_alloc(size);
+    }
     LispObject tagged = ((LispObject)ptr) | tag;
     *(LispObject *)ptr = lisp_all_objects_head;       // gc_next (offset 0)
     *(int *)((char *)ptr + sizeof(LispObject)) = 0;   // gc_marked (offset 8) = 未マーク
@@ -1291,6 +1324,113 @@ LispObject global_env = LISP_NIL;
 static LispObject lisp_return_tag = LISP_NIL;
 static LispObject lisp_return_value = LISP_NIL;
 
+// --- マーク＆スイープGC (milestone 33) ---
+
+// objから到達可能な全オブジェクトのgc_markedを立てる。既にマーク済みなら即座に戻ることで
+// rplaca/rplacdで作れる循環参照でも無限再帰・無限ループしない。長いリストのcdr鎖は確保数に
+// 比例してCスタックを消費してしまうため、cdr方向（symbolのvalue、closureのenv方向も同様）は
+// 再帰せずループで辿り、car/params/body/vec_dataの各要素方向だけ再帰する
+// （幅方向は現実的なプログラムでは深くならない）
+static void lisp_gc_mark(LispObject obj) {
+    while (1) {
+        if (lisp_is_fixnum(obj) || obj == LISP_NIL) {
+            return;
+        }
+        if (lisp_is_cons(obj)) {
+            LispCons *c = lisp_cons_cell(obj);
+            if (c->gc_marked) {
+                return;
+            }
+            c->gc_marked = 1;
+            lisp_gc_mark(c->car);
+            obj = c->cdr;
+            continue;
+        }
+        if (lisp_is_symbol(obj)) {
+            LispSymbol *s = lisp_symbol_cell(obj);
+            if (s->gc_marked) {
+                return;
+            }
+            s->gc_marked = 1;
+            obj = s->value;
+            continue;
+        }
+        // LISP_TAG_CLOSURE（文字列/float/bignum/vector/関数、すべて共通のescape hatch）
+        LispClosure *cl = lisp_closure_cell(obj);
+        if (cl->gc_marked) {
+            return;
+        }
+        cl->gc_marked = 1;
+        lisp_gc_mark(cl->params);
+        lisp_gc_mark(cl->body);
+        // vec_dataだけが実際のLispObject配列（str_data/big_digitsは生バイト列であり
+        // LispObjectではないため辿らない。所有するclosureが生きていれば不透明バッファ
+        // としてそのまま保持される）
+        if (cl->vec_data) {
+            for (UINTN i = 0; i < cl->vec_len; i++) {
+                lisp_gc_mark(cl->vec_data[i]);
+            }
+        }
+        obj = cl->env;
+    }
+}
+
+// GCのルート集合: グローバル環境（alist。closureのenvも同じ表現を共有するため、生きている
+// closureがマークされた時点でそのenvも連動して辿られる）、全パッケージに登録された全シンボル
+// （t等の特殊シンボルキャッシュもすべてこの中に含まれるため個別マークは不要）、非局所脱出用の
+// シグナル（return-fromのタグ不一致panicがこの2つをクリアしない既知の挙動があるため、保守的に
+// 常に生きているとみなす）
+static void lisp_gc_mark_roots(void) {
+    lisp_gc_mark(global_env);
+    for (UINTN i = 0; i < lisp_package_count; i++) {
+        LispPackage *pkg = &lisp_packages[i];
+        for (UINTN j = 0; j < pkg->symbol_count; j++) {
+            lisp_gc_mark(pkg->symbols[j]);
+        }
+    }
+    lisp_gc_mark(lisp_return_tag);
+    lisp_gc_mark(lisp_return_value);
+}
+
+// lisp_all_objects_headを1回走査し、マーク済みは生存リストへ戻し（マークビットは次回に向けて
+// リセット）、未マークはタグに応じたフリーリストへ戻す。回収したオブジェクト数を返す。
+// 回収したLispClosureがstr_data/big_digits/vec_dataを持っていた場合、それらの2次バッファは
+// 解放されない（milestone32から追跡対象外のまま、コンパクション非対応の方針に合わせて
+// 恒久的なリークとして受け入れる）
+static UINTN lisp_gc_sweep(void) {
+    LispObject obj = lisp_all_objects_head;
+    LispObject survivors = LISP_NIL;
+    UINTN freed = 0;
+    while (obj != LISP_NIL) {
+        UINT64 tag = obj & LISP_TAG_MASK;
+        void *ptr = (void *)(obj & ~LISP_TAG_MASK);
+        LispObject next = *(LispObject *)ptr; // gc_next
+        int *marked = (int *)((char *)ptr + sizeof(LispObject));
+        if (*marked) {
+            *marked = 0;
+            *(LispObject *)ptr = survivors;
+            survivors = obj;
+        } else {
+            LispObject *free_head = lisp_free_list_for_tag(tag);
+            *(LispObject *)ptr = *free_head;
+            *free_head = obj;
+            freed++;
+        }
+        obj = next;
+    }
+    lisp_all_objects_head = survivors;
+    return freed;
+}
+
+// マーク＆スイープGCを1回実行し、回収したオブジェクト数を返す。評価中の一時的な中間値を
+// 正確に追跡できないため（`documents/lisp_robustness.md`のスコープ外項目）、これはCの
+// ローカル変数だけが指す中間オブジェクトが存在しない安全地点（REPLループの先頭、または
+// 明示的な(gc)呼び出し）でのみ呼び出すこと
+UINTN lisp_gc(void) {
+    lisp_gc_mark_roots();
+    return lisp_gc_sweep();
+}
+
 // symをvalueに束縛したペアをenvの先頭に追加した新しい環境を返す
 LispObject lisp_env_extend(LispObject env, LispObject sym, LispObject value) {
     return lisp_cons(lisp_cons(sym, value), env);
@@ -1978,6 +2118,13 @@ LispObject lisp_builtin_lt(LispObject args) {
     return lisp_sym_t;
 }
 
+// (gc): マーク＆スイープGCを手動発火する。検証・デバッグ用（milestone33の自動発火は
+// main.cのREPLループ先頭でヒープ使用率がしきい値を超えた時のみ走る）。引数は無視し、
+// 回収したオブジェクト数をfixnumで返す
+LispObject lisp_builtin_gc(LispObject args) {
+    return lisp_make_fixnum((long long)lisp_gc());
+}
+
 // (gensym)または(gensym "prefix"): 呼ぶたびに一意な非intern済みシンボルを返す。
 // 名前は「prefix（省略時は"G"）+ カウンタの10進数字」で、マクロ展開時の変数捕捉回避用の
 // 名前として読みやすくする以外の意味は持たない（一意性そのものはlisp_make_uninterned_symbolが
@@ -2226,6 +2373,7 @@ LispObject lisp_builtins_init(void) {
     env = lisp_env_extend(env, lisp_intern("load"), lisp_make_builtin(lisp_builtin_load));
     env = lisp_env_extend(env, lisp_intern("sleep"), lisp_make_builtin(lisp_builtin_sleep));
     env = lisp_env_extend(env, lisp_intern("gensym"), lisp_make_builtin(lisp_builtin_gensym));
+    env = lisp_env_extend(env, lisp_intern("gc"), lisp_make_builtin(lisp_builtin_gc));
     env = lisp_env_extend(env, lisp_intern("make-vector"), lisp_make_builtin(lisp_builtin_make_vector));
     env = lisp_env_extend(env, lisp_intern("svref"), lisp_make_builtin(lisp_builtin_svref));
     env = lisp_env_extend(env, lisp_intern("svset"), lisp_make_builtin(lisp_builtin_svset));

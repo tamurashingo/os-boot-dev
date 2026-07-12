@@ -149,6 +149,11 @@ EFI_STATUS EFIAPI EfiMain(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable)
             for (;;) {
                 lisp_setjmp(&repl_trap); // 戻り値は使わない: 通常経路とpanic復帰経路が
                                           // 完全に同じ地点（プロンプト表示直前）に合流するため
+                if (lisp_heap_low()) { // milestone 33: ヒープが少ない時だけGCを起動する。
+                                        // 評価中の中間値はCスタックからしか追跡できないため、
+                                        // ここ（評価と評価の合間）以外では呼ばない
+                    lisp_gc();
+                }
                 SystemTable->ConOut->OutputString(SystemTable->ConOut, L"> ");
                 lisp_read_line(SystemTable);
                 if (input_length == 0) {
