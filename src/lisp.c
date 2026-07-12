@@ -18,7 +18,12 @@
 #define LISP_MAX_PACKAGES 8
 #define LISP_MAX_SYMBOLS 256
 
+// milestone 32: gc_next/gc_markedは3構造体(LispCons/LispSymbol/LispClosure)共通で
+// 先頭2フィールドとして揃える。lisp_alloc_trackedがオフセット0/sizeof(LispObject)を
+// 型を問わず直接読み書きするため、この順序・型を崩さないこと
 typedef struct {
+    LispObject gc_next;  // 確保順の全オブジェクト追跡リストへの次ポインタ
+    int gc_marked;        // milestone33のmark&sweep用mark bit（本milestoneでは常に0）
     LispObject car;
     LispObject cdr;
 } LispCons;
@@ -32,6 +37,8 @@ typedef struct {
 } LispPackage;
 
 typedef struct {
+    LispObject gc_next;   // milestone 32: LispConsと同じ追跡リスト用（先頭2フィールド揃え必須）
+    int gc_marked;
     char name[LISP_SYMBOL_NAME_MAX];
     int is_special;      // milestone 18: defvar/defparameterで真になる動的変数フラグ
     LispObject value;    // is_specialが真の場合の現在の動的値。let/let*が退避・書き換えする
@@ -41,6 +48,8 @@ typedef struct {
 typedef LispObject (*LispBuiltinFn)(LispObject args);
 
 typedef struct {
+    LispObject gc_next;   // milestone 32: LispConsと同じ追跡リスト用（先頭2フィールド揃え必須）
+    int gc_marked;
     LispObject params; // 仮引数シンボルのリスト（builtinの場合は未使用）
     LispObject body;   // 本文（単一式、builtinの場合は未使用）
     LispObject env;    // 生成時の環境（レキシカルスコープ用、builtinの場合は未使用）
@@ -203,8 +212,25 @@ void *lisp_alloc(UINTN size) {
     return ptr;
 }
 
+// milestone 32: 確保済み全オブジェクト（cons/symbol/closure）を確保順に連結した
+// 追跡リストの先頭。milestone33のGCスイープフェーズがここから全走査する
+static LispObject lisp_all_objects_head = LISP_NIL;
+
+// lisp_allocでsizeバイト確保し、先頭フィールド(gc_next, offset 0)でlisp_all_objects_headへ
+// 連結してからtag付きLispObjectとして返す生ポインタを返す。gc_next/gc_markedの初期化も
+// ここで行う（呼び出し側が個別に初期化する必要はない）。3構造体で先頭2フィールドの型・順序が
+// 揃っていることが前提（LispCons/LispSymbol/LispClosureの定義コメント参照）
+static void *lisp_alloc_tracked(UINTN size, UINT64 tag) {
+    void *ptr = lisp_alloc(size);
+    LispObject tagged = ((LispObject)ptr) | tag;
+    *(LispObject *)ptr = lisp_all_objects_head;       // gc_next (offset 0)
+    *(int *)((char *)ptr + sizeof(LispObject)) = 0;   // gc_marked (offset 8) = 未マーク
+    lisp_all_objects_head = tagged;
+    return ptr;
+}
+
 LispObject alloc_cons(void) {
-    return (LispObject)lisp_alloc(sizeof(LispCons)); // 下位2bit=00=LISP_TAG_CONS、タグ付け不要
+    return (LispObject)lisp_alloc_tracked(sizeof(LispCons), LISP_TAG_CONS); // 下位2bit=00=LISP_TAG_CONS、タグ付け不要
 }
 
 LispObject lisp_cons(LispObject car, LispObject cdr) {
@@ -236,7 +262,7 @@ void lisp_set_cdr(LispObject obj, LispObject value) {
 }
 
 LispObject lisp_make_closure(LispObject params, LispObject body, LispObject env) {
-    LispClosure *closure = (LispClosure *)lisp_alloc(sizeof(LispClosure));
+    LispClosure *closure = (LispClosure *)lisp_alloc_tracked(sizeof(LispClosure), LISP_TAG_CLOSURE);
     closure->params = params;
     closure->body = body;
     closure->env = env;
@@ -255,7 +281,7 @@ LispObject lisp_make_closure(LispObject params, LispObject body, LispObject env)
 }
 
 LispObject lisp_make_builtin(LispBuiltinFn fn) {
-    LispClosure *closure = (LispClosure *)lisp_alloc(sizeof(LispClosure));
+    LispClosure *closure = (LispClosure *)lisp_alloc_tracked(sizeof(LispClosure), LISP_TAG_CLOSURE);
     closure->params = LISP_NIL;
     closure->body = LISP_NIL;
     closure->env = LISP_NIL;
@@ -276,7 +302,7 @@ LispObject lisp_make_builtin(LispBuiltinFn fn) {
 // defmacro由来のマクロを作る。lambda由来のクロージャと同じ構造だが、
 // 呼び出し時にlisp_evalが引数を評価せず展開処理に回すためis_macroを立てる
 LispObject lisp_make_macro(LispObject params, LispObject body, LispObject env) {
-    LispClosure *closure = (LispClosure *)lisp_alloc(sizeof(LispClosure));
+    LispClosure *closure = (LispClosure *)lisp_alloc_tracked(sizeof(LispClosure), LISP_TAG_CLOSURE);
     closure->params = params;
     closure->body = body;
     closure->env = env;
@@ -299,7 +325,7 @@ LispObject lisp_make_macro(LispObject params, LispObject body, LispObject env) {
 // 保持し続けるわけではないので、charsはこの呼び出し中だけ有効なスタック上の
 // 一時バッファ等で構わない）
 LispObject lisp_make_string(const char *chars, UINTN len) {
-    LispClosure *closure = (LispClosure *)lisp_alloc(sizeof(LispClosure));
+    LispClosure *closure = (LispClosure *)lisp_alloc_tracked(sizeof(LispClosure), LISP_TAG_CLOSURE);
     closure->params = LISP_NIL;
     closure->body = LISP_NIL;
     closure->env = LISP_NIL;
@@ -326,7 +352,7 @@ LispObject lisp_make_string(const char *chars, UINTN len) {
 
 // floatオブジェクトを作る（milestone 22）。LISP_TAG_CLOSUREのescape hatchを再利用する
 LispObject lisp_make_float(double value) {
-    LispClosure *closure = (LispClosure *)lisp_alloc(sizeof(LispClosure));
+    LispClosure *closure = (LispClosure *)lisp_alloc_tracked(sizeof(LispClosure), LISP_TAG_CLOSURE);
     closure->params = LISP_NIL;
     closure->body = LISP_NIL;
     closure->env = LISP_NIL;
@@ -349,7 +375,7 @@ LispObject lisp_make_float(double value) {
 // 判定は行わない生のコンストラクタなので、通常はlisp_make_number_from_magnitude経由で
 // 呼ぶこと（正規化を保証するため）
 LispObject lisp_make_bignum(const UINT32 *digits, UINTN len, int negative) {
-    LispClosure *closure = (LispClosure *)lisp_alloc(sizeof(LispClosure));
+    LispClosure *closure = (LispClosure *)lisp_alloc_tracked(sizeof(LispClosure), LISP_TAG_CLOSURE);
     closure->params = LISP_NIL;
     closure->body = LISP_NIL;
     closure->env = LISP_NIL;
@@ -377,7 +403,7 @@ LispObject lisp_make_bignum(const UINT32 *digits, UINTN len, int negative) {
 // 次の割り当てと同じアドレスを返すことがあるが、vec_lenが0のためvec_dataを実際に
 // 読み書きするコードは存在せず問題ない
 LispObject lisp_make_vector(UINTN len, LispObject fill) {
-    LispClosure *closure = (LispClosure *)lisp_alloc(sizeof(LispClosure));
+    LispClosure *closure = (LispClosure *)lisp_alloc_tracked(sizeof(LispClosure), LISP_TAG_CLOSURE);
     closure->params = LISP_NIL;
     closure->body = LISP_NIL;
     closure->env = LISP_NIL;
@@ -649,7 +675,7 @@ LispObject lisp_intern_in_package(LispPackage *pkg, const char *name) {
         lisp_panic_fatal(L"symbol table exhausted");
     }
 
-    LispSymbol *sym = (LispSymbol *)lisp_alloc(sizeof(LispSymbol));
+    LispSymbol *sym = (LispSymbol *)lisp_alloc_tracked(sizeof(LispSymbol), LISP_TAG_SYMBOL);
     UINTN i = 0;
     while (truncated[i] != '\0') {
         sym->name[i] = truncated[i];
@@ -680,7 +706,7 @@ static LispObject lisp_intern_keyword(const char *name) {
 // 「名前が何であっても、reader/internを経由する限り絶対にeqにならない」ユニークな
 // シンボルになる。CLのuninterned symbol（どのパッケージにも属さない）に相当するためpackageはNULL
 static LispObject lisp_make_uninterned_symbol(const char *name) {
-    LispSymbol *sym = (LispSymbol *)lisp_alloc(sizeof(LispSymbol));
+    LispSymbol *sym = (LispSymbol *)lisp_alloc_tracked(sizeof(LispSymbol), LISP_TAG_SYMBOL);
     UINTN i = 0;
     while (name[i] != '\0' && i < LISP_SYMBOL_NAME_MAX - 1) {
         sym->name[i] = name[i];
