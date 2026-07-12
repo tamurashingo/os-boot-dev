@@ -1433,16 +1433,18 @@ static inline LispObject lisp_vm_pop(void) {
     return vm_stack[vm_sp];
 }
 
-// fn（lisp_make_compiledで作ったコンパイル済み関数）のbytecodeを実行する（milestone35）。
-// OP_CONST/OP_ADD/OP_RETURNの3命令のみ扱う最小実装で、関数呼び出し・ローカル変数・分岐は
-// まだ無い（milestone36以降で追加）。実行前後でvm_spを保存・復元し、他の呼び出しの
-// スタック内容を汚さないようにする
+// fn（lisp_make_compiledで作ったコンパイル済み関数）のbytecodeを実行する（milestone35/36）。
+// OP_CALLはまだ無く（milestone37で追加）、fpは常にこの実行呼び出し自体のフレーム先頭
+// （実行開始時のvm_sp）を指す。OP_MAKE_LOCALでvm_stack[fp+i]をボックス化していけば、
+// OP_LOAD_LOCAL/OP_STORE_LOCALがそのボックスをFP相対indexで参照できる。実行前後でvm_spを
+// 保存・復元し、他の呼び出しのスタック内容を汚さないようにする
 LispObject lisp_vm_exec(LispObject fn) {
     if (!lisp_is_compiled(fn)) {
         lisp_panic(L"attempt to execute a non-compiled function on the VM");
     }
     LispClosure *cl = lisp_closure_cell(fn);
     UINTN base_sp = vm_sp;
+    UINTN fp = base_sp;
     unsigned char *pc = cl->bytecode;
 
     for (;;) {
@@ -1459,6 +1461,38 @@ LispObject lisp_vm_exec(LispObject fn) {
                 LispObject b = lisp_vm_pop();
                 LispObject a = lisp_vm_pop();
                 lisp_vm_push(lisp_num_add(a, b));
+                break;
+            }
+            case OP_JUMP: {
+                unsigned char target = *pc;
+                pc = cl->bytecode + target;
+                break;
+            }
+            case OP_JUMP_IF_FALSE: {
+                unsigned char target = *pc;
+                pc++;
+                LispObject test = lisp_vm_pop();
+                if (test == LISP_NIL) {
+                    pc = cl->bytecode + target;
+                }
+                break;
+            }
+            case OP_LOAD_LOCAL: {
+                unsigned char idx = *pc;
+                pc++;
+                lisp_vm_push(lisp_car(vm_stack[fp + idx]));
+                break;
+            }
+            case OP_STORE_LOCAL: {
+                unsigned char idx = *pc;
+                pc++;
+                LispObject value = lisp_vm_pop();
+                lisp_set_car(vm_stack[fp + idx], value);
+                break;
+            }
+            case OP_MAKE_LOCAL: {
+                LispObject value = lisp_vm_pop();
+                lisp_vm_push(lisp_cons(value, LISP_NIL));
                 break;
             }
             case OP_RETURN: {

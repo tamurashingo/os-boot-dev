@@ -110,6 +110,18 @@ int lisp_vm_gc_root_selftest(void);
 #define OP_ADD    1   // スタック上位2要素をpopして加算し、結果をpushする
 #define OP_RETURN 2   // スタック最上位をpopし、それを戻り値としてlisp_vm_execから返る
 
+// --- VM制御フロー/ローカル変数オペコード (milestone 36) ---
+// ジャンプ先は関数のbytecode先頭からの絶対バイト位置（1byte、0〜255）。ローカル変数は
+// FP（現在の呼び出しフレームの先頭、milestone37までは実行開始時のspそのもの）相対の
+// index（1byte）で指定し、実体はcons（car=値、cdr=NIL固定）をボックスとして再利用する
+#define OP_JUMP           3   // 次の1byteを絶対バイト位置として解釈し、そこへ無条件にジャンプする
+#define OP_JUMP_IF_FALSE  4   // スタック最上位をpopし、nilなら次の1byteの絶対位置へジャンプする。
+                               // nil以外ならジャンプせず次の命令（オペランドの直後）へ進む
+#define OP_LOAD_LOCAL     5   // 次の1byteをFP相対indexとして解釈し、car(vm_stack[FP+index])をpushする
+#define OP_STORE_LOCAL    6   // スタック最上位をpopし、次の1byteのFP相対indexが指すボックスへ
+                               // rplaca相当で書き込む（vm_stack上のスロット自体は書き換えない）
+#define OP_MAKE_LOCAL     7   // スタック最上位をpopし、その場でcons(値, NIL)としてボックス化しpushし直す
+
 // bytecode(bytecode_len byte)とconstants(constants_len個のLispObject)を保持するVM
 // コンパイル済み関数オブジェクトを作る（LispClosureのescape hatch方式、milestone15/22/26と
 // 同じ前例）。どちらも呼び出し元のバッファをヒープへコピーするので、呼び出し後は

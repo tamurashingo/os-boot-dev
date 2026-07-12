@@ -59,6 +59,57 @@ static void lisp_vm_arith_selftest_run(EFI_SYSTEM_TABLE *SystemTable) {
     }
 }
 
+// --- VM制御フロー・ボックス化ローカル変数自己テスト (milestone 36) ---
+// Lisp相当: (let ((x 10)) (if <test> (setq x 20) (setq x 30)) x)
+// を手動バイトコードで構築し、testがnil/非nilそれぞれの場合に正しい分岐を通り、
+// ローカル変数のボックス経由での読み書きも正しく行われることを確認する。
+//   [0]  OP_CONST 0        ; 10をpush
+//   [2]  OP_MAKE_LOCAL      ; local0 = box(10)
+//   [3]  OP_CONST 1         ; testをpush
+//   [5]  OP_JUMP_IF_FALSE 13 ; nilならelseへ
+//   [7]  OP_CONST 2         ; 20をpush (then)
+//   [9]  OP_STORE_LOCAL 0   ; local0 <- 20
+//   [11] OP_JUMP 17          ; elseを飛び越す
+//   [13] OP_CONST 3         ; 30をpush (else)
+//   [15] OP_STORE_LOCAL 0   ; local0 <- 30
+//   [17] OP_LOAD_LOCAL 0    ; local0を読む
+//   [19] OP_RETURN
+static void lisp_vm_control_flow_selftest_run(EFI_SYSTEM_TABLE *SystemTable) {
+    unsigned char code[] = {
+        OP_CONST, 0,
+        OP_MAKE_LOCAL,
+        OP_CONST, 1,
+        OP_JUMP_IF_FALSE, 13,
+        OP_CONST, 2,
+        OP_STORE_LOCAL, 0,
+        OP_JUMP, 17,
+        OP_CONST, 3,
+        OP_STORE_LOCAL, 0,
+        OP_LOAD_LOCAL, 0,
+        OP_RETURN
+    };
+
+    LispObject ten = lisp_read_from_buffer("10");
+    LispObject twenty = lisp_read_from_buffer("20");
+    LispObject thirty = lisp_read_from_buffer("30");
+    LispObject nil = lisp_read_from_buffer("()");
+
+    LispObject constants_false[4] = { ten, nil, twenty, thirty };
+    LispObject fn_false = lisp_make_compiled(code, sizeof(code), constants_false, 4, 0);
+    LispObject result_false = lisp_vm_exec(fn_false);
+
+    LispObject constants_true[4] = { ten, lisp_read_from_buffer("1"), twenty, thirty };
+    LispObject fn_true = lisp_make_compiled(code, sizeof(code), constants_true, 4, 0);
+    LispObject result_true = lisp_vm_exec(fn_true);
+
+    if (result_false == thirty && result_true == twenty) {
+        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"VM control flow self-test: PASS\r\n");
+    } else {
+        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"VM control flow self-test: FAIL\r\n");
+        for (;;) {}
+    }
+}
+
 static void lisp_setjmp_selftest(EFI_SYSTEM_TABLE *SystemTable) {
     lisp_jmp_buf buf;
     volatile UINT64 marker = 0xDEADBEEFCAFEULL;
@@ -168,6 +219,7 @@ EFI_STATUS EFIAPI EfiMain(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable)
             lisp_setjmp_selftest(SystemTable); // milestone 30: setjmp/longjmp自己テスト
             lisp_vm_gc_root_selftest_run(SystemTable); // milestone 34: VMデータスタックGCルート自己テスト
             lisp_vm_arith_selftest_run(SystemTable); // milestone 35: VM最小実行ループ自己テスト
+            lisp_vm_control_flow_selftest_run(SystemTable); // milestone 36: VM制御フロー・ボックス化ローカル変数自己テスト
 
             SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\nMinimal Lisp REPL. Type an expression and press Enter.\r\n");
 
