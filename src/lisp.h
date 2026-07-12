@@ -129,6 +129,20 @@ int lisp_vm_gc_root_selftest(void);
 // その関数のbytecodeを（C再帰で）実行する。戻り値は元のスタック位置に1個pushされる
 #define OP_CALL 8   // 次の1byteをnargsとして解釈し、上記の呼び出し規約に従って関数を呼び出す
 
+// --- VMクロージャ生成/upvalueオペコード (milestone 38) ---
+// クロージャは「テンプレート」（コンパイル時に作った、bytecode/constants/nargs/upvalue_descsを
+// 持つ共有の関数オブジェクト）と「インスタンス」（OP_MAKE_CLOSUREが実行時に作る、upvaluesだけが
+// 異なる実体）に分かれる。upvalue_descsは各要素が(kind . index)のconsであるベクタで、kind=0なら
+// 「クロージャ生成元フレームのFP+index」のボックスをそのまま捕捉し、kind=1なら「クロージャ生成元
+// closure自身のupvalues[index]」をそのままコピーする（2階層以上の捕捉はこれでフラット化され、
+// OP_LOAD_UPVALUE/OP_STORE_UPVALUEは常に自分のupvaluesだけを見ればよい）
+#define OP_MAKE_CLOSURE   9   // 次の1byteをconstants配列のindexとして解釈し、そこにあるテンプレート
+                               // closureから実体を1つ作ってpushする（upvalue_descsを解決してupvaluesを構築する）
+#define OP_LOAD_UPVALUE  10   // 次の1byteを自分のupvaluesベクタのindexとして解釈し、
+                               // car(upvalues[index])をpushする
+#define OP_STORE_UPVALUE 11   // スタック最上位をpopし、次の1byteが指すupvalues[index]のボックスへ
+                               // rplaca相当で書き込む
+
 // bytecode(bytecode_len byte)とconstants(constants_len個のLispObject)を保持するVM
 // コンパイル済み関数オブジェクトを作る（LispClosureのescape hatch方式、milestone15/22/26と
 // 同じ前例）。どちらも呼び出し元のバッファをヒープへコピーするので、呼び出し後は
@@ -139,5 +153,14 @@ LispObject lisp_make_compiled(const unsigned char *bytecode, UINTN bytecode_len,
 // fn（lisp_make_compiledで作ったコンパイル済み関数）のbytecodeをvm_stack上で実行し、
 // OP_RETURNで返された値を返す
 LispObject lisp_vm_exec(LispObject fn);
+
+// kinds[i]/indices[i]（kindは0=ローカル捕捉、1=upvalue伝播。OP_MAKE_CLOSUREの説明参照）から
+// upvalue_descsベクタを構築する（milestone38）。テンプレートclosureへ
+// lisp_compiled_set_upvalue_descsで設定して使う
+LispObject lisp_make_upvalue_descs(const UINTN *kinds, const UINTN *indices, UINTN count);
+
+// lisp_make_compiledで作ったテンプレートclosure（fn）にupvalue_descsを後付けで設定する
+// （milestone38）。lisp_make_compiledは呼び出し時点ではupvalue_descsを受け取らないため分離している
+void lisp_compiled_set_upvalue_descs(LispObject fn, LispObject descs);
 
 #endif // OS_BOOT_DEV_LISP_H

@@ -174,6 +174,87 @@ static void lisp_vm_call_selftest_run(EFI_SYSTEM_TABLE *SystemTable) {
     }
 }
 
+// --- VMクロージャ生成・upvalue自己テスト (milestone 38) ---
+// (defun make-counter (n) (lambda () (setq n (+ n 1)) n)) 相当を手動バイトコードで構築する。
+// inc（カウンタ本体、nargs=0）は自分のupvalue[0]（make-counterのローカルnのボックス）を
+// 読み書きするテンプレートで、upvalue_descs=[(kind=0 . index=0)]（「生成元フレームのFP+0を
+// そのまま捕捉」）を持つ。make-counter（nargs=1）はOP_MAKE_CLOSUREでincのインスタンスを
+// 1つ作って返すだけ。driverはmake-counterを2回呼んで独立したクロージャc1/c2を作り、
+// c1を2回・c2を1回呼んだ結果を全て加算する（11+12+101=124）。この値は次を同時に検証する:
+//   - c1を複数回呼んでもcaptureしたボックスの変更が次の呼び出しに正しく持続する（11→12）
+//   - c1とc2はmake-counterの呼び出しごとに異なるボックスを捕捉し、状態が独立している
+//     （c2が10ベースの値へ汚染されていれば合計は124にならない）
+//   inc_code:
+//     [0] OP_LOAD_UPVALUE 0   ; 現在のnをpush
+//     [2] OP_CONST 0           ; 1をpush
+//     [4] OP_ADD                 ; n+1
+//     [5] OP_STORE_UPVALUE 0  ; upvalue[0]へ書き戻す
+//     [7] OP_LOAD_UPVALUE 0   ; 更新後のnをpushして返り値にする
+//     [9] OP_RETURN
+//   make_counter_code:
+//     [0] OP_MAKE_CLOSURE 0    ; 定数0番（inc template）からインスタンスを作る
+//     [2] OP_RETURN
+static void lisp_vm_closure_selftest_run(EFI_SYSTEM_TABLE *SystemTable) {
+    unsigned char inc_code[] = {
+        OP_LOAD_UPVALUE, 0,
+        OP_CONST, 0,
+        OP_ADD,
+        OP_STORE_UPVALUE, 0,
+        OP_LOAD_UPVALUE, 0,
+        OP_RETURN
+    };
+    LispObject one = lisp_read_from_buffer("1");
+    LispObject inc_constants[1] = { one };
+    LispObject inc = lisp_make_compiled(inc_code, sizeof(inc_code), inc_constants, 1, 0);
+    UINTN desc_kinds[1] = { 0 };
+    UINTN desc_indices[1] = { 0 };
+    lisp_compiled_set_upvalue_descs(inc, lisp_make_upvalue_descs(desc_kinds, desc_indices, 1));
+
+    unsigned char make_counter_code[] = {
+        OP_MAKE_CLOSURE, 0,
+        OP_RETURN
+    };
+    LispObject make_counter_constants[1] = { inc };
+    LispObject make_counter = lisp_make_compiled(make_counter_code, sizeof(make_counter_code),
+                                                  make_counter_constants, 1, 1);
+
+    // driver: c1=make-counter(10), c2=make-counter(100)を作り、c1を2回・c2を1回呼んで
+    // 11+12+101=124を返す
+    unsigned char driver_code[] = {
+        OP_CONST, 0,
+        OP_CONST, 2,
+        OP_CALL, 1,
+        OP_MAKE_LOCAL,
+        OP_CONST, 1,
+        OP_CONST, 2,
+        OP_CALL, 1,
+        OP_MAKE_LOCAL,
+        OP_LOAD_LOCAL, 0,
+        OP_CALL, 0,
+        OP_LOAD_LOCAL, 0,
+        OP_CALL, 0,
+        OP_ADD,
+        OP_LOAD_LOCAL, 1,
+        OP_CALL, 0,
+        OP_ADD,
+        OP_RETURN
+    };
+    LispObject ten = lisp_read_from_buffer("10");
+    LispObject hundred = lisp_read_from_buffer("100");
+    LispObject driver_constants[3] = { ten, hundred, make_counter };
+    LispObject driver = lisp_make_compiled(driver_code, sizeof(driver_code), driver_constants, 3, 0);
+
+    LispObject result = lisp_vm_exec(driver);
+    LispObject expected = lisp_read_from_buffer("124");
+
+    if (result == expected) {
+        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"VM closure/upvalue self-test: PASS\r\n");
+    } else {
+        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"VM closure/upvalue self-test: FAIL\r\n");
+        for (;;) {}
+    }
+}
+
 static void lisp_setjmp_selftest(EFI_SYSTEM_TABLE *SystemTable) {
     lisp_jmp_buf buf;
     volatile UINT64 marker = 0xDEADBEEFCAFEULL;
@@ -285,6 +366,7 @@ EFI_STATUS EFIAPI EfiMain(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable)
             lisp_vm_arith_selftest_run(SystemTable); // milestone 35: VM最小実行ループ自己テスト
             lisp_vm_control_flow_selftest_run(SystemTable); // milestone 36: VM制御フロー・ボックス化ローカル変数自己テスト
             lisp_vm_call_selftest_run(SystemTable); // milestone 37: VM関数呼び出し・スタックフレーム自己テスト
+            lisp_vm_closure_selftest_run(SystemTable); // milestone 38: VMクロージャ生成・upvalue自己テスト
 
             SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\nMinimal Lisp REPL. Type an expression and press Enter.\r\n");
 

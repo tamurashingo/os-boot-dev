@@ -69,6 +69,14 @@ typedef struct {
     LispObject *constants;   // OP_CONSTが参照する定数配列（LispObjectのベクタ、vec_dataと同じ形）
     UINTN constants_len;      // constantsの要素数
     UINTN nargs;              // 呼び出し時に期待される引数の個数（milestone37で使用）
+    LispObject upvalue_descs; // milestone38: テンプレート側。捕捉元の記述子ベクタ（各要素は
+                               // (kind . index)のcons。kind=0ならOP_MAKE_CLOSURE実行時の
+                               // 呼び出し元フレームのローカルboxをFP+index経由で捕捉、
+                               // kind=1なら呼び出し元closure自身のupvalues[index]を
+                               // そのまま伝播（多段capture flattening）。非closure/未使用ならNIL
+    LispObject upvalues;      // milestone38: インスタンス側。OP_MAKE_CLOSUREが実際に捕捉した
+                               // box参照を格納するベクタ（lisp_make_vector互換）。テンプレート
+                               // 自身はNILのまま
 } LispClosure;
 
 static inline LispObject lisp_make_fixnum(long long value) {
@@ -325,6 +333,8 @@ LispObject lisp_make_closure(LispObject params, LispObject body, LispObject env)
     closure->constants = 0;
     closure->constants_len = 0;
     closure->nargs = 0;
+    closure->upvalue_descs = LISP_NIL;
+    closure->upvalues = LISP_NIL;
     return ((LispObject)closure) | LISP_TAG_CLOSURE;
 }
 
@@ -349,6 +359,8 @@ LispObject lisp_make_builtin(LispBuiltinFn fn) {
     closure->constants = 0;
     closure->constants_len = 0;
     closure->nargs = 0;
+    closure->upvalue_descs = LISP_NIL;
+    closure->upvalues = LISP_NIL;
     return ((LispObject)closure) | LISP_TAG_CLOSURE;
 }
 
@@ -375,6 +387,8 @@ LispObject lisp_make_macro(LispObject params, LispObject body, LispObject env) {
     closure->constants = 0;
     closure->constants_len = 0;
     closure->nargs = 0;
+    closure->upvalue_descs = LISP_NIL;
+    closure->upvalues = LISP_NIL;
     return ((LispObject)closure) | LISP_TAG_CLOSURE;
 }
 
@@ -408,6 +422,8 @@ LispObject lisp_make_string(const char *chars, UINTN len) {
     closure->constants = 0;
     closure->constants_len = 0;
     closure->nargs = 0;
+    closure->upvalue_descs = LISP_NIL;
+    closure->upvalues = LISP_NIL;
     return ((LispObject)closure) | LISP_TAG_CLOSURE;
 }
 
@@ -435,6 +451,8 @@ LispObject lisp_make_float(double value) {
     closure->constants = 0;
     closure->constants_len = 0;
     closure->nargs = 0;
+    closure->upvalue_descs = LISP_NIL;
+    closure->upvalues = LISP_NIL;
     return ((LispObject)closure) | LISP_TAG_CLOSURE;
 }
 
@@ -467,6 +485,8 @@ LispObject lisp_make_bignum(const UINT32 *digits, UINTN len, int negative) {
     closure->constants = 0;
     closure->constants_len = 0;
     closure->nargs = 0;
+    closure->upvalue_descs = LISP_NIL;
+    closure->upvalues = LISP_NIL;
     return ((LispObject)closure) | LISP_TAG_CLOSURE;
 }
 
@@ -500,6 +520,8 @@ LispObject lisp_make_vector(UINTN len, LispObject fill) {
     closure->constants = 0;
     closure->constants_len = 0;
     closure->nargs = 0;
+    closure->upvalue_descs = LISP_NIL;
+    closure->upvalues = LISP_NIL;
     return ((LispObject)closure) | LISP_TAG_CLOSURE;
 }
 
@@ -536,7 +558,26 @@ LispObject lisp_make_compiled(const unsigned char *bytecode, UINTN bytecode_len,
     closure->constants = const_buf;
     closure->constants_len = constants_len;
     closure->nargs = nargs;
+    closure->upvalue_descs = LISP_NIL;
+    closure->upvalues = LISP_NIL;
     return ((LispObject)closure) | LISP_TAG_CLOSURE;
+}
+
+// kinds[i]/indices[i]から(kind . index)のconsをcount個持つベクタを構築する（milestone38）。
+// lisp_make_compiledのテンプレートclosureにlisp_compiled_set_upvalue_descsで設定して使う
+LispObject lisp_make_upvalue_descs(const UINTN *kinds, const UINTN *indices, UINTN count) {
+    LispObject descs = lisp_make_vector(count, LISP_NIL);
+    LispClosure *descs_cell = lisp_closure_cell(descs);
+    for (UINTN i = 0; i < count; i++) {
+        descs_cell->vec_data[i] = lisp_cons(lisp_make_fixnum((long long)kinds[i]),
+                                             lisp_make_fixnum((long long)indices[i]));
+    }
+    return descs;
+}
+
+// テンプレートclosure fnにupvalue_descsを後付けで設定する（milestone38）
+void lisp_compiled_set_upvalue_descs(LispObject fn, LispObject descs) {
+    lisp_closure_cell(fn)->upvalue_descs = descs;
 }
 
 // 桁配列(digits, len)と符号(negative)がfixnum表現範囲に収まるならfixnumを、
@@ -1513,6 +1554,71 @@ static LispObject lisp_vm_run(LispClosure *cl, UINTN fp) {
                 lisp_vm_push(result);
                 break;
             }
+            case OP_MAKE_CLOSURE: {
+                unsigned char idx = *pc;
+                pc++;
+                LispClosure *template_cl = lisp_closure_cell(cl->constants[idx]);
+                LispObject descs = template_cl->upvalue_descs;
+                UINTN n = 0;
+                LispObject *descs_data = 0;
+                if (descs != LISP_NIL) {
+                    LispClosure *descs_cell = lisp_closure_cell(descs);
+                    n = descs_cell->vec_len;
+                    descs_data = descs_cell->vec_data;
+                }
+                LispObject upvalues = lisp_make_vector(n, LISP_NIL);
+                LispClosure *upvalues_cell = lisp_closure_cell(upvalues);
+                for (UINTN i = 0; i < n; i++) {
+                    LispObject desc = descs_data[i];
+                    long long kind = lisp_fixnum_value(lisp_car(desc));
+                    long long index = lisp_fixnum_value(lisp_cdr(desc));
+                    if (kind == 0) {
+                        upvalues_cell->vec_data[i] = vm_stack[fp + index];
+                    } else {
+                        LispClosure *own_upvalues_cell = lisp_closure_cell(cl->upvalues);
+                        upvalues_cell->vec_data[i] = own_upvalues_cell->vec_data[index];
+                    }
+                }
+                LispClosure *instance = (LispClosure *)lisp_alloc_tracked(sizeof(LispClosure), LISP_TAG_CLOSURE);
+                instance->params = LISP_NIL;
+                instance->body = LISP_NIL;
+                instance->env = LISP_NIL;
+                instance->builtin = 0;
+                instance->is_macro = 0;
+                instance->str_data = 0;
+                instance->str_len = 0;
+                instance->is_float = 0;
+                instance->float_value = 0.0;
+                instance->big_digits = 0;
+                instance->big_len = 0;
+                instance->big_negative = 0;
+                instance->vec_data = 0;
+                instance->vec_len = 0;
+                instance->bytecode = template_cl->bytecode;
+                instance->bytecode_len = template_cl->bytecode_len;
+                instance->constants = template_cl->constants;
+                instance->constants_len = template_cl->constants_len;
+                instance->nargs = template_cl->nargs;
+                instance->upvalue_descs = template_cl->upvalue_descs;
+                instance->upvalues = upvalues;
+                lisp_vm_push(((LispObject)instance) | LISP_TAG_CLOSURE);
+                break;
+            }
+            case OP_LOAD_UPVALUE: {
+                unsigned char idx = *pc;
+                pc++;
+                LispClosure *upvalues_cell = lisp_closure_cell(cl->upvalues);
+                lisp_vm_push(lisp_car(upvalues_cell->vec_data[idx]));
+                break;
+            }
+            case OP_STORE_UPVALUE: {
+                unsigned char idx = *pc;
+                pc++;
+                LispObject value = lisp_vm_pop();
+                LispClosure *upvalues_cell = lisp_closure_cell(cl->upvalues);
+                lisp_set_car(upvalues_cell->vec_data[idx], value);
+                break;
+            }
             case OP_RETURN: {
                 LispObject result = lisp_vm_pop();
                 vm_sp = fp;
@@ -1589,6 +1695,10 @@ static void lisp_gc_mark(LispObject obj) {
                 lisp_gc_mark(cl->constants[i]);
             }
         }
+        // upvalue_descs/upvaluesはconstants等と違い生配列ではなく、それ自体がLispObject
+        // （milestone38: 通常のcons/vectorオブジェクト）なのでparams/bodyと同じ1回のmarkで足りる
+        lisp_gc_mark(cl->upvalue_descs);
+        lisp_gc_mark(cl->upvalues);
         obj = cl->env;
     }
 }
