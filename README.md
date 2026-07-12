@@ -106,3 +106,17 @@ make run     # QEMU/OVMFでBOOTX64.EFIを起動
 `init.lisp`を置いておくと、ブート時（stdlib読込・自己テストの直後、REPL開始前）に
 自動で読み込まれます。`write-line`でPASS/FAIL等を出力しておけば、QEMUを`-serial`で
 ファイルやパイプに繋ぐだけで、対話操作なしにテスト結果を確認できます。
+
+この仕組みを自動化したのが`make test`/`make test-<name>`です。`scripts/run_test.py`が
+テストファイルを1つだけ読み込む`init.lisp`を動的生成し、QEMUをheadlessで起動して
+シリアル出力（unixソケット経由）を監視、`RESULT <name> PASS`/`FAIL`の判定後にQEMUを
+終了させます（`LISP_MAX_SYMBOLS`の制約上、テストファイルは1回のQEMU起動につき1つだけ
+読み込むため、テストごとに毎回QEMUを起動し直します）。
+
+```sh
+make test-vector   # test/lisp/test-vector.lispだけを実行
+make test           # test/lisp/配下の全テストファイルを順に実行
+```
+
+OVMFファームウェアのパスは環境変数`OVMF_CODE`（デフォルト`/usr/share/OVMF/OVMF_CODE.fd`）、
+タイムアウトは`TEST_TIMEOUT`（デフォルト300秒）で変更できます。

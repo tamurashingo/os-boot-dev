@@ -2702,12 +2702,27 @@ LispObject lisp_builtin_macroexpand_1(LispObject args) {
 // milestone 16: (load "filename") がFAT32のESPから読み込んだファイル内容を
 // バッファ終端までトップレベルS式として順にglobal_envで評価する。最後に評価した
 // 値（ファイルが空ならlisp_sym_t）を返す
+// bufの全フォームを先に読み切ってconsのリストへ積んでから評価する。読み取り中の
+// evalが（load組み込みなどを介して）bufと同じ静的スクラッチバッファへ再度書き込む
+// ことがあるため、読み取りと評価を1フォームずつ交互に行うとbuf自体が上書きされ
+// 残りのフォームが破壊される（milestone47のinit.lispがネストしたloadを呼ぶ際に発覚）
 static LispObject lisp_load_eval_buffer(const char *buf) {
     lisp_reader_pos = buf;
-    LispObject result = lisp_sym_t;
+    LispObject forms = LISP_NIL;
     while (!lisp_reader_at_end()) {
         LispObject form = lisp_read();
-        result = lisp_eval_toplevel(form);
+        forms = lisp_cons(form, forms);
+    }
+
+    LispObject result = lisp_sym_t;
+    LispObject reversed = LISP_NIL;
+    while (forms != LISP_NIL) {
+        reversed = lisp_cons(lisp_car(forms), reversed);
+        forms = lisp_cdr(forms);
+    }
+    while (reversed != LISP_NIL) {
+        result = lisp_eval_toplevel(lisp_car(reversed));
+        reversed = lisp_cdr(reversed);
     }
     return result;
 }
@@ -2765,6 +2780,7 @@ LispObject lisp_builtin_load(LispObject args) {
     if (root->Open(root, &file, wpath, EFI_FILE_MODE_READ, 0) != 0) {
         lisp_panic(L"load: failed to open file");
     }
+    root->Close(root);
 
     UINTN size = LISP_LOAD_BUFFER_MAX - 1;
     if (file->Read(file, &size, lisp_load_buffer) != 0) {
@@ -2803,6 +2819,7 @@ LispObject lisp_builtin_write_file(LispObject args) {
                    EFI_FILE_MODE_READ | EFI_FILE_MODE_WRITE | EFI_FILE_MODE_CREATE, 0) != 0) {
         lisp_panic(L"write-file: failed to open file");
     }
+    root->Close(root);
 
     UINTN size = content->str_len;
     if (file->Write(file, &size, content->str_data) != 0) {
@@ -2852,8 +2869,10 @@ void lisp_load_init_file(void) {
 
     EFI_FILE_PROTOCOL *file;
     if (root->Open(root, &file, L"EFI\\BOOT\\init.lisp", EFI_FILE_MODE_READ, 0) != 0) {
+        root->Close(root);
         return;
     }
+    root->Close(root);
 
     UINTN size = LISP_LOAD_BUFFER_MAX - 1;
     if (file->Read(file, &size, lisp_load_buffer) != 0) {
