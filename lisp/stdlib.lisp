@@ -221,3 +221,86 @@
 (defun assemble (instrs)
   (let ((labels (asm-collect-labels instrs 0)))
     (asm-emit-all instrs labels)))
+
+; --- compile-expr: リテラル・quote・ifのコンパイル (milestone 42, documents/lisp_vm.md 目標2) ---
+; compile-exprはマクロ展開済み(macroexpand-all通過後)のS式を1つ受け取り、milestone41の
+; IR(ラベル付き命令リスト)を返す。複数のcompile-expr呼び出しをまたいで「定数プール」
+; (constantsベクタに載る値の列)を1つに保つ必要があるため、呼び出し側は`ctx`という
+; ミュータブルな箱(cons)を最初に1つ作って全呼び出しに引き渡す。ctxのcarは「これまでに
+; 登録した定数の個数」、cdrは「登録済みの値を新しい順で並べたリスト」(rplacdでconsする
+; だけでO(1)に追加できるようにするため逆順で持ち、確定時にreverseする)
+(defun compile-make-ctx () (cons 0 nil))
+
+(defun compile-register-const (ctx value)
+  (let ((idx (car ctx)))
+    (rplacd ctx (cons value (cdr ctx)))
+    (rplaca ctx (+ idx 1))
+    idx))
+
+(defun compile-ctx-constants (ctx) (reverse (cdr ctx)))
+
+; if本体のように複数のIR断片(いずれもリスト)を連結する場面が多いため、任意個の
+; 断片を受け取れるようにrest-arg(milestone29のlist同様、仮引数リスト全体を1つの
+; symbolにする書き方)でappendしていく
+(defun compile-concat-all (instr-lists)
+  (if (null instr-lists)
+      nil
+      (append (car instr-lists) (compile-concat-all (cdr instr-lists)))))
+
+(defun compile-concat instr-lists (compile-concat-all instr-lists))
+
+; formがatomの場合はすべて「そのまま評価結果になる」自己評価的な値として扱い、
+; OP_CONSTで定数プールから読み出すコードにコンパイルする。ただし、この単純化は
+; 「ローカル変数参照であるsymbol」もここに含めてしまう点で不完全である。milestone43
+; (コンパイル時レキシカル環境)で、symbolを変数参照として先に判定してから
+; ここへフォールバックする形に直す必要がある(現時点ではlambda-list等に無関係な
+; t/nil/数値/文字列のみを想定したテストに留める)
+(defun compile-literal (form ctx)
+  (list (list *op-const* (compile-register-const ctx form))))
+
+; quoteの内側はそもそも評価されないデータなので、car(cdr form)（quoteされた
+; S式そのもの）をそのまま定数として登録する(macroexpand-allがquoteの内側を
+; 展開しないのと同じ理由)
+(defun compile-quote (form ctx)
+  (list (list *op-const* (compile-register-const ctx (car (cdr form))))))
+
+; elseが省略された(if cond then)の場合は、既存のlisp_evalのif実装と同じく
+; elseの値をnilとして扱う
+(defun compile-if-else-code (form ctx)
+  (if (null (cdr (cdr (cdr form))))
+      (compile-expr nil ctx)
+      (compile-expr (car (cdr (cdr (cdr form)))) ctx)))
+
+; ifは次の形にコンパイルする:
+;   <cond-code>
+;   OP_JUMP_IF_FALSE else-label
+;   <then-code>
+;   OP_JUMP end-label
+;   label else-label
+;   <else-code>
+;   label end-label
+; else/endのラベル名はgensym(milestone20、intern済みシンボル表に登録されない
+; ため衝突しない)で毎回新しく作るため、ifを何重に入れ子にしてもラベル名が
+; 衝突することはない
+(defun compile-if (form ctx)
+  (let ((cond-code (compile-expr (car (cdr form)) ctx))
+        (then-code (compile-expr (car (cdr (cdr form))) ctx))
+        (else-code (compile-if-else-code form ctx))
+        (else-label (gensym))
+        (end-label (gensym)))
+    (compile-concat cond-code
+                    (list (list *op-jump-if-false* (list 'ref else-label)))
+                    then-code
+                    (list (list *op-jump* (list 'ref end-label)))
+                    (list (list 'label else-label))
+                    else-code
+                    (list (list 'label end-label)))))
+
+; if/quote以外の形式(関数呼び出し・let・lambdaなど)はmilestone43以降で対応する
+; ため、現時点では未対応であることを明示するためにt節でnilを返す
+(defun compile-expr (form ctx)
+  (cond
+    ((atom form) (compile-literal form ctx))
+    ((eq (car form) 'quote) (compile-quote form ctx))
+    ((eq (car form) 'if) (compile-if form ctx))
+    (t nil)))
