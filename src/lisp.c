@@ -1433,18 +1433,13 @@ static inline LispObject lisp_vm_pop(void) {
     return vm_stack[vm_sp];
 }
 
-// fn（lisp_make_compiledで作ったコンパイル済み関数）のbytecodeを実行する（milestone35/36）。
-// OP_CALLはまだ無く（milestone37で追加）、fpは常にこの実行呼び出し自体のフレーム先頭
-// （実行開始時のvm_sp）を指す。OP_MAKE_LOCALでvm_stack[fp+i]をボックス化していけば、
-// OP_LOAD_LOCAL/OP_STORE_LOCALがそのボックスをFP相対indexで参照できる。実行前後でvm_spを
-// 保存・復元し、他の呼び出しのスタック内容を汚さないようにする
-LispObject lisp_vm_exec(LispObject fn) {
-    if (!lisp_is_compiled(fn)) {
-        lisp_panic(L"attempt to execute a non-compiled function on the VM");
-    }
-    LispClosure *cl = lisp_closure_cell(fn);
-    UINTN base_sp = vm_sp;
-    UINTN fp = base_sp;
+// clのbytecodeをフレーム先頭fpで実行する（milestone35/36/37共通の実行ループ本体）。
+// fp==vm_sp（呼び出し時点のスタック最上位）で呼ばれれば引数無しの実行（lisp_vm_execからの
+// 直接呼び出し）、fp<vm_spで呼ばれればOP_CALLが既に呼び出し元のフレームからnargs個の生の
+// 引数をvm_stack[fp..fp+nargs)へ積み、その場でボックス化した状態で呼ばれる（milestone37）。
+// OP_LOAD_LOCAL/OP_STORE_LOCALはこのfp相対でボックスを参照する。C関数呼び出しの再帰を使って
+// VM呼び出しの入れ子を表現するため、Cコールスタック自体がVMの呼び出しスタックを兼ねる
+static LispObject lisp_vm_run(LispClosure *cl, UINTN fp) {
     unsigned char *pc = cl->bytecode;
 
     for (;;) {
@@ -1495,15 +1490,50 @@ LispObject lisp_vm_exec(LispObject fn) {
                 lisp_vm_push(lisp_cons(value, LISP_NIL));
                 break;
             }
+            case OP_CALL: {
+                unsigned char nargs = *pc;
+                pc++;
+                LispObject fn_obj = lisp_vm_pop();
+                if (!lisp_is_compiled(fn_obj)) {
+                    lisp_panic(L"attempt to call a non-compiled function on the VM");
+                }
+                LispClosure *callee = lisp_closure_cell(fn_obj);
+                if (callee->nargs != nargs) {
+                    lisp_panic(L"VM function called with wrong number of arguments");
+                }
+                if (vm_sp < nargs) {
+                    lisp_panic(L"VM stack underflow");
+                }
+                UINTN new_fp = vm_sp - nargs;
+                for (UINTN i = 0; i < nargs; i++) {
+                    vm_stack[new_fp + i] = lisp_cons(vm_stack[new_fp + i], LISP_NIL);
+                }
+                LispObject result = lisp_vm_run(callee, new_fp);
+                vm_sp = new_fp;
+                lisp_vm_push(result);
+                break;
+            }
             case OP_RETURN: {
                 LispObject result = lisp_vm_pop();
-                vm_sp = base_sp;
+                vm_sp = fp;
                 return result;
             }
             default:
                 lisp_panic(L"unknown VM opcode");
         }
     }
+}
+
+// fn（lisp_make_compiledで作ったコンパイル済み関数）を、引数無しの新規フレームとして実行する。
+// 呼び出し前後でvm_spを保存・復元し、他の呼び出しのスタック内容を汚さないようにする
+LispObject lisp_vm_exec(LispObject fn) {
+    if (!lisp_is_compiled(fn)) {
+        lisp_panic(L"attempt to execute a non-compiled function on the VM");
+    }
+    UINTN base_sp = vm_sp;
+    LispObject result = lisp_vm_run(lisp_closure_cell(fn), base_sp);
+    vm_sp = base_sp;
+    return result;
 }
 
 // --- マーク＆スイープGC (milestone 33) ---

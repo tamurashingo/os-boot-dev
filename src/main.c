@@ -110,6 +110,70 @@ static void lisp_vm_control_flow_selftest_run(EFI_SYSTEM_TABLE *SystemTable) {
     }
 }
 
+// --- VM関数呼び出し・スタックフレーム自己テスト (milestone 37) ---
+// f(self, n)相当を手動バイトコードで構築する。fはまだ通常のシンボル束縛経由で自分自身を
+// 参照できない（defun等既存evalとの統合は対象外）ため、自分自身を呼び出す代わりに
+// 「自分自身を第1引数selfとして受け取り、再帰呼び出し時にはselfをそのまま次の呼び出しの
+// 関数参照兼selfとして渡す」という自己適用（self-application）方式で真の再帰呼び出しを行う。
+//   n（第2引数、local1）がnilなら基底部（0を返す）。
+//   nilでなければ、self(=local0)を関数参照・self引数の両方として使い、nをnilに固定して
+//   もう1段だけ再帰呼び出しし、戻り値に自分のn（local1、まだ元の値のまま）を加算して返す。
+// バイトコードはどの再帰段でも同一（selfもnも実行時の引数として渡ってくる）ため、これは
+// 見せかけではない本物の再帰呼び出しであり、2段のネストしたスタックフレーム構築・
+// 引数ボックス化・戻り値伝播を検証する
+//   [0]  OP_LOAD_LOCAL 1     ; n をpush
+//   [2]  OP_JUMP_IF_FALSE 16 ; nilなら基底部へ
+//   [4]  OP_LOAD_LOCAL 0     ; self をpush（次段呼び出しのself引数）
+//   [6]  OP_CONST 0          ; nil をpush（次段呼び出しのn引数）
+//   [8]  OP_LOAD_LOCAL 0     ; self をpush（呼び出す関数参照）
+//   [10] OP_CALL 2           ; self(self, nil) を呼び出す
+//   [12] OP_LOAD_LOCAL 1     ; 自分のn をpush
+//   [14] OP_ADD               ; 再帰結果 + 自分のn
+//   [15] OP_RETURN
+//   [16] OP_CONST 1          ; 0 をpush（基底部）
+//   [18] OP_RETURN
+static void lisp_vm_call_selftest_run(EFI_SYSTEM_TABLE *SystemTable) {
+    unsigned char f_code[] = {
+        OP_LOAD_LOCAL, 1,
+        OP_JUMP_IF_FALSE, 16,
+        OP_LOAD_LOCAL, 0,
+        OP_CONST, 0,
+        OP_LOAD_LOCAL, 0,
+        OP_CALL, 2,
+        OP_LOAD_LOCAL, 1,
+        OP_ADD,
+        OP_RETURN,
+        OP_CONST, 1,
+        OP_RETURN
+    };
+    LispObject nil = lisp_read_from_buffer("()");
+    LispObject zero = lisp_read_from_buffer("0");
+    LispObject f_constants[2] = { nil, zero };
+    LispObject f = lisp_make_compiled(f_code, sizeof(f_code), f_constants, 2, 2);
+
+    // driver: f(f, 5) を呼び出す。driverの定数配列はfの構築が終わった後に組むので、
+    // f自身が自分の値を知らなくてもここでは自己参照の鶏と卵問題は生じない
+    unsigned char driver_code[] = {
+        OP_CONST, 0,
+        OP_CONST, 1,
+        OP_CONST, 0,
+        OP_CALL, 2,
+        OP_RETURN
+    };
+    LispObject five = lisp_read_from_buffer("5");
+    LispObject driver_constants[2] = { f, five };
+    LispObject driver = lisp_make_compiled(driver_code, sizeof(driver_code), driver_constants, 2, 0);
+
+    LispObject result = lisp_vm_exec(driver);
+
+    if (result == five) {
+        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"VM function call self-test: PASS\r\n");
+    } else {
+        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"VM function call self-test: FAIL\r\n");
+        for (;;) {}
+    }
+}
+
 static void lisp_setjmp_selftest(EFI_SYSTEM_TABLE *SystemTable) {
     lisp_jmp_buf buf;
     volatile UINT64 marker = 0xDEADBEEFCAFEULL;
@@ -220,6 +284,7 @@ EFI_STATUS EFIAPI EfiMain(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable)
             lisp_vm_gc_root_selftest_run(SystemTable); // milestone 34: VMデータスタックGCルート自己テスト
             lisp_vm_arith_selftest_run(SystemTable); // milestone 35: VM最小実行ループ自己テスト
             lisp_vm_control_flow_selftest_run(SystemTable); // milestone 36: VM制御フロー・ボックス化ローカル変数自己テスト
+            lisp_vm_call_selftest_run(SystemTable); // milestone 37: VM関数呼び出し・スタックフレーム自己テスト
 
             SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\nMinimal Lisp REPL. Type an expression and press Enter.\r\n");
 

@@ -122,6 +122,13 @@ int lisp_vm_gc_root_selftest(void);
                                // rplaca相当で書き込む（vm_stack上のスロット自体は書き換えない）
 #define OP_MAKE_LOCAL     7   // スタック最上位をpopし、その場でcons(値, NIL)としてボックス化しpushし直す
 
+// --- VM関数呼び出しオペコード (milestone 37) ---
+// 呼び出し規約: 呼び出し元はargを1個目から順にpushし、最後に呼び出す関数（コンパイル済み
+// 関数オブジェクト）をpushしてからOP_CALL <nargs>を発行する。OP_CALLは関数オブジェクトをpopし、
+// その下にあるnargs個のスタック位置を「その場でボックス化」して新しいフレームとし、
+// その関数のbytecodeを（C再帰で）実行する。戻り値は元のスタック位置に1個pushされる
+#define OP_CALL 8   // 次の1byteをnargsとして解釈し、上記の呼び出し規約に従って関数を呼び出す
+
 // bytecode(bytecode_len byte)とconstants(constants_len個のLispObject)を保持するVM
 // コンパイル済み関数オブジェクトを作る（LispClosureのescape hatch方式、milestone15/22/26と
 // 同じ前例）。どちらも呼び出し元のバッファをヒープへコピーするので、呼び出し後は
