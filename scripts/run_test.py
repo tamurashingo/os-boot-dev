@@ -20,9 +20,26 @@ import time
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ESP_DIR = os.path.join(REPO_ROOT, "esp_dir")
 INIT_LISP_PATH = os.path.join(ESP_DIR, "EFI", "BOOT", "init.lisp")
-OVMF_CODE = os.environ.get("OVMF_CODE", "/usr/share/OVMF/OVMF_CODE.fd")
 TIMEOUT_SECONDS = float(os.environ.get("TEST_TIMEOUT", "300"))
 DONE_MARKER = "TEST-DONE"
+
+# OVMFパッケージのファイル名はディストリ/バージョンによって異なる
+# (例: Ubuntu 22.04は OVMF_CODE.fd、24.04は OVMF_CODE_4M.fd)。
+# OVMF_CODE環境変数が明示されていなければ、実在するものを順に探す。
+_OVMF_CODE_CANDIDATES = [
+    "/usr/share/OVMF/OVMF_CODE.fd",
+    "/usr/share/OVMF/OVMF_CODE_4M.fd",
+]
+
+
+def _default_ovmf_code():
+    for candidate in _OVMF_CODE_CANDIDATES:
+        if os.path.isfile(candidate):
+            return candidate
+    return _OVMF_CODE_CANDIDATES[0]
+
+
+OVMF_CODE = os.environ.get("OVMF_CODE") or _default_ovmf_code()
 
 # OVMFはConOutをシリアルにも複製するため、画面クリア(ESC[2J)やカーソル移動(ESC[H)などの
 # ANSI/VT100エスケープシーケンスがそのままシリアル出力に混入する。これをprintでそのまま
