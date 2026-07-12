@@ -64,6 +64,11 @@ typedef struct {
     int big_negative;    // 真なら負数（0は常にfixnumで表すため、bignumが0を表すことはない）
     LispObject *vec_data; // milestone 26: 非NULLならvector。要素配列（vec_len個）へのポインタ
     UINTN vec_len;         // vec_dataが指す要素数
+    unsigned char *bytecode; // milestone 34/35: 非NULLならVMコンパイル済み関数。生バイト列へのポインタ
+    UINTN bytecode_len;       // bytecodeの長さ（バイト数）
+    LispObject *constants;   // OP_CONSTが参照する定数配列（LispObjectのベクタ、vec_dataと同じ形）
+    UINTN constants_len;      // constantsの要素数
+    UINTN nargs;              // 呼び出し時に期待される引数の個数（milestone37で使用）
 } LispClosure;
 
 static inline LispObject lisp_make_fixnum(long long value) {
@@ -120,6 +125,11 @@ static inline int lisp_is_bignum(LispObject obj) {
 // vectorも同じくLISP_TAG_CLOSUREを共有するescape hatch（milestone 26、22と同じ方針）
 static inline int lisp_is_vector(LispObject obj) {
     return lisp_is_closure(obj) && lisp_closure_cell(obj)->vec_data != 0;
+}
+
+// VMコンパイル済み関数も同じくLISP_TAG_CLOSUREを共有するescape hatch（milestone 34/35）
+static inline int lisp_is_compiled(LispObject obj) {
+    return lisp_is_closure(obj) && lisp_closure_cell(obj)->bytecode != 0;
 }
 
 static inline int lisp_is_number(LispObject obj) {
@@ -310,6 +320,11 @@ LispObject lisp_make_closure(LispObject params, LispObject body, LispObject env)
     closure->big_negative = 0;
     closure->vec_data = 0;
     closure->vec_len = 0;
+    closure->bytecode = 0;
+    closure->bytecode_len = 0;
+    closure->constants = 0;
+    closure->constants_len = 0;
+    closure->nargs = 0;
     return ((LispObject)closure) | LISP_TAG_CLOSURE;
 }
 
@@ -329,6 +344,11 @@ LispObject lisp_make_builtin(LispBuiltinFn fn) {
     closure->big_negative = 0;
     closure->vec_data = 0;
     closure->vec_len = 0;
+    closure->bytecode = 0;
+    closure->bytecode_len = 0;
+    closure->constants = 0;
+    closure->constants_len = 0;
+    closure->nargs = 0;
     return ((LispObject)closure) | LISP_TAG_CLOSURE;
 }
 
@@ -350,6 +370,11 @@ LispObject lisp_make_macro(LispObject params, LispObject body, LispObject env) {
     closure->big_negative = 0;
     closure->vec_data = 0;
     closure->vec_len = 0;
+    closure->bytecode = 0;
+    closure->bytecode_len = 0;
+    closure->constants = 0;
+    closure->constants_len = 0;
+    closure->nargs = 0;
     return ((LispObject)closure) | LISP_TAG_CLOSURE;
 }
 
@@ -378,6 +403,11 @@ LispObject lisp_make_string(const char *chars, UINTN len) {
     closure->big_negative = 0;
     closure->vec_data = 0;
     closure->vec_len = 0;
+    closure->bytecode = 0;
+    closure->bytecode_len = 0;
+    closure->constants = 0;
+    closure->constants_len = 0;
+    closure->nargs = 0;
     return ((LispObject)closure) | LISP_TAG_CLOSURE;
 }
 
@@ -400,6 +430,11 @@ LispObject lisp_make_float(double value) {
     closure->big_negative = 0;
     closure->vec_data = 0;
     closure->vec_len = 0;
+    closure->bytecode = 0;
+    closure->bytecode_len = 0;
+    closure->constants = 0;
+    closure->constants_len = 0;
+    closure->nargs = 0;
     return ((LispObject)closure) | LISP_TAG_CLOSURE;
 }
 
@@ -427,6 +462,11 @@ LispObject lisp_make_bignum(const UINT32 *digits, UINTN len, int negative) {
     closure->big_negative = negative;
     closure->vec_data = 0;
     closure->vec_len = 0;
+    closure->bytecode = 0;
+    closure->bytecode_len = 0;
+    closure->constants = 0;
+    closure->constants_len = 0;
+    closure->nargs = 0;
     return ((LispObject)closure) | LISP_TAG_CLOSURE;
 }
 
@@ -455,6 +495,47 @@ LispObject lisp_make_vector(UINTN len, LispObject fill) {
     }
     closure->vec_data = buf;
     closure->vec_len = len;
+    closure->bytecode = 0;
+    closure->bytecode_len = 0;
+    closure->constants = 0;
+    closure->constants_len = 0;
+    closure->nargs = 0;
+    return ((LispObject)closure) | LISP_TAG_CLOSURE;
+}
+
+// VMコンパイル済み関数オブジェクトを作る（milestone 34/35）。LISP_TAG_CLOSUREのescape hatchを
+// milestone15/22/26と同様に再利用する。bytecode/constantsはどちらもstr_data/vec_dataと同じく
+// 呼び出し元のバッファをヒープへコピーして持つ（呼び出し元の一時バッファを保持し続ける必要はない）
+LispObject lisp_make_compiled(const unsigned char *bytecode, UINTN bytecode_len,
+                               const LispObject *constants, UINTN constants_len, UINTN nargs) {
+    LispClosure *closure = (LispClosure *)lisp_alloc_tracked(sizeof(LispClosure), LISP_TAG_CLOSURE);
+    closure->params = LISP_NIL;
+    closure->body = LISP_NIL;
+    closure->env = LISP_NIL;
+    closure->builtin = 0;
+    closure->is_macro = 0;
+    closure->str_data = 0;
+    closure->str_len = 0;
+    closure->is_float = 0;
+    closure->float_value = 0.0;
+    closure->big_digits = 0;
+    closure->big_len = 0;
+    closure->big_negative = 0;
+    closure->vec_data = 0;
+    closure->vec_len = 0;
+    unsigned char *code_buf = (unsigned char *)lisp_alloc(bytecode_len);
+    for (UINTN i = 0; i < bytecode_len; i++) {
+        code_buf[i] = bytecode[i];
+    }
+    closure->bytecode = code_buf;
+    closure->bytecode_len = bytecode_len;
+    LispObject *const_buf = (LispObject *)lisp_alloc(constants_len * sizeof(LispObject));
+    for (UINTN i = 0; i < constants_len; i++) {
+        const_buf[i] = constants[i];
+    }
+    closure->constants = const_buf;
+    closure->constants_len = constants_len;
+    closure->nargs = nargs;
     return ((LispObject)closure) | LISP_TAG_CLOSURE;
 }
 
@@ -1334,6 +1415,63 @@ static LispObject lisp_return_value = LISP_NIL;
 static LispObject vm_stack[VM_STACK_SIZE];
 static UINTN vm_sp = 0;
 
+// スタックへの積み下ろし。固定容量資源のため、溢れは(gc)等では解決できずlisp_panic_fatalとする
+// （ヒープ・シンボルテーブル等の他の固定容量資源の枯渇と同じ扱い）
+static inline void lisp_vm_push(LispObject value) {
+    if (vm_sp >= VM_STACK_SIZE) {
+        lisp_panic_fatal(L"VM stack overflow");
+    }
+    vm_stack[vm_sp] = value;
+    vm_sp++;
+}
+
+static inline LispObject lisp_vm_pop(void) {
+    if (vm_sp == 0) {
+        lisp_panic(L"VM stack underflow");
+    }
+    vm_sp--;
+    return vm_stack[vm_sp];
+}
+
+// fn（lisp_make_compiledで作ったコンパイル済み関数）のbytecodeを実行する（milestone35）。
+// OP_CONST/OP_ADD/OP_RETURNの3命令のみ扱う最小実装で、関数呼び出し・ローカル変数・分岐は
+// まだ無い（milestone36以降で追加）。実行前後でvm_spを保存・復元し、他の呼び出しの
+// スタック内容を汚さないようにする
+LispObject lisp_vm_exec(LispObject fn) {
+    if (!lisp_is_compiled(fn)) {
+        lisp_panic(L"attempt to execute a non-compiled function on the VM");
+    }
+    LispClosure *cl = lisp_closure_cell(fn);
+    UINTN base_sp = vm_sp;
+    unsigned char *pc = cl->bytecode;
+
+    for (;;) {
+        unsigned char op = *pc;
+        pc++;
+        switch (op) {
+            case OP_CONST: {
+                unsigned char idx = *pc;
+                pc++;
+                lisp_vm_push(cl->constants[idx]);
+                break;
+            }
+            case OP_ADD: {
+                LispObject b = lisp_vm_pop();
+                LispObject a = lisp_vm_pop();
+                lisp_vm_push(lisp_num_add(a, b));
+                break;
+            }
+            case OP_RETURN: {
+                LispObject result = lisp_vm_pop();
+                vm_sp = base_sp;
+                return result;
+            }
+            default:
+                lisp_panic(L"unknown VM opcode");
+        }
+    }
+}
+
 // --- マーク＆スイープGC (milestone 33) ---
 // (lisp_vm_gc_root_selftestはlisp_gc定義後、本セクション末尾に置く)
 
@@ -1374,12 +1512,17 @@ static void lisp_gc_mark(LispObject obj) {
         cl->gc_marked = 1;
         lisp_gc_mark(cl->params);
         lisp_gc_mark(cl->body);
-        // vec_dataだけが実際のLispObject配列（str_data/big_digitsは生バイト列であり
-        // LispObjectではないため辿らない。所有するclosureが生きていれば不透明バッファ
-        // としてそのまま保持される）
+        // vec_data/constantsだけが実際のLispObject配列（str_data/big_digits/bytecodeは
+        // 生バイト列でありLispObjectではないため辿らない。所有するclosureが生きていれば
+        // 不透明バッファとしてそのまま保持される）
         if (cl->vec_data) {
             for (UINTN i = 0; i < cl->vec_len; i++) {
                 lisp_gc_mark(cl->vec_data[i]);
+            }
+        }
+        if (cl->constants) {
+            for (UINTN i = 0; i < cl->constants_len; i++) {
+                lisp_gc_mark(cl->constants[i]);
             }
         }
         obj = cl->env;

@@ -103,4 +103,22 @@ UINTN lisp_gc(void);
 // 真なら成功
 int lisp_vm_gc_root_selftest(void);
 
+// --- VMオペコード (milestone 35) ---
+// 各命令は1byteのopcode+固定長の即値オペランド（今のところ0または1byte）から成る。
+// 手動でバイトコード配列を構築する目標1の各マイルストン（35〜39）はこの定義を直接使う
+#define OP_CONST  0   // 次の1byteをconstants配列のindexとして解釈し、その定数をpushする
+#define OP_ADD    1   // スタック上位2要素をpopして加算し、結果をpushする
+#define OP_RETURN 2   // スタック最上位をpopし、それを戻り値としてlisp_vm_execから返る
+
+// bytecode(bytecode_len byte)とconstants(constants_len個のLispObject)を保持するVM
+// コンパイル済み関数オブジェクトを作る（LispClosureのescape hatch方式、milestone15/22/26と
+// 同じ前例）。どちらも呼び出し元のバッファをヒープへコピーするので、呼び出し後は
+// 呼び出し元のバッファを保持し続ける必要はない。nargsは今のところ記録のみ（milestone37で使用）
+LispObject lisp_make_compiled(const unsigned char *bytecode, UINTN bytecode_len,
+                               const LispObject *constants, UINTN constants_len, UINTN nargs);
+
+// fn（lisp_make_compiledで作ったコンパイル済み関数）のbytecodeをvm_stack上で実行し、
+// OP_RETURNで返された値を返す
+LispObject lisp_vm_exec(LispObject fn);
+
 #endif // OS_BOOT_DEV_LISP_H

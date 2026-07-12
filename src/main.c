@@ -41,6 +41,24 @@ static void lisp_vm_gc_root_selftest_run(EFI_SYSTEM_TABLE *SystemTable) {
     }
 }
 
+// --- VM最小実行ループ自己テスト (milestone 35) ---
+// OP_CONST 1, OP_CONST 2, OP_ADD, OP_RETURN相当を手動でバイトコード配列として構築し、
+// lisp_vm_execに渡して3が返ることを確認する。定数オブジェクトはlisp_make_fixnum相当の
+// 内部APIを直接使わず、既に公開されているlisp_read_from_bufferを経由して作る
+static void lisp_vm_arith_selftest_run(EFI_SYSTEM_TABLE *SystemTable) {
+    unsigned char code[] = { OP_CONST, 0, OP_CONST, 1, OP_ADD, OP_RETURN };
+    LispObject constants[2] = { lisp_read_from_buffer("1"), lisp_read_from_buffer("2") };
+    LispObject fn = lisp_make_compiled(code, sizeof(code), constants, 2, 0);
+    LispObject result = lisp_vm_exec(fn);
+
+    if (result == lisp_read_from_buffer("3")) {
+        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"VM arithmetic self-test: PASS\r\n");
+    } else {
+        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"VM arithmetic self-test: FAIL\r\n");
+        for (;;) {}
+    }
+}
+
 static void lisp_setjmp_selftest(EFI_SYSTEM_TABLE *SystemTable) {
     lisp_jmp_buf buf;
     volatile UINT64 marker = 0xDEADBEEFCAFEULL;
@@ -149,6 +167,7 @@ EFI_STATUS EFIAPI EfiMain(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable)
             lisp_load_boot_file("stdlib.lisp"); // milestone 29: 標準ライブラリを起動時に読み込む
             lisp_setjmp_selftest(SystemTable); // milestone 30: setjmp/longjmp自己テスト
             lisp_vm_gc_root_selftest_run(SystemTable); // milestone 34: VMデータスタックGCルート自己テスト
+            lisp_vm_arith_selftest_run(SystemTable); // milestone 35: VM最小実行ループ自己テスト
 
             SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\nMinimal Lisp REPL. Type an expression and press Enter.\r\n");
 
