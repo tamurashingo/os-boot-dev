@@ -3,6 +3,59 @@
 
 char memory_map_buffer[1024 * 256];
 
+// --- setjmp/longjmp自己テスト (milestone 30) ---
+// 深いC呼び出しスタックの奥底からlisp_longjmpで一気に脱出できることを確認する。
+// 各段でローカル配列を消費し、単純な同一フレーム内ジャンプでは検出できない
+// スタック破壊が無いことも合わせて確認する
+static void lisp_setjmp_selftest_level3(lisp_jmp_buf *buf) {
+    volatile char padding[64];
+    for (UINTN i = 0; i < sizeof(padding); i++) {
+        padding[i] = (char)i;
+    }
+    lisp_longjmp(buf, 1);
+}
+
+static void lisp_setjmp_selftest_level2(lisp_jmp_buf *buf) {
+    volatile char padding[64];
+    for (UINTN i = 0; i < sizeof(padding); i++) {
+        padding[i] = (char)(i * 2);
+    }
+    lisp_setjmp_selftest_level3(buf);
+}
+
+static void lisp_setjmp_selftest_level1(lisp_jmp_buf *buf) {
+    volatile char padding[64];
+    for (UINTN i = 0; i < sizeof(padding); i++) {
+        padding[i] = (char)(i * 3);
+    }
+    lisp_setjmp_selftest_level2(buf);
+}
+
+static void lisp_setjmp_selftest(EFI_SYSTEM_TABLE *SystemTable) {
+    lisp_jmp_buf buf;
+    volatile UINT64 marker = 0xDEADBEEFCAFEULL;
+    int rv = lisp_setjmp(&buf);
+
+    if (rv == 0) {
+        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"setjmp/longjmp self-test: 1st pass (rv=0)\r\n");
+        lisp_setjmp_selftest_level1(&buf);
+        // lisp_longjmpは戻らないはずなので、ここに到達したら失敗
+        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"setjmp/longjmp self-test: FAIL (unreachable code reached)\r\n");
+        for (;;) {}
+    }
+
+    if (rv == 1 && marker == 0xDEADBEEFCAFEULL) {
+        CHAR16 hex_marker[20];
+        UINT64ToHexStr((UINT64)marker, hex_marker);
+        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"setjmp/longjmp self-test: 2nd pass OK (rv=1, marker=");
+        SystemTable->ConOut->OutputString(SystemTable->ConOut, hex_marker);
+        SystemTable->ConOut->OutputString(SystemTable->ConOut, L")\r\n");
+    } else {
+        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"setjmp/longjmp self-test: FAIL (corrupted state)\r\n");
+        for (;;) {}
+    }
+}
+
 // --- エントリポイント ---
 EFI_STATUS EFIAPI EfiMain(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
     g_system_table = SystemTable;
@@ -84,6 +137,7 @@ EFI_STATUS EFIAPI EfiMain(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable)
             lisp_symbols_init();
             global_env = lisp_builtins_init();
             lisp_load_boot_file("stdlib.lisp"); // milestone 29: 標準ライブラリを起動時に読み込む
+            lisp_setjmp_selftest(SystemTable); // milestone 30: setjmp/longjmp自己テスト
 
             SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\nMinimal Lisp REPL. Type an expression and press Enter.\r\n");
 

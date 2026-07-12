@@ -49,4 +49,29 @@ LispOutputStream lisp_make_console_stream(EFI_SYSTEM_TABLE *SystemTable);
 
 void lisp_print(LispOutputStream *stream, LispObject obj);
 
+// --- 大脱出機構 (milestone 30) ---
+// 呼び出し時のレジスタ状態を保持する。フィールド順とoffsetはsrc/lisp.cの
+// アセンブリ実装と一致させる必要がある。このターゲット(x86_64-w64-mingw32-gcc、
+// -mabi指定なし)はMS x64呼び出し規約がデフォルトのため、System Vとは異なりrdi/rsi
+// も呼び出し先保存レジスタに含まれる（rbx/rbp/rdi/rsi/r12〜r15の8本+rsp+rip）
+typedef struct {
+    UINT64 rbx;
+    UINT64 rbp;
+    UINT64 rdi;
+    UINT64 rsi;
+    UINT64 rsp;
+    UINT64 r12;
+    UINT64 r13;
+    UINT64 r14;
+    UINT64 r15;
+    UINT64 rip;
+} lisp_jmp_buf;
+
+// 呼び出し時のレジスタ状態をbufに保存し、直接呼び出された場合は0を返す。
+// lisp_longjmpによってこの呼び出しへ脱出してきた場合はvalを返す
+int lisp_setjmp(lisp_jmp_buf *buf) __attribute__((returns_twice));
+// bufからレジスタ状態を復元し、対応するlisp_setjmp呼び出しへ脱出する
+// (setjmpがvalを返したかのように見える)。通常のC的な意味では戻らない
+void lisp_longjmp(lisp_jmp_buf *buf, int val) __attribute__((noreturn));
+
 #endif // OS_BOOT_DEV_LISP_H

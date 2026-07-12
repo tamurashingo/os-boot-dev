@@ -2197,3 +2197,46 @@ LispObject lisp_builtins_init(void) {
 
     return env;
 }
+
+// --- 大脱出機構 (milestone 30) ---
+// 通常のC関数だとGCCが自動でプロローグ(push rbp; mov rsp,rbp等)を生成し、
+// 呼び出し元のレジスタ値がasm実行前に書き換わってしまう。x86_64のGCCには
+// 信頼できるnaked属性が無いため、ファイルスコープの生アセンブリで関数全体を
+// 手書きし、プロローグ生成を完全に回避する(musl等のlibcと同じ手法)。
+// このターゲット(x86_64-w64-mingw32-gcc、-mabi指定なし)はMS x64呼び出し
+// 規約がデフォルトのため、第1引数はrcx、第2引数はrdxに渡る(System Vのrdi/rsi
+// ではない)。lisp_jmp_bufのフィールドoffset: rbx=0, rbp=8, rdi=16, rsi=24,
+// rsp=32, r12=40, r13=48, r14=56, r15=64, rip=72 (計80byte、src/lisp.hと一致させる)
+__asm__(
+    ".global lisp_setjmp\n"
+    "lisp_setjmp:\n"
+    "    movq %rbx, 0(%rcx)\n"
+    "    movq %rbp, 8(%rcx)\n"
+    "    movq %rdi, 16(%rcx)\n"
+    "    movq %rsi, 24(%rcx)\n"
+    "    leaq 8(%rsp), %rax\n"      // callへの`ret`で戻った直後のrsp
+    "    movq %rax, 32(%rcx)\n"
+    "    movq %r12, 40(%rcx)\n"
+    "    movq %r13, 48(%rcx)\n"
+    "    movq %r14, 56(%rcx)\n"
+    "    movq %r15, 64(%rcx)\n"
+    "    movq (%rsp), %rax\n"       // callが積んだ戻り先アドレス
+    "    movq %rax, 72(%rcx)\n"
+    "    xorl %eax, %eax\n"         // 初回は0を返す
+    "    ret\n"
+    ".global lisp_longjmp\n"
+    "lisp_longjmp:\n"
+    "    movq 72(%rcx), %r8\n"      // 戻り先rip (スクラッチ)
+    "    movq 32(%rcx), %r9\n"      // 復元後のrsp (スクラッチ)
+    "    movq 0(%rcx), %rbx\n"
+    "    movq 8(%rcx), %rbp\n"
+    "    movq 16(%rcx), %rdi\n"
+    "    movq 24(%rcx), %rsi\n"
+    "    movq 40(%rcx), %r12\n"
+    "    movq 48(%rcx), %r13\n"
+    "    movq 56(%rcx), %r14\n"
+    "    movq 64(%rcx), %r15\n"
+    "    movl %edx, %eax\n"         // 2回目の"戻り値" (valを渡す第2引数edx→eax)
+    "    movq %r9, %rsp\n"          // スタックポインタを復元(この後はcall/ret前提のスタック操作は不可)
+    "    jmpq *%r8\n"               // setjmp呼び出し箇所へ直接ジャンプ(retではなくjmp)
+);
