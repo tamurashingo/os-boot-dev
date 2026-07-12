@@ -143,7 +143,12 @@ EFI_STATUS EFIAPI EfiMain(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable)
 
             LispOutputStream console_stream = lisp_make_console_stream(SystemTable);
 
+            lisp_jmp_buf repl_trap; // milestone 31: panic発生時にここへ復帰する
+            lisp_active_trap = &repl_trap;
+
             for (;;) {
+                lisp_setjmp(&repl_trap); // 戻り値は使わない: 通常経路とpanic復帰経路が
+                                          // 完全に同じ地点（プロンプト表示直前）に合流するため
                 SystemTable->ConOut->OutputString(SystemTable->ConOut, L"> ");
                 lisp_read_line(SystemTable);
                 if (input_length == 0) {

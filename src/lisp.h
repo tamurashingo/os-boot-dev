@@ -74,4 +74,14 @@ int lisp_setjmp(lisp_jmp_buf *buf) __attribute__((returns_twice));
 // (setjmpがvalを返したかのように見える)。通常のC的な意味では戻らない
 void lisp_longjmp(lisp_jmp_buf *buf, int val) __attribute__((noreturn));
 
+// --- REPLエラー復旧トラップ (milestone 31) ---
+// REPLループが現在アクティブなlisp_jmp_bufを指す。NULLならトラップ未設置
+// （まだREPLループに入っていない起動処理中など）を意味し、lisp_panicは
+// 従来通りfor(;;){}でハングする
+extern lisp_jmp_buf *lisp_active_trap;
+
+// 固定容量資源の枯渇など、REPLに復帰しても安全に継続できない致命的エラー用。
+// 常にfor(;;){}でハングし続ける（lisp_panicと違いlongjmpしない）
+void lisp_panic_fatal(CHAR16 *message);
+
 #endif // OS_BOOT_DEV_LISP_H

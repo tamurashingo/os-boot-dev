@@ -122,9 +122,26 @@ static UINT64 lisp_heap_end;
 EFI_SYSTEM_TABLE *g_system_table; // panic時にConOutへ出力するため
 EFI_HANDLE g_image_handle; // milestone 16: loadがHandleProtocolでファイルシステムを取得するため
 
-// エラーメッセージを出力して停止する。呼び出し元には戻らない
+// milestone 31: REPLループが設置したトラップ。NULLなら未設置
+lisp_jmp_buf *lisp_active_trap = (void *)0;
+
+// エラーメッセージを出力する。トラップが設置されていればそこへlisp_longjmpで
+// 復帰し、REPLの次のプロンプトから継続できる。トラップ未設置（起動処理中など）
+// の場合は従来通りfor(;;){}でハングする
 void lisp_panic(CHAR16 *message) {
     g_system_table->ConOut->OutputString(g_system_table->ConOut, L"Lisp panic: ");
+    g_system_table->ConOut->OutputString(g_system_table->ConOut, message);
+    g_system_table->ConOut->OutputString(g_system_table->ConOut, L"\r\n");
+    if (lisp_active_trap != (void *)0) {
+        lisp_longjmp(lisp_active_trap, 1);
+    }
+    for (;;) {}
+}
+
+// milestone 31: 固定容量資源の枯渇など、REPLに復帰しても安全に継続できない
+// 致命的エラー用。トラップの有無に関わらず常にfor(;;){}でハングし続ける
+void lisp_panic_fatal(CHAR16 *message) {
+    g_system_table->ConOut->OutputString(g_system_table->ConOut, L"Lisp fatal panic: ");
     g_system_table->ConOut->OutputString(g_system_table->ConOut, message);
     g_system_table->ConOut->OutputString(g_system_table->ConOut, L"\r\n");
     for (;;) {}
@@ -179,7 +196,7 @@ void lisp_heap_init(UINT64 start, UINT64 size) {
 void *lisp_alloc(UINTN size) {
     UINT64 aligned_size = (size + 15) & ~15ULL;
     if (lisp_heap_ptr + aligned_size > lisp_heap_end) {
-        lisp_panic(L"heap exhausted");
+        lisp_panic_fatal(L"heap exhausted");
     }
     void *ptr = (void *)lisp_heap_ptr;
     lisp_heap_ptr += aligned_size;
@@ -577,7 +594,7 @@ static LispPackage *lisp_keyword_package;
 
 static LispPackage *lisp_make_package(const char *name, int is_keyword_package) {
     if (lisp_package_count >= LISP_MAX_PACKAGES) {
-        lisp_panic(L"package table exhausted");
+        lisp_panic_fatal(L"package table exhausted");
     }
     LispPackage *pkg = &lisp_packages[lisp_package_count];
     UINTN i = 0;
@@ -629,7 +646,7 @@ LispObject lisp_intern_in_package(LispPackage *pkg, const char *name) {
     }
 
     if (pkg->symbol_count >= LISP_MAX_SYMBOLS) {
-        lisp_panic(L"symbol table exhausted");
+        lisp_panic_fatal(L"symbol table exhausted");
     }
 
     LispSymbol *sym = (LispSymbol *)lisp_alloc(sizeof(LispSymbol));
