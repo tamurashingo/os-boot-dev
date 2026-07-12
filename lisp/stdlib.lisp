@@ -249,12 +249,12 @@
 
 (defun compile-concat instr-lists (compile-concat-all instr-lists))
 
-; formがatomの場合はすべて「そのまま評価結果になる」自己評価的な値として扱い、
-; OP_CONSTで定数プールから読み出すコードにコンパイルする。ただし、この単純化は
-; 「ローカル変数参照であるsymbol」もここに含めてしまう点で不完全である。milestone43
-; (コンパイル時レキシカル環境)で、symbolを変数参照として先に判定してから
-; ここへフォールバックする形に直す必要がある(現時点ではlambda-list等に無関係な
-; t/nil/数値/文字列のみを想定したテストに留める)
+; formがatomの場合の既定の扱い: そのまま評価結果になる自己評価的な値として、
+; OP_CONSTで定数プールから読み出すコードにコンパイルする。milestone43以降、
+; symbolはまずcompile-variable-refでレキシカル束縛の有無を確認してから
+; ここへフォールバックするため、ここに来るのは「レキシカルに束縛されていない
+; symbol(グローバル/動的変数の参照は本ロードマップのスコープ外)」と
+; 数値・nil・t・文字列などの本来のリテラルのみになる
 (defun compile-literal (form ctx)
   (list (list *op-const* (compile-register-const ctx form))))
 
@@ -264,12 +264,89 @@
 (defun compile-quote (form ctx)
   (list (list *op-const* (compile-register-const ctx (car (cdr form))))))
 
+; --- コンパイル時レキシカル環境とlet/変数参照/setq (milestone 43, documents/lisp_vm.md 目標2) ---
+; envは((symbol . slot) ...)というalist。「この位置で見えているレキシカル変数名→
+; フレームスロット番号」の対応を表す。let束縛のスロットは一度確保すると解放しない
+; (実行時にOP_MAKE_LOCALで一度ボックス化したフレームスロットを、let本体の評価が
+; 終わった後で明示的に「解放」する命令が存在しないため、意図的にスロットを再利用
+; しない単純化を採用した)。progn相当の逐次実行フォームがまだ存在しないmilestone43
+; 時点では、ifの2つの分岐のように互いに排他的な経路が常に同じ深さから始まる
+; ケースしか発生しないため、次に使うスロット番号は単純に「envに現在見えている
+; 変数の数」(compile-env-length)で求まる
+(defun compile-env-length (env)
+  (if (null env)
+      0
+      (+ 1 (compile-env-length (cdr env)))))
+
+; 見つからなければnilを返す安全な検索。レキシカルに束縛されていないsymbolは
+; compile-literalへフォールバックしてそのまま自己評価的な定数として扱う
+; (milestone42で残していた既知の制約はレキシカル変数についてはここで解消される。
+; グローバル/動的変数への正規の対応は依然スコープ外)
+(defun compile-env-find (name env)
+  (if (null env)
+      nil
+      (if (eq (car (car env)) name)
+          (car env)
+          (compile-env-find name (cdr env)))))
+
+; setqの対象は必ずレキシカルに束縛されている前提のため、見つからない場合は
+; asm-label-offset(milestone41)と同じ流儀で(car nil)へ落ちて自然にpanicする
+; (グローバル変数へのsetqは未対応であることを示すため、防御的なチェックを
+; 追加しない)
+(defun compile-env-slot (name env)
+  (if (eq (car (car env)) name)
+      (cdr (car env))
+      (compile-env-slot name (cdr env))))
+
+(defun compile-variable-ref (form ctx env)
+  (let ((binding (compile-env-find form env)))
+    (if binding
+        (list (list *op-load-local* (cdr binding)))
+        (compile-literal form ctx))))
+
+; letはlet*と異なり、全てのinit-formを束縛前の外側env(この関数の引数env、
+; まだ拡張していないもの)で評価する(milestone17のlisp_eval同様、束縛同士が
+; 互いを参照できない並行束縛)。各init-formのコードの直後にOP_MAKE_LOCALを
+; 1つ発行することで、その結果をそのままボックス化して並行に確保していく
+(defun compile-let-bindings (bindings ctx env)
+  (if (null bindings)
+      nil
+      (compile-concat (compile-expr (car (cdr (car bindings))) ctx env)
+                      (list (list *op-make-local*))
+                      (compile-let-bindings (cdr bindings) ctx env))))
+
+; bindingsの各変数名に、外側envの長さから始まる連番のスロット番号を割り当てた
+; 新しいenvを返す(compile-let-bindingsがOP_MAKE_LOCALを発行する順序と一致させる
+; ため、先頭の束縛から順に外側envの長さ、+1、+2...という番号を振る)
+(defun compile-let-extend-env (bindings env)
+  (if (null bindings)
+      env
+      (compile-let-extend-env
+        (cdr bindings)
+        (cons (cons (car (car bindings)) (compile-env-length env)) env))))
+
+(defun compile-let (form ctx env)
+  (let ((bindings (car (cdr form)))
+        (body (car (cdr (cdr form)))))
+    (compile-concat (compile-let-bindings bindings ctx env)
+                    (compile-expr body ctx (compile-let-extend-env bindings env)))))
+
+; setqは代入した値をそのまま式の値として返す(Common Lisp/既存lisp_evalと同じ)。
+; OP_STORE_LOCALはストアと同時にスタック最上位をpopしてしまう(値を残さない)ため、
+; ストア後にOP_LOAD_LOCALで同じスロットを読み直し、「常に1つの値をスタックに
+; 残す」というcompile-exprの不変条件を既存の命令だけで満たす
+(defun compile-setq (form ctx env)
+  (let ((slot (compile-env-slot (car (cdr form)) env)))
+    (compile-concat (compile-expr (car (cdr (cdr form))) ctx env)
+                    (list (list *op-store-local* slot))
+                    (list (list *op-load-local* slot)))))
+
 ; elseが省略された(if cond then)の場合は、既存のlisp_evalのif実装と同じく
 ; elseの値をnilとして扱う
-(defun compile-if-else-code (form ctx)
+(defun compile-if-else-code (form ctx env)
   (if (null (cdr (cdr (cdr form))))
-      (compile-expr nil ctx)
-      (compile-expr (car (cdr (cdr (cdr form)))) ctx)))
+      (compile-expr nil ctx env)
+      (compile-expr (car (cdr (cdr (cdr form)))) ctx env)))
 
 ; ifは次の形にコンパイルする:
 ;   <cond-code>
@@ -282,10 +359,10 @@
 ; else/endのラベル名はgensym(milestone20、intern済みシンボル表に登録されない
 ; ため衝突しない)で毎回新しく作るため、ifを何重に入れ子にしてもラベル名が
 ; 衝突することはない
-(defun compile-if (form ctx)
-  (let ((cond-code (compile-expr (car (cdr form)) ctx))
-        (then-code (compile-expr (car (cdr (cdr form))) ctx))
-        (else-code (compile-if-else-code form ctx))
+(defun compile-if (form ctx env)
+  (let ((cond-code (compile-expr (car (cdr form)) ctx env))
+        (then-code (compile-expr (car (cdr (cdr form))) ctx env))
+        (else-code (compile-if-else-code form ctx env))
         (else-label (gensym))
         (end-label (gensym)))
     (compile-concat cond-code
@@ -296,11 +373,14 @@
                     else-code
                     (list (list 'label end-label)))))
 
-; if/quote以外の形式(関数呼び出し・let・lambdaなど)はmilestone43以降で対応する
-; ため、現時点では未対応であることを明示するためにt節でnilを返す
-(defun compile-expr (form ctx)
+; atomは(既にレキシカル束縛の有無を確認する)compile-variable-refに委ねる。
+; quote/if/let/setq以外の形式(関数呼び出し・lambdaなど)はmilestone44以降で
+; 対応するため、現時点では未対応であることを明示するためにt節でnilを返す
+(defun compile-expr (form ctx env)
   (cond
-    ((atom form) (compile-literal form ctx))
+    ((atom form) (compile-variable-ref form ctx env))
     ((eq (car form) 'quote) (compile-quote form ctx))
-    ((eq (car form) 'if) (compile-if form ctx))
+    ((eq (car form) 'if) (compile-if form ctx env))
+    ((eq (car form) 'let) (compile-let form ctx env))
+    ((eq (car form) 'setq) (compile-setq form ctx env))
     (t nil)))
