@@ -196,6 +196,66 @@
         (and (struct-eq bytes (list 0 0 7 9 1))
              (struct-eq (compile-ctx-constants ctx) (list 100 package)))))))
 
+; --- milestone45: compile-expr(関数呼び出し・プリミティブ呼び出し) ---
+
+(defun run-test-compile-expr-cons ()
+  ; (cons 1 2) -> OP_CONSはcdr_valを先にpop・car_valを後にpopするので、
+  ; carになる1を先に、cdrになる2を後にコンパイルして積む
+  (let ((ctx (compile-make-ctx)))
+    (let ((bytes (assemble (compile-expr '(cons 1 2) ctx (compile-make-top-scope)))))
+      (and (struct-eq bytes (list 0 0 0 1 12))
+           (struct-eq (compile-ctx-constants ctx) (list 1 2))))))
+
+(defun run-test-compile-expr-car ()
+  ; (car (cons 1 2)) -> 引数式のコンパイル結果の直後にOP_CARを1つ追加するだけ
+  (let ((ctx (compile-make-ctx)))
+    (let ((bytes (assemble (compile-expr '(car (cons 1 2)) ctx (compile-make-top-scope)))))
+      (and (struct-eq bytes (list 0 0 0 1 12 13))
+           (struct-eq (compile-ctx-constants ctx) (list 1 2))))))
+
+(defun run-test-compile-expr-cdr ()
+  (let ((ctx (compile-make-ctx)))
+    (let ((bytes (assemble (compile-expr '(cdr (cons 1 2)) ctx (compile-make-top-scope)))))
+      (and (struct-eq bytes (list 0 0 0 1 12 14))
+           (struct-eq (compile-ctx-constants ctx) (list 1 2))))))
+
+(defun run-test-compile-expr-eq ()
+  ; (eq 1 1) -> compile-literalは値の同一性を確認せず毎回新しい定数indexを
+  ; 発行するため、同じ値1でもconstantsには2回登録される
+  (let ((ctx (compile-make-ctx)))
+    (let ((bytes (assemble (compile-expr '(eq 1 1) ctx (compile-make-top-scope)))))
+      (and (struct-eq bytes (list 0 0 0 1 15))
+           (struct-eq (compile-ctx-constants ctx) (list 1 1))))))
+
+(defun run-test-compile-expr-call-simple ()
+  ; (let ((f (lambda (x) x))) (f 5)) -> letでfにクロージャを束縛し、本体でfを
+  ; 呼び出す。OP_CALLの呼び出し規約に合わせ、引数5を先に積み、関数式fを
+  ; その後に積んでからOP_CALL 1を発行する
+  (let ((ctx (compile-make-ctx)))
+    (let ((bytes (assemble (compile-expr '(let ((f (lambda (x) x))) (f 5)) ctx (compile-make-top-scope)))))
+      (let ((package (list 1 (list 5 0) nil nil)))
+        (and (struct-eq bytes (list 9 0 7 0 1 5 0 8 1))
+             (struct-eq (compile-ctx-constants ctx) (list package 5)))))))
+
+(defun run-test-compile-expr-call-immediate-lambda-multiple-args ()
+  ; ((lambda (x y) x) 1 2) -> 関数式自体がlambda式であっても(carがsymbolでは
+  ; ない場合)compile-exprに委ねるだけで呼び出しをコンパイルできることを検証する。
+  ; 引数は宣言順(1, 2)に先に積まれ、その後にlambda式のコンパイル結果(クロージャの
+  ; 生成コード)が積まれてからOP_CALL 2が発行される
+  (let ((ctx (compile-make-ctx)))
+    (let ((bytes (assemble (compile-expr '((lambda (x y) x) 1 2) ctx (compile-make-top-scope)))))
+      (let ((package (list 2 (list 5 0) nil nil)))
+        (and (struct-eq bytes (list 0 0 0 1 9 2 8 2))
+             (struct-eq (compile-ctx-constants ctx) (list 1 2 package)))))))
+
+(defun run-test-compile-expr-call-primitive-composition ()
+  ; (cons (car (quote (a b))) 3) -> プリミティブ呼び出しが入れ子になり、
+  ; 呼び出しの引数の中でさらに別のプリミティブ呼び出しが使われるケース
+  (let ((ctx (compile-make-ctx)))
+    (let ((bytes (assemble (compile-expr '(cons (car (quote (a b))) 3) ctx (compile-make-top-scope)))))
+      (and (struct-eq bytes (list 0 0 13 0 1 12))
+           (struct-eq (compile-ctx-constants ctx) (list (list 'a 'b) 3))))))
+
 (defun run-test-compile-expr ()
   (and (run-test-compile-expr-number-literal)
        (run-test-compile-expr-nil-literal)
@@ -217,4 +277,11 @@
        (run-test-compile-expr-lambda-captures-outer-local)
        (run-test-compile-expr-lambda-nested-capture-flattens)
        (run-test-compile-expr-lambda-two-captures-memoized)
-       (run-test-compile-expr-lambda-param-and-capture-together)))
+       (run-test-compile-expr-lambda-param-and-capture-together)
+       (run-test-compile-expr-cons)
+       (run-test-compile-expr-car)
+       (run-test-compile-expr-cdr)
+       (run-test-compile-expr-eq)
+       (run-test-compile-expr-call-simple)
+       (run-test-compile-expr-call-immediate-lambda-multiple-args)
+       (run-test-compile-expr-call-primitive-composition)))

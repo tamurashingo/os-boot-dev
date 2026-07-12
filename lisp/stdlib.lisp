@@ -493,10 +493,51 @@
                                 (compile-ctx-constants (captures-desc-ctx (scope-captures inner-scope))))))
             (list (list *op-make-closure* (compile-register-const ctx package)))))))))
 
+; --- compile-expr: 関数呼び出し・プリミティブ呼び出し (milestone 45, documents/lisp_vm.md 目標2) ---
+; OP_CALL <nargs>(src/lisp.c)の呼び出し規約は「先にnargs個の生の引数値をスタックに積み、
+; その上に呼び出し対象の関数値を積んでから発行する」(OP_CALLは最初にfn_objをpopし、
+; 残りのnargs個をそのままフレームとしてボックス化する)。そのためcompile-callは
+; 引数を先頭から順にコンパイルしてから、最後に関数式(car form。symbolの場合も
+; あればlambda式そのものである場合もあり、いずれもcompile-expr自身に委ねられる)
+; をコンパイルする
+(defun compile-call-args (args ctx scope)
+  (if (null args)
+      nil
+      (compile-concat (compile-expr (car args) ctx scope)
+                      (compile-call-args (cdr args) ctx scope))))
+
+(defun compile-call (form ctx scope)
+  (compile-concat (compile-call-args (cdr form) ctx scope)
+                  (compile-expr (car form) ctx scope)
+                  (list (list *op-call* (compile-env-length (cdr form))))))
+
+; milestone39でVMにインライン化された4つのプリミティブ(OP_CONS/OP_CAR/OP_CDR/OP_EQ)は
+; 汎用のOP_CALLを経由せず、対応する専用命令へ直接コンパイルする。OP_CONSは
+; cdr_valを先にpop・car_valを後にpopする実装(src/lisp.c)なので、carになる式を
+; 先に、cdrになる式を後にコンパイルして積む順序を合わせる
+(defun compile-cons (form ctx scope)
+  (compile-concat (compile-expr (car (cdr form)) ctx scope)
+                  (compile-expr (car (cdr (cdr form))) ctx scope)
+                  (list (list *op-cons*))))
+
+(defun compile-car (form ctx scope)
+  (compile-concat (compile-expr (car (cdr form)) ctx scope)
+                  (list (list *op-car*))))
+
+(defun compile-cdr (form ctx scope)
+  (compile-concat (compile-expr (car (cdr form)) ctx scope)
+                  (list (list *op-cdr*))))
+
+(defun compile-eq (form ctx scope)
+  (compile-concat (compile-expr (car (cdr form)) ctx scope)
+                  (compile-expr (car (cdr (cdr form))) ctx scope)
+                  (list (list *op-eq*))))
+
 ; atomは(既にレキシカル束縛の有無を確認する)compile-variable-refに委ねる。
-; quote/if/let/setq/lambda以外の形式(関数呼び出し・プリミティブ呼び出し)は
-; milestone45以降で対応するため、現時点では未対応であることを明示するために
-; t節でnilを返す
+; cons/car/cdr/eqはインライン化された専用命令へ、それ以外の形式(carがsymbol
+; でもlambda式でも構わない)はすべて汎用の関数呼び出しcompile-callへコンパイル
+; する。これにより「未対応の形式」は無くなり、milestone42のt節に残っていた
+; 明示的なnilフォールバックは不要になった
 (defun compile-expr (form ctx scope)
   (cond
     ((atom form) (compile-variable-ref form ctx scope))
@@ -505,4 +546,8 @@
     ((eq (car form) 'let) (compile-let form ctx scope))
     ((eq (car form) 'setq) (compile-setq form ctx scope))
     ((eq (car form) 'lambda) (compile-lambda form ctx scope))
-    (t nil)))
+    ((eq (car form) 'cons) (compile-cons form ctx scope))
+    ((eq (car form) 'car) (compile-car form ctx scope))
+    ((eq (car form) 'cdr) (compile-cdr form ctx scope))
+    ((eq (car form) 'eq) (compile-eq form ctx scope))
+    (t (compile-call form ctx scope))))
