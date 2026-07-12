@@ -272,7 +272,8 @@
 ; しない単純化を採用した)。progn相当の逐次実行フォームがまだ存在しないmilestone43
 ; 時点では、ifの2つの分岐のように互いに排他的な経路が常に同じ深さから始まる
 ; ケースしか発生しないため、次に使うスロット番号は単純に「envに現在見えている
-; 変数の数」(compile-env-length)で求まる
+; 変数の数」(compile-env-length)で求まる。milestone44以降もこの関数はローカル
+; スロット用alistだけでなくupvalue捕捉記録用alistの探索・計数にも再利用する
 (defun compile-env-length (env)
   (if (null env)
       0
@@ -289,64 +290,145 @@
           (car env)
           (compile-env-find name (cdr env)))))
 
-; setqの対象は必ずレキシカルに束縛されている前提のため、見つからない場合は
-; asm-label-offset(milestone41)と同じ流儀で(car nil)へ落ちて自然にpanicする
-; (グローバル変数へのsetqは未対応であることを示すため、防御的なチェックを
-; 追加しない)
-(defun compile-env-slot (name env)
-  (if (eq (car (car env)) name)
-      (cdr (car env))
-      (compile-env-slot name (cdr env))))
+; --- compile-expr: lambdaとクロージャ捕捉 (milestone 44, documents/lisp_vm.md 目標2) ---
+; milestone43までのenv(単純な(symbol . slot)のalist)を、lambdaの境界をまたいで
+; 自由変数を解決できる「スコープ」構造に拡張する。1つのスコープは
+;   (locals captures . enclosing)
+; の3要素からなる:
+;   locals    -- このスコープ(関数)自身のローカル変数alist。milestone43のenvと同じ形
+;   captures  -- このスコープがさらに外側から捕捉したupvalueの記録(下記compile-make-captures)
+;   enclosing -- 直接囲む関数のスコープ、トップレベル(囲むlambdaが無い)ならnil
+; トップレベルのcompile-expr呼び出しもnilではなく実体を持つスコープを渡す
+; (compile-make-top-scope)必要がある。これはcompile-resolveがenclosingの有無だけで
+; 「もうこれ以上外側を辿れない」を判定し、scopeそのものをnilにはしないという設計の
+; ため(scope-locals等をnilに対して呼ぶと(car nil)でpanicしてしまう)
+(defun compile-make-scope (locals captures enclosing)
+  (cons locals (cons captures enclosing)))
 
-(defun compile-variable-ref (form ctx env)
-  (let ((binding (compile-env-find form env)))
-    (if binding
-        (list (list *op-load-local* (cdr binding)))
+(defun scope-locals (scope) (car scope))
+(defun scope-captures (scope) (car (cdr scope)))
+(defun scope-enclosing (scope) (cdr (cdr scope)))
+
+; capturesは「このスコープがまだ捕捉していないupvalueを新規に捕捉した記述子を
+; 登録していく場所」。desc-ctxはcompile-make-ctxを再利用した(kind . index)記述子の
+; 登録簿(compile-register-const/compile-ctx-constantsで登録・確定する、通常の
+; 定数プールと全く同じ「値を渡してindexを得る」操作なので新しい仕組みを作らず流用する)。
+; lookup-boxは「symbol名→既に割り当てたupvalue index」の対応をrplacaで書き足していく
+; 単純な箱(cons)で、同じ外側変数を本体中で複数回参照しても捕捉記述子が重複登録
+; されないようにするためのキャッシュ
+(defun compile-make-captures () (cons (compile-make-ctx) (cons nil nil)))
+(defun captures-desc-ctx (captures) (car captures))
+(defun captures-lookup-box (captures) (cdr captures))
+(defun captures-lookup-alist (captures) (car (captures-lookup-box captures)))
+(defun captures-lookup-add (captures name idx)
+  (rplaca (captures-lookup-box captures)
+          (cons (cons name idx) (captures-lookup-alist captures))))
+
+(defun compile-make-top-scope () (compile-make-scope nil (compile-make-captures) nil))
+
+; symbol1つをスコープ連鎖に沿って解決する。戻り値は('local . slot)/('upvalue . idx)/nil
+; のいずれか。まず自分自身のlocalsを見て、無ければ自分がすでに捕捉済みのupvalueの
+; キャッシュを見て、どちらにも無ければ直接囲むスコープへ再帰的に問い合わせ、そこで
+; 見つかった結果を新しいupvalue捕捉としてこのスコープに記録する(compile-resolve-
+; capture-from-enclosing)。enclosingがnil(トップレベルまで辿り切った)のに見つから
+; なければnilを返し、呼び出し元(compile-variable-ref)はcompile-literalへフォール
+; バックする
+(defun compile-resolve (name scope)
+  (let ((local (compile-env-find name (scope-locals scope))))
+    (if local
+        (cons 'local (cdr local))
+        (compile-resolve-upvalue name scope))))
+
+(defun compile-resolve-upvalue (name scope)
+  (let ((cached (compile-env-find name (captures-lookup-alist (scope-captures scope)))))
+    (if cached
+        (cons 'upvalue (cdr cached))
+        (compile-resolve-capture-from-enclosing name scope))))
+
+; 直接囲むスコープでnameを解決し、その結果に応じてkindを決めて新しいupvalue捕捉を
+; 記録する。囲むスコープでの解決結果が('local . slot)ならkind=0(囲む関数のフレーム
+; スロットを直接捕捉)、('upvalue . idx)ならkind=1(囲む関数自身のupvalues[idx]を
+; そのままコピーする)。この2種類だけで何段外側の変数でも1段分の捕捉記述子の連鎖に
+; フラット化できるため、OP_LOAD_UPVALUE/OP_STORE_UPVALUEは常に自分自身のupvalues
+; ベクタだけを見ればよくなる(documents/lisp_vm.md milestone38のVM側設計と対応する)
+(defun compile-resolve-capture-from-enclosing (name scope)
+  (if (null (scope-enclosing scope))
+      nil
+      (let ((outer (compile-resolve name (scope-enclosing scope))))
+        (if (null outer)
+            nil
+            (let ((captures (scope-captures scope)))
+              (let ((kind (if (eq (car outer) 'local) 0 1)))
+                (let ((idx (compile-register-const (captures-desc-ctx captures)
+                                                    (cons kind (cdr outer)))))
+                  (captures-lookup-add captures name idx)
+                  (cons 'upvalue idx))))))))
+
+; compile-resolveの結果((kind . index)のcons)から対応するload/store命令を選ぶ
+(defun compile-load-op (resolved)
+  (if (eq (car resolved) 'local) *op-load-local* *op-load-upvalue*))
+(defun compile-store-op (resolved)
+  (if (eq (car resolved) 'local) *op-store-local* *op-store-upvalue*))
+
+(defun compile-variable-ref (form ctx scope)
+  (let ((resolved (compile-resolve form scope)))
+    (if resolved
+        (list (list (compile-load-op resolved) (cdr resolved)))
         (compile-literal form ctx))))
 
-; letはlet*と異なり、全てのinit-formを束縛前の外側env(この関数の引数env、
+; letはlet*と異なり、全てのinit-formを束縛前の外側scope(この関数の引数scope、
 ; まだ拡張していないもの)で評価する(milestone17のlisp_eval同様、束縛同士が
 ; 互いを参照できない並行束縛)。各init-formのコードの直後にOP_MAKE_LOCALを
 ; 1つ発行することで、その結果をそのままボックス化して並行に確保していく
-(defun compile-let-bindings (bindings ctx env)
+(defun compile-let-bindings (bindings ctx scope)
   (if (null bindings)
       nil
-      (compile-concat (compile-expr (car (cdr (car bindings))) ctx env)
+      (compile-concat (compile-expr (car (cdr (car bindings))) ctx scope)
                       (list (list *op-make-local*))
-                      (compile-let-bindings (cdr bindings) ctx env))))
+                      (compile-let-bindings (cdr bindings) ctx scope))))
 
-; bindingsの各変数名に、外側envの長さから始まる連番のスロット番号を割り当てた
-; 新しいenvを返す(compile-let-bindingsがOP_MAKE_LOCALを発行する順序と一致させる
-; ため、先頭の束縛から順に外側envの長さ、+1、+2...という番号を振る)
-(defun compile-let-extend-env (bindings env)
+; bindingsの各変数名に、外側scopeのlocalsの長さから始まる連番のスロット番号を
+; 割り当てた新しいscopeを返す(compile-let-bindingsがOP_MAKE_LOCALを発行する順序と
+; 一致させるため、先頭の束縛から順に外側localsの長さ、+1、+2...という番号を振る)。
+; letは関数境界をまたがないため、captures/enclosingは元のscopeのものをそのまま
+; 引き継ぎ、locals部分だけを拡張する
+(defun compile-let-extend-scope (bindings scope)
   (if (null bindings)
-      env
-      (compile-let-extend-env
+      scope
+      (compile-let-extend-scope
         (cdr bindings)
-        (cons (cons (car (car bindings)) (compile-env-length env)) env))))
+        (compile-make-scope
+          (cons (cons (car (car bindings)) (compile-env-length (scope-locals scope)))
+                (scope-locals scope))
+          (scope-captures scope)
+          (scope-enclosing scope)))))
 
-(defun compile-let (form ctx env)
+(defun compile-let (form ctx scope)
   (let ((bindings (car (cdr form)))
         (body (car (cdr (cdr form)))))
-    (compile-concat (compile-let-bindings bindings ctx env)
-                    (compile-expr body ctx (compile-let-extend-env bindings env)))))
+    (compile-concat (compile-let-bindings bindings ctx scope)
+                    (compile-expr body ctx (compile-let-extend-scope bindings scope)))))
 
 ; setqは代入した値をそのまま式の値として返す(Common Lisp/既存lisp_evalと同じ)。
-; OP_STORE_LOCALはストアと同時にスタック最上位をpopしてしまう(値を残さない)ため、
-; ストア後にOP_LOAD_LOCALで同じスロットを読み直し、「常に1つの値をスタックに
-; 残す」というcompile-exprの不変条件を既存の命令だけで満たす
-(defun compile-setq (form ctx env)
-  (let ((slot (compile-env-slot (car (cdr form)) env)))
-    (compile-concat (compile-expr (car (cdr (cdr form))) ctx env)
-                    (list (list *op-store-local* slot))
-                    (list (list *op-load-local* slot)))))
+; OP_STORE_LOCAL/OP_STORE_UPVALUEはストアと同時にスタック最上位をpopしてしまう
+; (値を残さない)ため、ストア後に対応するload命令で同じスロット/upvalue indexを
+; 読み直し、「常に1つの値をスタックに残す」というcompile-exprの不変条件を既存の
+; 命令だけで満たす。resolvedがnil(setqの対象がどのスコープにも見つからない、
+; つまり未対応のグローバル変数へのsetq)の場合はcompile-store-opの(car nil)で
+; 自然にpanicする(milestone43のcompile-env-slotと同じ「防御的チェックを追加せず
+; let it panicする」方針を維持する)
+(defun compile-setq (form ctx scope)
+  (let ((resolved (compile-resolve (car (cdr form)) scope)))
+    (compile-concat (compile-expr (car (cdr (cdr form))) ctx scope)
+                    (list (list (compile-store-op resolved) (cdr resolved)))
+                    (list (list (compile-load-op resolved) (cdr resolved))))))
 
 ; elseが省略された(if cond then)の場合は、既存のlisp_evalのif実装と同じく
 ; elseの値をnilとして扱う
-(defun compile-if-else-code (form ctx env)
+(defun compile-if-else-code (form ctx scope)
   (if (null (cdr (cdr (cdr form))))
-      (compile-expr nil ctx env)
-      (compile-expr (car (cdr (cdr (cdr form)))) ctx env)))
+      (compile-expr nil ctx scope)
+      (compile-expr (car (cdr (cdr (cdr form)))) ctx scope)))
 
 ; ifは次の形にコンパイルする:
 ;   <cond-code>
@@ -359,10 +441,10 @@
 ; else/endのラベル名はgensym(milestone20、intern済みシンボル表に登録されない
 ; ため衝突しない)で毎回新しく作るため、ifを何重に入れ子にしてもラベル名が
 ; 衝突することはない
-(defun compile-if (form ctx env)
-  (let ((cond-code (compile-expr (car (cdr form)) ctx env))
-        (then-code (compile-expr (car (cdr (cdr form))) ctx env))
-        (else-code (compile-if-else-code form ctx env))
+(defun compile-if (form ctx scope)
+  (let ((cond-code (compile-expr (car (cdr form)) ctx scope))
+        (then-code (compile-expr (car (cdr (cdr form))) ctx scope))
+        (else-code (compile-if-else-code form ctx scope))
         (else-label (gensym))
         (end-label (gensym)))
     (compile-concat cond-code
@@ -373,14 +455,54 @@
                     else-code
                     (list (list 'label end-label)))))
 
+; lambdaの各仮引数に、OP_CALLの呼び出し規約(引数はフレーム先頭からnargs個の
+; スロットにその場でボックス化される、documents/lisp_vm.md milestone37)と一致する
+; 順序でスロット0, 1, 2...を割り当てる
+(defun compile-lambda-param-locals (params idx)
+  (if (null params)
+      nil
+      (cons (cons (car params) idx)
+            (compile-lambda-param-locals (cdr params) (+ idx 1)))))
+
+; lambdaは新しい関数境界を作るため、本体は独立した定数プール(inner-ctx)と
+; 独立したスコープ(locals=仮引数、captures=まだ空、enclosing=このlambdaを
+; 直接囲むscope)でコンパイルする。本体コンパイル中にcompile-resolveが
+; enclosingを辿って外側変数を捕捉するたびcaptures-desc-ctxへ記述子が積まれて
+; いくので、本体コンパイルが終わった時点でinner-scopeのcaptures-desc-ctxを
+; 確定すればそれがそのままupvalue_descsになる。
+;
+; compile-exprはIR(ラベル付き命令リスト)を返すだけの関数なので、lambdaの
+; コンパイル結果を実際のLispClosureとして直接構築することはできない(milestone35
+; 以降のCブリッジ builtinがまだ存在しない)。そのためmilestone41のbytecode変換
+; (assemble)と同じ考え方で、「このlambdaを実体化するのに必要な情報一式」を
+; (nargs bytecode constants upvalue-descs)という素のLispリストにまとめ、それを
+; ひとつの値として外側ctxの定数プールに登録するにとどめる。この入れ子リストを
+; 実際のLispClosureテンプレートへ組み立てる処理はmilestone46の検証用ブリッジに
+; 委ねる(milestone41の「バイト列への変換はここでは行わない」という制約と同じ理由)
+(defun compile-lambda (form ctx scope)
+  (let ((params (car (cdr form)))
+        (body (car (cdr (cdr form)))))
+    (let ((inner-ctx (compile-make-ctx)))
+      (let ((inner-scope (compile-make-scope (compile-lambda-param-locals params 0)
+                                              (compile-make-captures)
+                                              scope)))
+        (let ((body-code (assemble (compile-expr body inner-ctx inner-scope))))
+          (let ((package (list (compile-env-length params)
+                                body-code
+                                (compile-ctx-constants inner-ctx)
+                                (compile-ctx-constants (captures-desc-ctx (scope-captures inner-scope))))))
+            (list (list *op-make-closure* (compile-register-const ctx package)))))))))
+
 ; atomは(既にレキシカル束縛の有無を確認する)compile-variable-refに委ねる。
-; quote/if/let/setq以外の形式(関数呼び出し・lambdaなど)はmilestone44以降で
-; 対応するため、現時点では未対応であることを明示するためにt節でnilを返す
-(defun compile-expr (form ctx env)
+; quote/if/let/setq/lambda以外の形式(関数呼び出し・プリミティブ呼び出し)は
+; milestone45以降で対応するため、現時点では未対応であることを明示するために
+; t節でnilを返す
+(defun compile-expr (form ctx scope)
   (cond
-    ((atom form) (compile-variable-ref form ctx env))
+    ((atom form) (compile-variable-ref form ctx scope))
     ((eq (car form) 'quote) (compile-quote form ctx))
-    ((eq (car form) 'if) (compile-if form ctx env))
-    ((eq (car form) 'let) (compile-let form ctx env))
-    ((eq (car form) 'setq) (compile-setq form ctx env))
+    ((eq (car form) 'if) (compile-if form ctx scope))
+    ((eq (car form) 'let) (compile-let form ctx scope))
+    ((eq (car form) 'setq) (compile-setq form ctx scope))
+    ((eq (car form) 'lambda) (compile-lambda form ctx scope))
     (t nil)))
