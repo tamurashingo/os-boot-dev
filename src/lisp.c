@@ -1952,6 +1952,28 @@ LispObject lisp_apply(LispObject fn, LispObject args) {
     return lisp_eval(closure->body, call_env);
 }
 
+// symがglobal_envにマクロクロージャとして束縛されていればそれを返し、無ければpanicせず
+// LISP_NILを返す（design docの確定方針「マクロは恒久的にグローバルのまま」により、
+// マクロ判定はglobal_envだけを見れば十分）。lisp_env_lookupと違い見つからなくてもpanicしない
+// のは、macroexpand-1/macroexpand-all(milestone 40, lisp/stdlib.lisp)がS式を静的に
+// 全走査する際、関数呼び出し位置のsymbolが再帰関数呼び出し等のローカル変数（global_envには
+// 存在しない）であるケースを日常的に踏むため。lisp_evalの完全なevalで代用すると、
+// そのようなローカル変数はunbound variableとしてpanicしてしまう（milestone 50で発見）
+static LispObject lisp_lookup_global_macro_candidate(LispObject sym) {
+    if (lisp_symbol_cell(sym)->is_special) {
+        return lisp_symbol_cell(sym)->value;
+    }
+    LispObject cur = global_env;
+    while (lisp_is_cons(cur)) {
+        LispObject pair = lisp_car(cur);
+        if (lisp_car(pair) == sym) {
+            return lisp_cdr(pair);
+        }
+        cur = lisp_cdr(cur);
+    }
+    return LISP_NIL;
+}
+
 // (macroexpand-1 form): マクロ呼び出しの外側の呼び出し1回分だけを展開する (milestone 21)。
 // これまでlisp_evalのマクロ呼び出し分岐に直接埋め込まれていた「呼び出し式を評価してマクロ
 // クロージャか確認し、本体を評価して展開結果を得る」処理を独立した関数として切り出したもので、
@@ -1967,13 +1989,13 @@ LispObject lisp_macroexpand_1(LispObject expr, LispObject env) {
     }
 
     LispObject op = lisp_car(expr);
-    LispObject fn = lisp_eval(op, env);
-    if (lisp_return_tag != LISP_NIL) {
-        return fn; // milestone 19: 呼び出し式自体の評価中に脱出した
+    if (!lisp_is_symbol(op)) {
+        return expr; // 演算子位置が裸のsymbolでなければ(直接書かれたlambda式等)マクロ呼び出しではない
     }
 
+    LispObject fn = lisp_lookup_global_macro_candidate(op);
     if (!lisp_is_closure(fn) || !lisp_closure_cell(fn)->is_macro) {
-        return expr; // マクロ呼び出しではない
+        return expr; // マクロ呼び出しではない（未束縛のローカル変数でもここでpanicしない）
     }
 
     LispObject hook = lisp_symbol_cell(lisp_sym_macroexpand_hook)->value;

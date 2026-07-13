@@ -622,9 +622,11 @@
 ; vm-execで実行した結果を返す。目標1(milestone34-39)で手動バイトコードとして検証した
 ; ケース群を、compile-expr経由の同じS式から生成したバイトコードで再現するための
 ; 検証専用の橋渡し。compile-lambdaの本体コンパイルと同様、compile-expr自体は
-; OP_RETURNを発行しないため、末尾に明示的に1つ追加する
+; OP_RETURNを発行しないため、末尾に明示的に1つ追加する。
+; compile-exprはマクロを一切知らないため、渡す前にmacroexpand-allでマクロを全て
+; 展開しておく必要がある(milestone 50: これが抜けていた配線漏れの修正)
 (defun compile-and-run (expr)
   (let ((ctx (compile-make-ctx)))
-    (let ((bytecode (assemble (compile-concat (compile-expr expr ctx (compile-make-top-scope))
+    (let ((bytecode (assemble (compile-concat (compile-expr (macroexpand-all expr) ctx (compile-make-top-scope))
                                                (list (list *op-return*))))))
       (vm-exec (vm-make-closure 0 bytecode (vm-materialize-constants (compile-ctx-constants ctx)) nil)))))

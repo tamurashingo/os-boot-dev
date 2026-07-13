@@ -68,6 +68,15 @@
            (cons (c1) (cons (c1) (cons (c1) nil))))))
     (list 1 2 3)))
 
+; milestone 50: compile-and-runがmacroexpand-allを経由していなかった配線漏れの回帰テスト。
+; doubleはcompile-exprが知らないマクロ呼び出しなので、macroexpand-allで(+ 21 21)へ
+; 展開されてから渡らなければコンパイルできない(展開前のまま渡ると、doubleという
+; 未解決のグローバル関数参照をOP_CALLしようとしてVM側でpanicする)
+(defmacro double (x) (list '+ x x))
+
+(defun run-test-compile-and-run-macro-expansion ()
+  (eq (compile-and-run '(double 21)) 42))
+
 (defun run-test-compile-and-run ()
   (and (run-test-compile-and-run-arithmetic)
        (run-test-compile-and-run-if-then)
@@ -76,4 +85,5 @@
        (run-test-compile-and-run-setq)
        (run-test-compile-and-run-primitives)
        (run-test-compile-and-run-recursive-call)
-       (run-test-compile-and-run-closure-captures-state)))
+       (run-test-compile-and-run-closure-captures-state)
+       (run-test-compile-and-run-macro-expansion)))
