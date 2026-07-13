@@ -77,6 +77,31 @@
 (defun run-test-compile-and-run-macro-expansion ()
   (eq (compile-and-run '(double 21)) 42))
 
+; milestone 51: OP_GLOBAL_REF/OP_GLOBAL_SETの回帰テスト。*compile51-global-var*は
+; defvarで束縛した動的変数で、レキシカルスコープに一切現れないままcompile-and-run
+; 経由で読む/書く(is_specialな変数もlisp_env_lookup/lisp_env_setの対象なので、
+; OP_GLOBAL_REF/OP_GLOBAL_SETからも同じように解決できることを確認する)
+(defvar *compile51-global-var* 41)
+
+(defun run-test-compile-and-run-global-ref ()
+  (eq (compile-and-run '*compile51-global-var*) 41))
+
+(defun run-test-compile-and-run-global-setq ()
+  (and (eq (compile-and-run '(setq *compile51-global-var* (+ *compile51-global-var* 1))) 42)
+       (eq *compile51-global-var* 42)))
+
+; *compile51-global-fn*はOP_CALLがコンパイル済みクロージャしか呼べない(milestone52の
+; OP_CALL汎用ディスパッチ化より前)という制約の下でグローバル関数呼び出しを確認するため、
+; あらかじめvm-make-closureでコンパイル済みクロージャを作って束縛しておく((lambda (x) (+ x 1))相当)
+(defvar *compile51-global-fn*
+  (vm-make-closure 1
+                    (list *op-load-local* 0 *op-const* 0 *op-add* *op-return*)
+                    (list 1)
+                    nil))
+
+(defun run-test-compile-and-run-global-call ()
+  (eq (compile-and-run '(*compile51-global-fn* 10)) 11))
+
 (defun run-test-compile-and-run ()
   (and (run-test-compile-and-run-arithmetic)
        (run-test-compile-and-run-if-then)
@@ -86,4 +111,8 @@
        (run-test-compile-and-run-primitives)
        (run-test-compile-and-run-recursive-call)
        (run-test-compile-and-run-closure-captures-state)
-       (run-test-compile-and-run-macro-expansion)))
+       (run-test-compile-and-run-macro-expansion)
+       (run-test-compile-and-run-global-ref)
+       (run-test-compile-and-run-global-setq)
+       (run-test-compile-and-run-global-call)))
+

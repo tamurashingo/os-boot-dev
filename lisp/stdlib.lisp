@@ -169,6 +169,8 @@
 (defvar *op-car*           13)
 (defvar *op-cdr*           14)
 (defvar *op-eq*            15)
+(defvar *op-global-ref*    16)
+(defvar *op-global-set*    17)
 
 (defun asm-label-p (instr) (eq (car instr) 'label))
 
@@ -252,11 +254,18 @@
 ; formがatomの場合の既定の扱い: そのまま評価結果になる自己評価的な値として、
 ; OP_CONSTで定数プールから読み出すコードにコンパイルする。milestone43以降、
 ; symbolはまずcompile-variable-refでレキシカル束縛の有無を確認してから
-; ここへフォールバックするため、ここに来るのは「レキシカルに束縛されていない
-; symbol(グローバル/動的変数の参照は本ロードマップのスコープ外)」と
-; 数値・nil・t・文字列などの本来のリテラルのみになる
+; ここへフォールバックするため、ここに来るのは数値・nil・文字列などの本来の
+; リテラルと、tおよびkeyword(いずれも自己評価するのでOP_GLOBAL_REFの対象には
+; しない、milestone51)のみになる
 (defun compile-literal (form ctx)
   (list (list *op-const* (compile-register-const ctx form))))
+
+; レキシカルスコープ外のsymbol(グローバル変数・グローバル関数)を実行時に
+; global_envへ問い合わせるコードにコンパイルする(milestone51)。symbol自身を
+; 定数プールへ登録し、OP_GLOBAL_REFにそのindexを持たせる(compile-literalが
+; 値そのものを登録するのと同じ仕組みを、symbolの登録に使い回している)
+(defun compile-global-ref (form ctx)
+  (list (list *op-global-ref* (compile-register-const ctx form))))
 
 ; quoteの内側はそもそも評価されないデータなので、car(cdr form)（quoteされた
 ; S式そのもの）をそのまま定数として登録する(macroexpand-allがquoteの内側を
@@ -279,10 +288,10 @@
       0
       (+ 1 (compile-env-length (cdr env)))))
 
-; 見つからなければnilを返す安全な検索。レキシカルに束縛されていないsymbolは
-; compile-literalへフォールバックしてそのまま自己評価的な定数として扱う
-; (milestone42で残していた既知の制約はレキシカル変数についてはここで解消される。
-; グローバル/動的変数への正規の対応は依然スコープ外)
+; 見つからなければnilを返す安全な検索。レキシカルに束縛されていないsymbolの扱いは
+; 呼び出し元(compile-variable-ref)に委ねる(milestone51以降、グローバル参照
+; (OP_GLOBAL_REF)としてコンパイルされる。compile-literalへのフォールバックはtと
+; keywordなど本来のリテラルにのみ残る)
 (defun compile-env-find (name env)
   (if (null env)
       nil
@@ -370,11 +379,17 @@
 (defun compile-store-op (resolved)
   (if (eq (car resolved) 'local) *op-store-local* *op-store-upvalue*))
 
+; レキシカルに見つからないsymbol(tとkeywordを除く。両方とも自己評価するため
+; compile-literalへ回す)はグローバル参照とみなし、compile-global-refで実行時に
+; global_envを解決するコードにコンパイルする(milestone51で、レキシカルスコープ外の
+; symbolを裸の定数としてpushしていた誤ったフォールバックを廃止した)
 (defun compile-variable-ref (form ctx scope)
   (let ((resolved (compile-resolve form scope)))
-    (if resolved
-        (list (list (compile-load-op resolved) (cdr resolved)))
-        (compile-literal form ctx))))
+    (cond
+      (resolved (list (list (compile-load-op resolved) (cdr resolved))))
+      ((and (symbolp form) (not (eq form t)) (not (keywordp form)))
+       (compile-global-ref form ctx))
+      (t (compile-literal form ctx)))))
 
 ; letはlet*と異なり、全てのinit-formを束縛前の外側scope(この関数の引数scope、
 ; まだ拡張していないもの)で評価する(milestone17のlisp_eval同様、束縛同士が
@@ -414,14 +429,21 @@
 ; (値を残さない)ため、ストア後に対応するload命令で同じスロット/upvalue indexを
 ; 読み直し、「常に1つの値をスタックに残す」というcompile-exprの不変条件を既存の
 ; 命令だけで満たす。resolvedがnil(setqの対象がどのスコープにも見つからない、
-; つまり未対応のグローバル変数へのsetq)の場合はcompile-store-opの(car nil)で
-; 自然にpanicする(milestone43のcompile-env-slotと同じ「防御的チェックを追加せず
-; let it panicする」方針を維持する)
+; つまりグローバル変数へのsetq)の場合はOP_GLOBAL_SET/OP_GLOBAL_REFの組で同じ
+; 「store後にreload」の形にコンパイルする(milestone51。対象のsymbol自身を定数
+; プールへ登録し、OP_GLOBAL_REFと共有するため一度だけ登録する)
 (defun compile-setq (form ctx scope)
-  (let ((resolved (compile-resolve (car (cdr form)) scope)))
-    (compile-concat (compile-expr (car (cdr (cdr form))) ctx scope)
-                    (list (list (compile-store-op resolved) (cdr resolved)))
-                    (list (list (compile-load-op resolved) (cdr resolved))))))
+  (let ((target (car (cdr form)))
+        (value-code (compile-expr (car (cdr (cdr form))) ctx scope)))
+    (let ((resolved (compile-resolve target scope)))
+      (if resolved
+          (compile-concat value-code
+                          (list (list (compile-store-op resolved) (cdr resolved)))
+                          (list (list (compile-load-op resolved) (cdr resolved))))
+          (let ((idx (compile-register-const ctx target)))
+            (compile-concat value-code
+                            (list (list *op-global-set* idx))
+                            (list (list *op-global-ref* idx))))))))
 
 ; elseが省略された(if cond then)の場合は、既存のlisp_evalのif実装と同じく
 ; elseの値をnilとして扱う

@@ -158,6 +158,18 @@ void lisp_vm_reset_stack(void);
 #define OP_CDR  14    // スタック最上位をpopし、cdr()をpushする
 #define OP_EQ   15    // スタック最上位2要素をpopし、ポインタ同値ならt、そうでなければnilをpushする
 
+// --- グローバル参照オペコード (milestone 51) ---
+// レキシカルスコープ外のシンボル（グローバル変数・グローバル関数）を実行時にglobal_envへ
+// 問い合わせる。コンパイル時に静的な位置へは解決しない（defun同士の前方参照・相互再帰を
+// 破壊しないため、既存のlisp_env_lookup/lisp_env_setと同じ「毎回global_envを捜査する」
+// 方式をそのまま踏襲する）
+#define OP_GLOBAL_REF 16   // 次の1byteをconstants配列のindexとして解釈し、そこにあるsymbolを
+                            // lisp_env_lookup(global_env, symbol)へ渡した結果をpushする
+                            // （束縛が無ければlisp_env_lookupと同じくunbound variableでpanicする）
+#define OP_GLOBAL_SET 17   // スタック最上位をpopし、次の1byteが指すconstants配列のsymbolへ
+                            // lisp_env_set(global_env, symbol, value)相当で書き込む
+                            // （OP_STORE_LOCAL/OP_STORE_UPVALUEと同様、値はpushし直さない）
+
 // bytecode(bytecode_len byte)とconstants(constants_len個のLispObject)を保持するVM
 // コンパイル済み関数オブジェクトを作る（LispClosureのescape hatch方式、milestone15/22/26と
 // 同じ前例）。どちらも呼び出し元のバッファをヒープへコピーするので、呼び出し後は

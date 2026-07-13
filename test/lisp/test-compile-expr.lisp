@@ -110,20 +110,21 @@
            (struct-eq (compile-ctx-constants ctx) (list 1 2))))))
 
 (defun run-test-compile-expr-let-unbound-symbol-falls-back ()
-  ; (let ((x 1)) y) -> yはどの束縛にも無いレキシカル変数名なので、
-  ; milestone42と同じ自己評価的な定数としてフォールバックする(既知の制約)
+  ; (let ((x 1)) y) -> yはどの束縛にも無いレキシカル変数名なので、milestone51以降は
+  ; グローバル参照(OP_GLOBAL_REF)としてコンパイルされる(milestone42〜50時点では
+  ; 自己評価的な定数へフォールバックしていたが、それは誤りだったため置き換えた)
   (let ((ctx (compile-make-ctx)))
     (let ((bytes (assemble (compile-expr '(let ((x 1)) y) ctx (compile-make-top-scope)))))
-      (and (struct-eq bytes (list 0 0 7 0 1))
+      (and (struct-eq bytes (list 0 0 7 16 1))
            (struct-eq (compile-ctx-constants ctx) (list 1 'y))))))
 
 (defun run-test-compile-expr-let-parallel-bindings-dont-see-each-other ()
   ; (let ((x 1) (y x)) y) -> letはlet*と異なり全init-formを束縛前の外側scopeで
-  ; コンパイルするため、yの初期値であるxはまだ見えておらず、
-  ; ローカル変数参照ではなく自己評価的な定数xとして扱われる
+  ; コンパイルするため、yの初期値であるxはまだ見えておらず、ローカル変数参照ではなく
+  ; グローバル参照(OP_GLOBAL_REF)としてコンパイルされる(milestone51)
   (let ((ctx (compile-make-ctx)))
     (let ((bytes (assemble (compile-expr '(let ((x 1) (y x)) y) ctx (compile-make-top-scope)))))
-      (and (struct-eq bytes (list 0 0 7 0 1 7 5 1))
+      (and (struct-eq bytes (list 0 0 7 16 1 7 5 1))
            (struct-eq (compile-ctx-constants ctx) (list 1 'x))))))
 
 (defun run-test-compile-expr-let-with-if ()

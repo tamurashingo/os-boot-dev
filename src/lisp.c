@@ -1436,6 +1436,10 @@ static int lisp_reader_at_end(void) {
 // マイルストーン9のlisp_env_bind_paramsのままで変更しない）
 LispObject global_env = LISP_NIL;
 
+// lisp_vm_run(milestone 51のOP_GLOBAL_REF/OP_GLOBAL_SET)が定義順として先に来るため前方宣言する
+LispObject lisp_env_lookup(LispObject env, LispObject sym);
+void lisp_env_set(LispObject env, LispObject sym, LispObject value);
+
 // 非局所脱出の進行中シグナル (milestone 19)。setjmp/longjmpが使えないため、
 // return-fromが「対象タグ＋値」をここにセットしてから通常のLispObjectとして
 // 呼び出し元へ返り、以降のすべての評価経路（lisp_eval_progn/lisp_eval_list/
@@ -1647,6 +1651,21 @@ static LispObject lisp_vm_run(LispClosure *cl, UINTN fp) {
                 LispObject b = lisp_vm_pop();
                 LispObject a = lisp_vm_pop();
                 lisp_vm_push((a == b) ? lisp_sym_t : LISP_NIL);
+                break;
+            }
+            case OP_GLOBAL_REF: {
+                unsigned char idx = *pc;
+                pc++;
+                LispObject sym = cl->constants[idx];
+                lisp_vm_push(lisp_env_lookup(global_env, sym));
+                break;
+            }
+            case OP_GLOBAL_SET: {
+                unsigned char idx = *pc;
+                pc++;
+                LispObject sym = cl->constants[idx];
+                LispObject value = lisp_vm_pop();
+                lisp_env_set(global_env, sym, value);
                 break;
             }
             case OP_RETURN: {
@@ -2424,6 +2443,26 @@ LispObject lisp_builtin_atom(LispObject args) {
     return lisp_is_cons(lisp_car(args)) ? LISP_NIL : lisp_sym_t;
 }
 
+// (symbolp obj): objがsymbol(t/keywordを含む。nilはlisp_is_symbolがfalseを返すため対象外)
+// ならt、そうでなければnilを返す。milestone51で、compile-variable-refが未解決のatomを
+// 「レキシカル外のsymbol(OP_GLOBAL_REFの対象)」と「本来のリテラル(数値・文字列等)」の
+// どちらとして扱うか判定するために必要になった
+LispObject lisp_builtin_symbolp(LispObject args) {
+    return lisp_is_symbol(lisp_car(args)) ? lisp_sym_t : LISP_NIL;
+}
+
+// (keywordp obj): objがkeywordパッケージに属するsymbolならt、そうでなければnilを返す。
+// milestone51で、tと同様に自己評価するkeyword symbolをcompile-variable-refがOP_GLOBAL_REFの
+// 対象(global_envに束縛が無く必ずpanicする)へ誤って回さないために必要になった
+LispObject lisp_builtin_keywordp(LispObject args) {
+    LispObject obj = lisp_car(args);
+    if (!lisp_is_symbol(obj)) {
+        return LISP_NIL;
+    }
+    LispSymbol *cell = lisp_symbol_cell(obj);
+    return (cell->package != 0 && cell->package->is_keyword_package) ? lisp_sym_t : LISP_NIL;
+}
+
 // (rplaca cons-cell new-car): cons-cellのcarをnew-carへ破壊的に書き換え、cons-cell自身を
 // 返す（milestone 27。CommonLispのrplacaと同じ「書き換えたコンスセル自身を返す」仕様で、
 // svsetがvalueを返すのとは異なる）。既存のlisp_set_carがlisp_assert_consを内包しているため
@@ -2981,6 +3020,8 @@ LispObject lisp_builtins_init(void) {
     env = lisp_env_extend(env, lisp_intern("cons"), lisp_make_builtin(lisp_builtin_cons));
     env = lisp_env_extend(env, lisp_intern("eq"), lisp_make_builtin(lisp_builtin_eq));
     env = lisp_env_extend(env, lisp_intern("atom"), lisp_make_builtin(lisp_builtin_atom));
+    env = lisp_env_extend(env, lisp_intern("symbolp"), lisp_make_builtin(lisp_builtin_symbolp));
+    env = lisp_env_extend(env, lisp_intern("keywordp"), lisp_make_builtin(lisp_builtin_keywordp));
     env = lisp_env_extend(env, lisp_intern("rplaca"), lisp_make_builtin(lisp_builtin_rplaca));
     env = lisp_env_extend(env, lisp_intern("rplacd"), lisp_make_builtin(lisp_builtin_rplacd));
     env = lisp_env_extend(env, lisp_intern("hash-code"), lisp_make_builtin(lisp_builtin_hash_code));
