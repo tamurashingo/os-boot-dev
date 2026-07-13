@@ -225,6 +225,40 @@
        (run-test-compile-and-run-block-nested-outer-tag)
        (run-test-compile-and-run-block-escapes-recursion)))
 
+; milestone 56: compile-expr: quasiquote対応の回帰テスト。既存インタプリタの
+; lisp_qq_expand(src/lisp.c)と同じ入出力になることをcompile-and-run経由で確認する。
+; unquote内でレキシカル変数を参照するケースも含め、compile-qq-desugarが組み立てる
+; cons/append呼び出しが正しいスコープ(外側のlet等)でコンパイルされることを検証する
+(defun run-test-compile-and-run-quasiquote-literal ()
+  ; unquoteが無ければ単なるリテラルデータと同じ(quoteと同じ結果)
+  (struct-eq (compile-and-run '`(1 2 3)) (list 1 2 3)))
+
+(defun run-test-compile-and-run-quasiquote-unquote ()
+  ; unquoteされた式は通常のcompile-exprと同じくその場で評価される
+  (struct-eq (compile-and-run '`(1 ,(+ 1 1) 3)) (list 1 2 3)))
+
+(defun run-test-compile-and-run-quasiquote-lexical-scope ()
+  ; unquote内の式が外側のletのレキシカル変数を参照できることを確認する
+  ; (compile-qq-desugarが組み立てた式がcompile-exprへ渡る際、外側のscopeを
+  ; 引き続き見えるまま再帰していることの検証)
+  (struct-eq (compile-and-run '(let ((x 5)) `(a ,x b))) (list 'a 5 'b)))
+
+(defun run-test-compile-and-run-quasiquote-splicing ()
+  ; unquote-splicingは評価結果のリストを周囲へ継ぎ足す(compile-qq-desugarの
+  ; appendへの脱糖、milestone52のOP_CALL→lisp_apply委譲経由でappendを呼ぶ)
+  (struct-eq (compile-and-run '`(1 ,@(list 2 3) 4)) (list 1 2 3 4)))
+
+(defun run-test-compile-and-run-quasiquote-nested-literal ()
+  ; ネストしたリスト構造の中の非unquote部分がそのまま保たれることを確認する
+  (struct-eq (compile-and-run '`(a (b c) ,(+ 1 2))) (list 'a (list 'b 'c) 3)))
+
+(defun run-test-compile-and-run-quasiquote ()
+  (and (run-test-compile-and-run-quasiquote-literal)
+       (run-test-compile-and-run-quasiquote-unquote)
+       (run-test-compile-and-run-quasiquote-lexical-scope)
+       (run-test-compile-and-run-quasiquote-splicing)
+       (run-test-compile-and-run-quasiquote-nested-literal)))
+
 (defun run-test-compile-and-run ()
   (and (run-test-compile-and-run-arithmetic)
        (run-test-compile-and-run-if-then)
@@ -249,5 +283,6 @@
        (run-test-compile-and-run-or)
        (run-test-compile-and-run-when)
        (run-test-compile-and-run-unless)
-       (run-test-compile-and-run-block-return)))
+       (run-test-compile-and-run-block-return)
+       (run-test-compile-and-run-quasiquote)))
 

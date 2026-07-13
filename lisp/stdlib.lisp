@@ -703,6 +703,41 @@
     (compile-concat (compile-expr (if (null value-forms) nil (car value-forms)) ctx scope)
                     (list (list *op-return-from* (compile-register-const ctx tag))))))
 
+; --- compile-expr: quasiquote対応 (milestone 56, documents/lisp_vm_integration.md) ---
+; 既存インタプリタのlisp_qq_expand(src/lisp.c、milestone9台)と全く同じ再帰構造を、
+; 「実行時にconsを積むS式を組み立ててcompile-exprへ再度渡す」という脱糖として
+; コンパイル時に行う(milestone54のprogn等と同じ「新しいS式を組み立てて再帰する」
+; 技法)。lisp_qq_expandはformを直接env上でwalkして即座に値を作るが、compile-exprは
+; コード生成しかできないため、対応するcons/append呼び出しのS式を組み立てておき、
+; 実際の値の構築は生成されたコードの実行時に行わせる。
+; - formがコンスでなければ(quote form)として自己クオートするデータのまま残す
+;   (symbol等をcompile-variable-refに渡すと変数参照として誤解釈されてしまうため)
+; - formが(unquote x)そのものならxをそのまま返し、通常の式として(呼び出し元の
+;   compile-exprで)評価させる(lisp_qq_expandがlisp_eval(x, env)する箇所に対応)
+; - リスト先頭要素が(unquote-splicing x)なら(append x <残りを再帰>)を組み立てる
+;   (lisp_qq_expandのlisp_append(spliced, rest)に対応。appendはlisp/stdlib.lisp
+;   本体で定義済みの通常のインタプリタクロージャで、OP_CALLのlisp_apply委譲
+;   (milestone52)経由で呼ばれる)
+; - それ以外のコンスは(cons <carを再帰> <cdrを再帰>)を組み立てる
+; ネストしたquasiquote自体は特別扱いしない点もlisp_qq_expandの既存の単純化を
+; そのまま継承する(内側のquasiquoteのunquote/unquote-splicingが外側と同じ深さで
+; 展開される)。また、macroexpand-allはquasiquoteの内側を展開しない(既存の
+; macroexpand-all-forms、opがquasiquoteならformをそのまま返す)ため、unquote内で
+; マクロを呼んでいる場合はツリーウォークと異なりコンパイル時に展開されない
+; (ツリーウォークはlisp_evalが呼び出し式ごとに毎回マクロ判定するため展開されるが、
+; VMにその仕組みは無い)。この非対称性は既存のmacroexpand-allの制約であり、
+; 本milestoneではunquote内でマクロを呼ばない前提で扱う
+(defun compile-qq-desugar (form)
+  (cond
+    ((atom form) (list 'quote form))
+    ((eq (car form) 'unquote) (car (cdr form)))
+    ((and (not (atom (car form))) (eq (car (car form)) 'unquote-splicing))
+     (list 'append (car (cdr (car form))) (compile-qq-desugar (cdr form))))
+    (t (list 'cons (compile-qq-desugar (car form)) (compile-qq-desugar (cdr form))))))
+
+(defun compile-quasiquote (form ctx scope)
+  (compile-expr (compile-qq-desugar (car (cdr form))) ctx scope))
+
 ; atomは(既にレキシカル束縛の有無を確認する)compile-variable-refに委ねる。
 ; cons/car/cdr/eq/+はインライン化された専用命令へ、それ以外の形式(carがsymbol
 ; でもlambda式でも構わない)はすべて汎用の関数呼び出しcompile-callへコンパイル
@@ -712,6 +747,7 @@
   (cond
     ((atom form) (compile-variable-ref form ctx scope))
     ((eq (car form) 'quote) (compile-quote form ctx))
+    ((eq (car form) 'quasiquote) (compile-quasiquote form ctx scope))
     ((eq (car form) 'if) (compile-if form ctx scope))
     ((eq (car form) 'let) (compile-let form ctx scope))
     ((eq (car form) 'let*) (compile-let-star form ctx scope))
