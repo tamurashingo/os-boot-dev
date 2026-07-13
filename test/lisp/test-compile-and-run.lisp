@@ -134,6 +134,44 @@
                              nil)))
     (struct-eq (mapcar f (list 1 2 3)) (list 2 3 4))))
 
+; milestone 54: compile-expr: progn/let*/cond/and/or/when/unless対応の回帰テスト。
+; test-special-forms.lisp(milestone17、lisp_evalのインタプリタ側の同じ7フォームの
+; テスト)と同じ入出力の組をcompile-and-run経由で再現し、既存のif/let脱糖への
+; 書き換えが元のlisp_evalの挙動と一致することを確認する
+(defun run-test-compile-and-run-progn ()
+  (and (eq (compile-and-run '(progn 1 2 3)) 3)
+       (eq (compile-and-run '(progn)) nil)))
+
+(defun run-test-compile-and-run-let-star ()
+  (eq (compile-and-run '(let ((x 1)) (let* ((x 2) (y (+ x 1))) y))) 3))
+
+(defun run-test-compile-and-run-cond ()
+  (and (eq (compile-and-run '(cond ((eq 1 2) 100) ((eq 1 1) 200) (t 300))) 200)
+       (eq (compile-and-run '(cond ((eq 1 2) 100))) nil)
+       (eq (compile-and-run '(cond (5))) 5)))
+
+(defun run-test-compile-and-run-and ()
+  (and (eq (compile-and-run '(and 1 2 3)) 3)
+       (eq (compile-and-run '(and 1 nil 3)) nil)
+       (eq (compile-and-run '(and)) t)
+       ; 短絡評価: nilに到達した時点で(car 5)は評価されずpanicしない
+       (eq (compile-and-run '(and nil (car 5))) nil)))
+
+(defun run-test-compile-and-run-or ()
+  (and (eq (compile-and-run '(or nil nil 5)) 5)
+       (eq (compile-and-run '(or nil nil)) nil)
+       (eq (compile-and-run '(or)) nil)
+       ; 短絡評価: 1が返った時点で(car 5)は評価されずpanicしない
+       (eq (compile-and-run '(or 1 (car 5))) 1)))
+
+(defun run-test-compile-and-run-when ()
+  (and (eq (compile-and-run '(when (eq 1 1) 10 20)) 20)
+       (eq (compile-and-run '(when (eq 1 2) 10)) nil)))
+
+(defun run-test-compile-and-run-unless ()
+  (and (eq (compile-and-run '(unless (eq 1 2) 10 20)) 20)
+       (eq (compile-and-run '(unless (eq 1 1) 10)) nil)))
+
 (defun run-test-compile-and-run ()
   (and (run-test-compile-and-run-arithmetic)
        (run-test-compile-and-run-if-then)
@@ -150,5 +188,12 @@
        (run-test-compile-and-run-call-c-builtin)
        (run-test-compile-and-run-call-interpreter-function)
        (run-test-lisp-apply-compiled-closure-direct)
-       (run-test-lisp-apply-compiled-closure-via-mapcar)))
+       (run-test-lisp-apply-compiled-closure-via-mapcar)
+       (run-test-compile-and-run-progn)
+       (run-test-compile-and-run-let-star)
+       (run-test-compile-and-run-cond)
+       (run-test-compile-and-run-and)
+       (run-test-compile-and-run-or)
+       (run-test-compile-and-run-when)
+       (run-test-compile-and-run-unless)))
 

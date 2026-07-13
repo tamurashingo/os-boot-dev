@@ -583,6 +583,103 @@
                   (compile-expr (car (cdr (cdr form))) ctx scope)
                   (list (list *op-add*))))
 
+; --- compile-expr: progn/let*/cond/and/or/when/unless (milestone 54, documents/lisp_vm_integration.md) ---
+; この7種はいずれもVMに新しい命令を追加せず、既存のif/let(とジャンプ命令)の組み合わせに
+; 脱糖(desugar)する。具体的には「新しいS式を組み立てて、それをcompile-exprへ再度渡す」
+; という形で実装する(生のIRを自分で組み立てない)。この方法を選んだ理由は、let束縛や
+; ifの分岐にまつわるスコープ拡張・ラベル発行・ジャンプ先解決を、既に検証済みのcompile-let/
+; compile-ifにそのまま委譲できるため(自分で新しいIRパターンを作ると、ローカル変数用の
+; ボックス(OP_MAKE_LOCAL)がスタック上に永続的に残るという既存のlet/ifの前提を、
+; 自分で正しく再現し直す必要が生じてしまう)。ここで組み立てるif/let/progn/cond/and/or
+; はいずれもmacroexpand-allの対象外の特殊形式(macroexpand-all-special-form-p)であり、
+; compile-exprに渡す前に呼び出し元(compile-and-run等)が既にmacroexpand-allを1回
+; 通しているため、ここで組み立てるサブフォーム自体を再度macroexpand-allする必要はない
+; (もともとのformの一部を再利用しているだけで、新しいマクロ呼び出しを持ち込んでは
+; いないため)
+
+; (progn) => nil、(progn e) => e、(progn e1 e2...) => (let ((_ e1)) (progn e2...))
+; の3ケースに帰着させる。gensymで作る束縛名は本体から絶対に参照されない
+; (OP_MAKE_LOCALでボックス化されるだけの「使い捨て」の副作用発生用スロットで、
+; milestone37の再帰呼び出しテストで既に使われている「使わない束縛」と同じ技法)
+(defun compile-progn-body (forms ctx scope)
+  (cond
+    ((null forms) (compile-expr nil ctx scope))
+    ((null (cdr forms)) (compile-expr (car forms) ctx scope))
+    (t (compile-expr (list 'let (list (list (gensym) (car forms)))
+                           (cons 'progn (cdr forms)))
+                      ctx scope))))
+
+(defun compile-progn (form ctx scope) (compile-progn-body (cdr form) ctx scope))
+
+; (let* () . body) => (progn . body)、(let* ((v1 i1) rest...) . body) =>
+; (let ((v1 i1)) (let* (rest...) . body)) という入れ子のletへ1束縛ずつ帰着させる。
+; 各再帰段でbindingsが1つ減るごとにletを1つ被せるので、v2の初期化式はv1が既に
+; 束縛された内側のletの中でコンパイルされ、let*の逐次束縛(milestone17のlisp_eval
+; と同じ、後の束縛が前の束縛を参照できる)が自然に再現される
+(defun compile-let-star-bindings (bindings body ctx scope)
+  (if (null bindings)
+      (compile-expr (cons 'progn body) ctx scope)
+      (compile-expr (list 'let (list (car bindings))
+                          (cons 'let* (cons (cdr bindings) body)))
+                    ctx scope)))
+
+(defun compile-let-star (form ctx scope)
+  (compile-let-star-bindings (car (cdr form)) (cdr (cdr form)) ctx scope))
+
+; (and) => t、(and e) => e、(and e1 e2...) => (if e1 (and e2...) nil)。
+; 短絡評価はifのジャンプそのものであり、新しい仕組みは何も要らない
+(defun compile-and-forms (forms ctx scope)
+  (cond
+    ((null forms) (compile-expr t ctx scope))
+    ((null (cdr forms)) (compile-expr (car forms) ctx scope))
+    (t (compile-expr (list 'if (car forms) (cons 'and (cdr forms)) nil) ctx scope))))
+
+(defun compile-and (form ctx scope) (compile-and-forms (cdr form) ctx scope))
+
+; (or) => nil、(or e) => e、(or e1 e2...) => (let ((g e1)) (if g g (or e2...)))。
+; orはandと違い分岐の結果として「テストした値そのもの」を返す必要があるため、
+; テスト結果を1回だけletで束縛してから、その束縛済みの値をifの条件とthen節の
+; 両方で参照する(テスト式を2回評価しないため)
+(defun compile-or-forms (forms ctx scope)
+  (cond
+    ((null forms) (compile-expr nil ctx scope))
+    ((null (cdr forms)) (compile-expr (car forms) ctx scope))
+    (t (let ((g (gensym)))
+         (compile-expr (list 'let (list (list g (car forms)))
+                             (list 'if g g (cons 'or (cdr forms))))
+                       ctx scope)))))
+
+(defun compile-or (form ctx scope) (compile-or-forms (cdr form) ctx scope))
+
+; condの各クローズは(test . body)。bodyがあれば(if test (progn . body) (cond . rest))、
+; bodyが省略された「テストの値そのものを返す」CLの慣用句(test-onlyクローズ、
+; test/lisp/test-special-forms.lispの(cond (5))が5を返すケースが既存の回帰テスト)は
+; orの1ステップと全く同じ構造なので、同じletで束縛してから使い回す形にする
+(defun compile-cond-clause (clause rest ctx scope)
+  (let ((test (car clause))
+        (body (cdr clause)))
+    (if (null body)
+        (let ((g (gensym)))
+          (compile-expr (list 'let (list (list g test))
+                              (list 'if g g (cons 'cond rest)))
+                        ctx scope))
+        (compile-expr (list 'if test (cons 'progn body) (cons 'cond rest)) ctx scope))))
+
+(defun compile-cond-clauses (clauses ctx scope)
+  (if (null clauses)
+      (compile-expr nil ctx scope)
+      (compile-cond-clause (car clauses) (cdr clauses) ctx scope)))
+
+(defun compile-cond (form ctx scope) (compile-cond-clauses (cdr form) ctx scope))
+
+; (when test . body) => (if test (progn . body) nil)
+(defun compile-when (form ctx scope)
+  (compile-expr (list 'if (car (cdr form)) (cons 'progn (cdr (cdr form))) nil) ctx scope))
+
+; (unless test . body) => (if test nil (progn . body))
+(defun compile-unless (form ctx scope)
+  (compile-expr (list 'if (car (cdr form)) nil (cons 'progn (cdr (cdr form)))) ctx scope))
+
 ; atomは(既にレキシカル束縛の有無を確認する)compile-variable-refに委ねる。
 ; cons/car/cdr/eq/+はインライン化された専用命令へ、それ以外の形式(carがsymbol
 ; でもlambda式でも構わない)はすべて汎用の関数呼び出しcompile-callへコンパイル
@@ -594,6 +691,13 @@
     ((eq (car form) 'quote) (compile-quote form ctx))
     ((eq (car form) 'if) (compile-if form ctx scope))
     ((eq (car form) 'let) (compile-let form ctx scope))
+    ((eq (car form) 'let*) (compile-let-star form ctx scope))
+    ((eq (car form) 'progn) (compile-progn form ctx scope))
+    ((eq (car form) 'cond) (compile-cond form ctx scope))
+    ((eq (car form) 'and) (compile-and form ctx scope))
+    ((eq (car form) 'or) (compile-or form ctx scope))
+    ((eq (car form) 'when) (compile-when form ctx scope))
+    ((eq (car form) 'unless) (compile-unless form ctx scope))
     ((eq (car form) 'setq) (compile-setq form ctx scope))
     ((eq (car form) 'lambda) (compile-lambda form ctx scope))
     ((eq (car form) '+) (compile-add form ctx scope))

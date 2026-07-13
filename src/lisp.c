@@ -16,7 +16,7 @@
 #define LISP_SYMBOL_NAME_MAX 64
 #define LISP_PACKAGE_NAME_MAX 32
 #define LISP_MAX_PACKAGES 8
-#define LISP_MAX_SYMBOLS 256
+#define LISP_MAX_SYMBOLS 512
 
 // milestone 32: gc_next/gc_markedは3構造体(LispCons/LispSymbol/LispClosure)共通で
 // 先頭2フィールドとして揃える。lisp_alloc_trackedがオフセット0/sizeof(LispObject)を
