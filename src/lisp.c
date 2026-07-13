@@ -1474,6 +1474,14 @@ static inline LispObject lisp_vm_pop(void) {
     return vm_stack[vm_sp];
 }
 
+// panicのlongjmpはvm_sp/vm_stackを復元しない（C関数呼び出しの巻き戻しと違い、longjmp先には
+// このスタックを元の深さへ戻す手立てがない）。REPLのpanic復帰点（lisp_setjmpのトラップ復帰
+// 直後）で必ず呼び、vm_spをゼロへ戻してGCルート汚染・VMスタックオーバーフローの累積を防ぐ
+// (milestone 48)
+void lisp_vm_reset_stack(void) {
+    vm_sp = 0;
+}
+
 // clのbytecodeをフレーム先頭fpで実行する（milestone35/36/37共通の実行ループ本体）。
 // fp==vm_sp（呼び出し時点のスタック最上位）で呼ばれれば引数無しの実行（lisp_vm_execからの
 // 直接呼び出し）、fp<vm_spで呼ばれればOP_CALLが既に呼び出し元のフレームからnargs個の生の

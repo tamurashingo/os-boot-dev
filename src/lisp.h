@@ -104,6 +104,11 @@ UINTN lisp_gc(void);
 // 真なら成功
 int lisp_vm_gc_root_selftest(void);
 
+// vm_sp（VMのデータスタックポインタ、lisp.c内のstaticなグローバル変数）をゼロへ戻す。
+// panicのlongjmpはこのスタックを復元しないため、REPLのpanic復帰点（lisp_setjmpの
+// トラップ復帰直後）で必ず呼ぶこと（milestone 48）
+void lisp_vm_reset_stack(void);
+
 // --- VMオペコード (milestone 35) ---
 // 各命令は1byteのopcode+固定長の即値オペランド（今のところ0または1byte）から成る。
 // 手動でバイトコード配列を構築する目標1の各マイルストン（35〜39）はこの定義を直接使う
