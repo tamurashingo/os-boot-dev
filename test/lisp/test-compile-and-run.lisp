@@ -113,6 +113,27 @@
 (defun run-test-compile-and-run-call-interpreter-function ()
   (struct-eq (compile-and-run '(list 1 2 3)) (list 1 2 3)))
 
+; milestone 53: lisp_applyがコンパイル済みクロージャをlisp_vm_runへ委譲する回帰テスト
+; (milestone52とは逆方向、インタプリタ→VM)。compile-and-runを経由せず、通常のツリー
+; ウォークインタプリタ(lisp_eval)から直接コンパイル済みクロージャを呼び出す
+(defun run-test-lisp-apply-compiled-closure-direct ()
+  (let ((f (vm-make-closure 1
+                             (list *op-load-local* 0 *op-const* 0 *op-add* *op-return*)
+                             (list 1)
+                             nil)))
+    (eq (f 10) 11)))
+
+; mapcarはstdlib.lispのdefunによる従来のインタプリタクロージャで、その本体(fn (car lst))が
+; lisp_evalの通常の関数呼び出し経路(lisp_apply)を通る。fnにコンパイル済みクロージャを渡すことで、
+; 既存の高階ビルトイン(mapcar)がコンパイル済み・インタプリタ済みいずれのクロージャも区別なく
+; 第一級の値として扱えることを確認する
+(defun run-test-lisp-apply-compiled-closure-via-mapcar ()
+  (let ((f (vm-make-closure 1
+                             (list *op-load-local* 0 *op-const* 0 *op-add* *op-return*)
+                             (list 1)
+                             nil)))
+    (struct-eq (mapcar f (list 1 2 3)) (list 2 3 4))))
+
 (defun run-test-compile-and-run ()
   (and (run-test-compile-and-run-arithmetic)
        (run-test-compile-and-run-if-then)
@@ -127,5 +148,7 @@
        (run-test-compile-and-run-global-setq)
        (run-test-compile-and-run-global-call)
        (run-test-compile-and-run-call-c-builtin)
-       (run-test-compile-and-run-call-interpreter-function)))
+       (run-test-compile-and-run-call-interpreter-function)
+       (run-test-lisp-apply-compiled-closure-direct)
+       (run-test-lisp-apply-compiled-closure-via-mapcar)))
 

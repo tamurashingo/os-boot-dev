@@ -1977,6 +1977,28 @@ LispObject lisp_apply(LispObject fn, LispObject args) {
         lisp_panic(L"attempt to call a non-function");
     }
     LispClosure *closure = lisp_closure_cell(fn);
+    if (closure->bytecode != 0) {
+        // milestone 53: コンパイル済みクロージャはmilestone52のOP_CALLと対になる方向の
+        // フォールバックとしてlisp_vm_runへ委譲する。argsを評価済みの値としてvm_stackへ積み、
+        // OP_CALLと同じ規約（引数個数分をFP相対でその場でボックス化）に揃えてから呼ぶ
+        UINTN fp = vm_sp;
+        UINTN nargs = 0;
+        LispObject cur = args;
+        while (lisp_is_cons(cur)) {
+            lisp_vm_push(lisp_car(cur));
+            nargs++;
+            cur = lisp_cdr(cur);
+        }
+        if (nargs != closure->nargs) {
+            lisp_panic(L"VM function called with wrong number of arguments");
+        }
+        for (UINTN i = 0; i < nargs; i++) {
+            vm_stack[fp + i] = lisp_cons(vm_stack[fp + i], LISP_NIL);
+        }
+        LispObject result = lisp_vm_run(closure, fp);
+        vm_sp = fp;
+        return result;
+    }
     if (closure->builtin != 0) {
         return closure->builtin(args);
     }
