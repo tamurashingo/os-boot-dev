@@ -171,6 +171,8 @@
 (defvar *op-eq*            15)
 (defvar *op-global-ref*    16)
 (defvar *op-global-set*    17)
+(defvar *op-block*         18)
+(defvar *op-return-from*   19)
 
 (defun asm-label-p (instr) (eq (car instr) 'label))
 
@@ -680,6 +682,27 @@
 (defun compile-unless (form ctx scope)
   (compile-expr (list 'if (car (cdr form)) nil (cons 'progn (cdr (cdr form)))) ctx scope))
 
+; --- compile-expr: block/return-from (milestone 55, documents/lisp_vm_integration.md) ---
+; if/let/lambdaへの脱糖では表現できない非局所脱出のため、milestone54の7形式とは異なり
+; 新規opcode(OP_BLOCK/OP_RETURN_FROM、src/lisp.h)を使う。blockの本体は引数無しのlambdaとして
+; コンパイルすることで、upvalue捕捉(自由変数参照)をcompile-lambdaの既存機構に丸ごと委譲できる
+; (block自身にレキシカルスコープを拡張する仕組みは要らない――bodyは外側のscopeをそのまま
+; 見えるlambdaとして包むだけでよい)。tagは評価されない生のsymbolなので、compile-literalと
+; 同じ「定数プールへそのまま登録する」方式(compile-register-const)で登録する
+(defun compile-block (form ctx scope)
+  (let ((tag (car (cdr form)))
+        (body (cdr (cdr form))))
+    (compile-concat (compile-lambda (list 'lambda nil (cons 'progn body)) ctx scope)
+                    (list (list *op-block* (compile-register-const ctx tag))))))
+
+; return-fromの値部分は通常のcompile-exprで評価してからpopされる値としてOP_RETURN_FROMへ渡す。
+; 値省略時は(return-from tag)がnilを返す既存インタプリタ(milestone19)の挙動に合わせてnilを使う
+(defun compile-return-from (form ctx scope)
+  (let ((tag (car (cdr form)))
+        (value-forms (cdr (cdr form))))
+    (compile-concat (compile-expr (if (null value-forms) nil (car value-forms)) ctx scope)
+                    (list (list *op-return-from* (compile-register-const ctx tag))))))
+
 ; atomは(既にレキシカル束縛の有無を確認する)compile-variable-refに委ねる。
 ; cons/car/cdr/eq/+はインライン化された専用命令へ、それ以外の形式(carがsymbol
 ; でもlambda式でも構わない)はすべて汎用の関数呼び出しcompile-callへコンパイル
@@ -698,6 +721,8 @@
     ((eq (car form) 'or) (compile-or form ctx scope))
     ((eq (car form) 'when) (compile-when form ctx scope))
     ((eq (car form) 'unless) (compile-unless form ctx scope))
+    ((eq (car form) 'block) (compile-block form ctx scope))
+    ((eq (car form) 'return-from) (compile-return-from form ctx scope))
     ((eq (car form) 'setq) (compile-setq form ctx scope))
     ((eq (car form) 'lambda) (compile-lambda form ctx scope))
     ((eq (car form) '+) (compile-add form ctx scope))

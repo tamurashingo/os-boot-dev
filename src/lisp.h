@@ -170,6 +170,29 @@ void lisp_vm_reset_stack(void);
                             // lisp_env_set(global_env, symbol, value)相当で書き込む
                             // （OP_STORE_LOCAL/OP_STORE_UPVALUEと同様、値はpushし直さない）
 
+// --- block/return-from（非局所脱出）オペコード (milestone 55) ---
+// if/let/lambdaへの脱糖では表現できないため、既存インタプリタのlisp_return_tag/
+// lisp_return_value（milestone19、src/lisp.c）をVMからもそのまま共有して使う。
+// blockの本体は（引数無しの）独立したclosureとしてコンパイルし、OP_BLOCKがそれを
+// 直接呼び出す（C再帰でネストしたlisp_vm_run呼び出しになる）。OP_CALL側にも、
+// ネストした呼び出しの戻り値を見る前にlisp_return_tagが立っていないか確認し、
+// 立っていれば（このblockの担当タグでなければ）自分のフレームもそのまま
+// 早期returnして上位へ伝播する変更が入っている（lisp_apply経由でツリーウォーク
+// インタプリタ側へ委譲したケースも同じチェックで統一的に扱える）
+#define OP_BLOCK 18        // 次の1byteをconstants配列のindexとして解釈し、そこにあるsymbolを
+                            // このblockのタグとする。スタック最上位（直前のOP_MAKE_CLOSUREが
+                            // 積んだ、本体を表す引数無しclosure）をpopして0引数で呼び出す。
+                            // 戻ってきた時点でlisp_return_tagがこのタグと一致していれば
+                            // シグナルを捕捉し（tagをクリアし）lisp_return_valueをpushする。
+                            // 一致しない他タグ宛のシグナルが立っていれば捕捉せずそのまま
+                            // このフレームも早期returnして伝播する。シグナルが立っていなければ
+                            // 本体の戻り値をそのままpushする
+#define OP_RETURN_FROM 19  // スタック最上位をpopし、それを値としてlisp_return_valueへ、
+                            // 次の1byteが指すconstants配列のsymbolをlisp_return_tagへセットした上で、
+                            // OP_RETURNと同様にこのフレームを早期returnする（対応するOP_BLOCKに
+                            // 出会うまで、途中のOP_CALL/OP_BLOCKフレームは戻り値を見る前に
+                            // lisp_return_tagを確認し、そのまま自分も早期returnして伝播し続ける）
+
 // bytecode(bytecode_len byte)とconstants(constants_len個のLispObject)を保持するVM
 // コンパイル済み関数オブジェクトを作る（LispClosureのescape hatch方式、milestone15/22/26と
 // 同じ前例）。どちらも呼び出し元のバッファをヒープへコピーするので、呼び出し後は

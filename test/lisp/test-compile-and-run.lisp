@@ -172,6 +172,59 @@
   (and (eq (compile-and-run '(unless (eq 1 2) 10 20)) 20)
        (eq (compile-and-run '(unless (eq 1 1) 10)) nil)))
 
+; milestone 55: compile-expr: block/return-from対応の回帰テスト。
+; test-block-return.lisp(milestone19、lisp_evalのインタプリタ側のblock/return-from
+; テスト)のケース1-6と同じ入出力の組をcompile-and-run経由で再現する。ケース7-9
+; (let/let*の動的変数復元)はcompile-let/compile-let*がまだ特殊変数に対応していない
+; ため対象外(milestone57で追加予定)
+(defun run-test-compile-and-run-block-basic ()
+  (eq (compile-and-run '(block blk (return-from blk 42) 999)) 42))
+
+(defun run-test-compile-and-run-block-no-return ()
+  (eq (compile-and-run '(block blk 1 2 3)) 3))
+
+(defun run-test-compile-and-run-block-skips-rest ()
+  (eq (compile-and-run '(block blk (return-from blk 1) (return-from blk 2))) 1))
+
+(defun run-test-compile-and-run-block-nested-inner-tag ()
+  (eq (compile-and-run '(block outer
+                           (block inner
+                             (return-from inner 10))
+                           20))
+      20))
+
+(defun run-test-compile-and-run-block-nested-outer-tag ()
+  (eq (compile-and-run '(block outer
+                           (block inner
+                             (return-from outer 99))
+                           20))
+      99))
+
+; run-test-compile-and-run-recursive-callと同じ「使わない束縛の初期化式」の技法で
+; 自己参照するlambdaを作り、再帰呼び出しを何段か経由してもreturn-fromが呼び出し元の
+; blockまで正しく伝播することを確認する(OP_CALLの汎用伝播チェックの回帰テスト)
+(defun run-test-compile-and-run-block-escapes-recursion ()
+  (eq (compile-and-run
+        '(block scan-loop
+           (let ((scan nil))
+             (let ((ignored (setq scan (lambda (lst target)
+                                          (if lst
+                                              (if (eq (car lst) target)
+                                                  (return-from scan-loop (car lst))
+                                                  (scan (cdr lst) target))
+                                              nil)))))
+               (scan (cons 1 (cons 2 (cons 3 (cons 4 (cons 5 nil))))) 3)))
+           999))
+      3))
+
+(defun run-test-compile-and-run-block-return ()
+  (and (run-test-compile-and-run-block-basic)
+       (run-test-compile-and-run-block-no-return)
+       (run-test-compile-and-run-block-skips-rest)
+       (run-test-compile-and-run-block-nested-inner-tag)
+       (run-test-compile-and-run-block-nested-outer-tag)
+       (run-test-compile-and-run-block-escapes-recursion)))
+
 (defun run-test-compile-and-run ()
   (and (run-test-compile-and-run-arithmetic)
        (run-test-compile-and-run-if-then)
@@ -195,5 +248,6 @@
        (run-test-compile-and-run-and)
        (run-test-compile-and-run-or)
        (run-test-compile-and-run-when)
-       (run-test-compile-and-run-unless)))
+       (run-test-compile-and-run-unless)
+       (run-test-compile-and-run-block-return)))
 

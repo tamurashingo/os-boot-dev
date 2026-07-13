@@ -1563,6 +1563,13 @@ static LispObject lisp_vm_run(LispClosure *cl, UINTN fp) {
                     }
                     LispObject result = lisp_vm_run(callee, new_fp);
                     vm_sp = new_fp;
+                    // milestone 55: ネストしたlisp_vm_run呼び出しの中でreturn-fromが発生し
+                    // どのblockにも捕捉されずに戻ってきた場合、自分のフレームもそのまま
+                    // 早期returnして呼び出し元へ伝播する（対応するOP_BLOCKに出会うまで続く）
+                    if (lisp_return_tag != LISP_NIL) {
+                        vm_sp = fp;
+                        return result;
+                    }
                     lisp_vm_push(result);
                 } else {
                     // milestone 52: 呼び出し先がコンパイル済みでなければ、ビルトイン・従来の
@@ -1575,6 +1582,12 @@ static LispObject lisp_vm_run(LispClosure *cl, UINTN fp) {
                     }
                     vm_sp = new_fp;
                     LispObject result = lisp_apply(fn_obj, args);
+                    // milestone 55: lisp_applyがツリーウォークインタプリタ側のreturn-fromを
+                    // 未捕捉のまま返してくる場合も、同じ規約でこのフレームを早期returnして伝播する
+                    if (lisp_return_tag != LISP_NIL) {
+                        vm_sp = fp;
+                        return result;
+                    }
                     lisp_vm_push(result);
                 }
                 break;
@@ -1685,6 +1698,38 @@ static LispObject lisp_vm_run(LispClosure *cl, UINTN fp) {
                 LispObject result = lisp_vm_pop();
                 vm_sp = fp;
                 return result;
+            }
+            case OP_RETURN_FROM: {
+                unsigned char idx = *pc;
+                pc++;
+                LispObject tag = cl->constants[idx];
+                LispObject value = lisp_vm_pop();
+                lisp_return_tag = tag;
+                lisp_return_value = value;
+                vm_sp = fp;
+                return value;
+            }
+            case OP_BLOCK: {
+                unsigned char idx = *pc;
+                pc++;
+                LispObject tag = cl->constants[idx];
+                LispObject closure_obj = lisp_vm_pop();
+                LispClosure *body_cl = lisp_closure_cell(closure_obj);
+                UINTN new_fp = vm_sp;
+                LispObject result = lisp_vm_run(body_cl, new_fp);
+                vm_sp = new_fp;
+                if (lisp_return_tag != LISP_NIL) {
+                    if (lisp_return_tag == tag) {
+                        lisp_return_tag = LISP_NIL;
+                        lisp_vm_push(lisp_return_value);
+                    } else {
+                        vm_sp = fp;
+                        return result;
+                    }
+                } else {
+                    lisp_vm_push(result);
+                }
+                break;
             }
             default:
                 lisp_panic(L"unknown VM opcode");
