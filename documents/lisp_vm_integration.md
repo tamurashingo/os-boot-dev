@@ -81,7 +81,7 @@ REPL・`defun`・`load`がデフォルトで使う評価経路そのものへ格
 | # | マイルストーン | 状態 | 主な内容 |
 |---|---|---|---|
 | 48 | VMスタックのpanic安全性修正 | 完了 | `vm_sp`/`vm_stack`がpanicのlongjmpで復元されない問題を修正する。REPLのpanic復帰点（`lisp_setjmp`によるトラップ復帰直後）で`vm_sp`を確実にゼロへリセットする処理を追加し、panicの繰り返しによるVM状態破損・GCルート汚染・最終的なVMスタックオーバーフローを防ぐ。VMが既定経路になる前に解決すべき安全性の前提条件。`lisp_vm_reset_stack()`を新設し、`src/main.c`のREPLループ先頭（`lisp_setjmp`直後）で毎回呼ぶ。 |
-| 49 | VMブリッジ固定長バッファの拡張 | 未着手 | `vm-make-closure`/`vm-exec`が使うCスタック上のステージング用固定長バッファ（`VM_BRIDGE_MAX_BYTECODE`/`_CONSTANTS`/`_UPVALUES`）を、実サイズの関数のコンパイル結果に耐える大きさへ拡張する。超過時のpanicメッセージも診断しやすい形にする。 |
+| 49 | VMブリッジ固定長バッファの拡張 | 完了 | `vm-make-closure`/`vm-exec`が使うCスタック上のステージング用固定長バッファ（`VM_BRIDGE_MAX_BYTECODE`/`_CONSTANTS`/`_UPVALUES`）を、実サイズの関数のコンパイル結果に耐える大きさへ拡張する。超過時のpanicメッセージも診断しやすい形にする。256/64/32を2048/256/128へ拡張し、超過時のpanicメッセージに上限値(16進)を含める`lisp_panic_vm_bridge_limit_exceeded`を新設した。 |
 | 50 | compile-and-runのマクロ展開配線修正 | 未着手 | `compile-and-run`が`macroexpand-all`を経由せず直接`compile-expr`を呼んでいる既存の配線漏れを修正し、マクロを含む式が正しく展開されてからコンパイルされることを回帰確認する。 |
 | 51 | グローバル参照解決（OP_GLOBAL_REF/OP_GLOBAL_SET） | 未着手 | レキシカルスコープ外のシンボルを裸の定数としてpushしていた既存の（誤った）フォールバックを廃止し、新設`OP_GLOBAL_REF`/`OP_GLOBAL_SET`で実行時に`global_env`を解決するようにする。これにより初めてコンパイル済みコードからグローバル変数・グローバル関数を正しく参照できるようになる。 |
 | 52 | OP_CALLの汎用ディスパッチ化（VM→インタプリタ方向） | 未着手 | `OP_CALL`が非コンパイル済みの呼び出し先を拒否してpanicしていた挙動を、`lisp_apply`へフォールバックする経路に変更する。これにより既存の全ビルトイン（`+`/`-`/`list`/`write-line`等）と全既存インタプリタクロージャをコンパイル済みコードから呼べるようになる。 |

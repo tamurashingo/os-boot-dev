@@ -2609,10 +2609,37 @@ LispObject lisp_builtin_svset(LispObject args) {
 // 一旦積んでからlisp_make_compiled等へ渡す（load時のlisp_load_bufferと同じ「静的/固定長の
 // スクラッチ領域を使う」方針）。constants引数の各要素は呼び出し元(lisp/stdlib.lispの
 // vm-materialize-constants)が事前に再帰展開済みである前提で、ここではネストしたlambdaの
-// テンプレートリストをそれ以上辿らない
-#define VM_BRIDGE_MAX_BYTECODE 256
-#define VM_BRIDGE_MAX_CONSTANTS 64
-#define VM_BRIDGE_MAX_UPVALUES 32
+// テンプレートリストをそれ以上辿らない。
+// milestone 48時点の値（256/64/32）はmilestone35〜39の手動バイトコード検証にしか耐えず、
+// フェーズ2で実stdlib.lisp関数をコンパイルするようになると容易に超過するため、
+// milestone 49でこの値まで拡張した（各呼び出しのCローカル配列なので、拡張分は再帰的な
+// ネストしたクロージャのコンパイル数だけスタック使用量が増える点に注意）
+#define VM_BRIDGE_MAX_BYTECODE 2048
+#define VM_BRIDGE_MAX_CONSTANTS 256
+#define VM_BRIDGE_MAX_UPVALUES 128
+
+// vm-make-closureの各固定長バッファが超過した際、上限値も含めて診断しやすいpanicメッセージを
+// 組み立てる（milestone 49）。lisp_panicは固定のCHAR16*しか受け取れないため、ここでラベルと
+// 上限値(16進)を1つのバッファへ連結してから渡す
+static CHAR16 *lisp_char16_append(CHAR16 *dst, const CHAR16 *src) {
+    while (*src) {
+        *dst++ = *src++;
+    }
+    *dst = 0;
+    return dst;
+}
+
+static void lisp_panic_vm_bridge_limit_exceeded(CHAR16 *what, UINTN limit) {
+    CHAR16 hex[20];
+    UINT64ToHexStr((UINT64)limit, hex);
+    CHAR16 msg[96];
+    CHAR16 *p = msg;
+    p = lisp_char16_append(p, what);
+    p = lisp_char16_append(p, L" (limit ");
+    p = lisp_char16_append(p, hex);
+    lisp_char16_append(p, L")");
+    lisp_panic(msg);
+}
 
 // (vm-make-closure nargs bytecode-list constants-list upvalue-descs-list) -> 実行可能な
 // コンパイル済み関数オブジェクト。upvalue-descs-listの各要素は(kind . index)のcons
@@ -2630,7 +2657,7 @@ LispObject lisp_builtin_vm_make_closure(LispObject args) {
     LispObject cur = bytecode_list;
     while (lisp_is_cons(cur)) {
         if (bytecode_len >= VM_BRIDGE_MAX_BYTECODE) {
-            lisp_panic(L"vm-make-closure: bytecode too long");
+            lisp_panic_vm_bridge_limit_exceeded(L"vm-make-closure: bytecode too long", VM_BRIDGE_MAX_BYTECODE);
         }
         LispObject b = lisp_car(cur);
         lisp_assert_fixnum(b);
@@ -2643,7 +2670,7 @@ LispObject lisp_builtin_vm_make_closure(LispObject args) {
     cur = constants_list;
     while (lisp_is_cons(cur)) {
         if (constants_len >= VM_BRIDGE_MAX_CONSTANTS) {
-            lisp_panic(L"vm-make-closure: too many constants");
+            lisp_panic_vm_bridge_limit_exceeded(L"vm-make-closure: too many constants", VM_BRIDGE_MAX_CONSTANTS);
         }
         constants[constants_len++] = lisp_car(cur);
         cur = lisp_cdr(cur);
@@ -2657,7 +2684,7 @@ LispObject lisp_builtin_vm_make_closure(LispObject args) {
     cur = upvalue_descs_list;
     while (lisp_is_cons(cur)) {
         if (upvalue_count >= VM_BRIDGE_MAX_UPVALUES) {
-            lisp_panic(L"vm-make-closure: too many upvalue descriptors");
+            lisp_panic_vm_bridge_limit_exceeded(L"vm-make-closure: too many upvalue descriptors", VM_BRIDGE_MAX_UPVALUES);
         }
         LispObject desc = lisp_car(cur);
         LispObject kind_obj = lisp_car(desc);
