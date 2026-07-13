@@ -1436,9 +1436,11 @@ static int lisp_reader_at_end(void) {
 // マイルストーン9のlisp_env_bind_paramsのままで変更しない）
 LispObject global_env = LISP_NIL;
 
-// lisp_vm_run(milestone 51のOP_GLOBAL_REF/OP_GLOBAL_SET)が定義順として先に来るため前方宣言する
+// lisp_vm_run(milestone 51のOP_GLOBAL_REF/OP_GLOBAL_SET、milestone 52のOP_CALLフォールバック)が
+// 定義順として先に来るため前方宣言する
 LispObject lisp_env_lookup(LispObject env, LispObject sym);
 void lisp_env_set(LispObject env, LispObject sym, LispObject value);
+LispObject lisp_apply(LispObject fn, LispObject args);
 
 // 非局所脱出の進行中シグナル (milestone 19)。setjmp/longjmpが使えないため、
 // return-fromが「対象タグ＋値」をここにセットしてから通常のLispObjectとして
@@ -1547,23 +1549,34 @@ static LispObject lisp_vm_run(LispClosure *cl, UINTN fp) {
                 unsigned char nargs = *pc;
                 pc++;
                 LispObject fn_obj = lisp_vm_pop();
-                if (!lisp_is_compiled(fn_obj)) {
-                    lisp_panic(L"attempt to call a non-compiled function on the VM");
-                }
-                LispClosure *callee = lisp_closure_cell(fn_obj);
-                if (callee->nargs != nargs) {
-                    lisp_panic(L"VM function called with wrong number of arguments");
-                }
                 if (vm_sp < nargs) {
                     lisp_panic(L"VM stack underflow");
                 }
                 UINTN new_fp = vm_sp - nargs;
-                for (UINTN i = 0; i < nargs; i++) {
-                    vm_stack[new_fp + i] = lisp_cons(vm_stack[new_fp + i], LISP_NIL);
+                if (lisp_is_compiled(fn_obj)) {
+                    LispClosure *callee = lisp_closure_cell(fn_obj);
+                    if (callee->nargs != nargs) {
+                        lisp_panic(L"VM function called with wrong number of arguments");
+                    }
+                    for (UINTN i = 0; i < nargs; i++) {
+                        vm_stack[new_fp + i] = lisp_cons(vm_stack[new_fp + i], LISP_NIL);
+                    }
+                    LispObject result = lisp_vm_run(callee, new_fp);
+                    vm_sp = new_fp;
+                    lisp_vm_push(result);
+                } else {
+                    // milestone 52: 呼び出し先がコンパイル済みでなければ、ビルトイン・従来の
+                    // インタプリタクロージャいずれもlisp_applyへ委譲する（非関数ならそこでpanicする）。
+                    // lisp_applyは評価済み引数の「リスト」を取るため、ボックス化はせずvm_stack上の
+                    // 生の値をそのままconsで組み立てる
+                    LispObject args = LISP_NIL;
+                    for (UINTN i = nargs; i > 0; i--) {
+                        args = lisp_cons(vm_stack[new_fp + i - 1], args);
+                    }
+                    vm_sp = new_fp;
+                    LispObject result = lisp_apply(fn_obj, args);
+                    lisp_vm_push(result);
                 }
-                LispObject result = lisp_vm_run(callee, new_fp);
-                vm_sp = new_fp;
-                lisp_vm_push(result);
                 break;
             }
             case OP_MAKE_CLOSURE: {

@@ -102,6 +102,17 @@
 (defun run-test-compile-and-run-global-call ()
   (eq (compile-and-run '(*compile51-global-fn* 10)) 11))
 
+; milestone 52: OP_CALLの汎用ディスパッチ化の回帰テスト。OP_CALLがコンパイル済みでない
+; 呼び出し先(Cビルトイン・従来のdefunによるインタプリタクロージャ)をlisp_applyへ
+; フォールバックすることを確認する。atomはCビルトイン(builtin!=0)、listはstdlib.lispの
+; defunで定義されたインタプリタクロージャ(body/envを持つ通常のクロージャ)なので、
+; lisp_apply内の2つの分岐(closure->builtin呼び出し/lisp_eval呼び出し)を両方通す
+(defun run-test-compile-and-run-call-c-builtin ()
+  (eq (compile-and-run '(atom 5)) t))
+
+(defun run-test-compile-and-run-call-interpreter-function ()
+  (struct-eq (compile-and-run '(list 1 2 3)) (list 1 2 3)))
+
 (defun run-test-compile-and-run ()
   (and (run-test-compile-and-run-arithmetic)
        (run-test-compile-and-run-if-then)
@@ -114,5 +125,7 @@
        (run-test-compile-and-run-macro-expansion)
        (run-test-compile-and-run-global-ref)
        (run-test-compile-and-run-global-setq)
-       (run-test-compile-and-run-global-call)))
+       (run-test-compile-and-run-global-call)
+       (run-test-compile-and-run-call-c-builtin)
+       (run-test-compile-and-run-call-interpreter-function)))
 
