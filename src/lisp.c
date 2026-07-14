@@ -14,9 +14,7 @@
 #define LISP_NIL ((LispObject)0)
 
 #define LISP_SYMBOL_NAME_MAX 64
-#define LISP_PACKAGE_NAME_MAX 32
 #define LISP_MAX_PACKAGES 8
-#define LISP_MAX_SYMBOLS 512
 
 // milestone 32: gc_next/gc_markedは3構造体(LispCons/LispSymbol/LispClosure)共通で
 // 先頭2フィールドとして揃える。lisp_alloc_trackedがオフセット0/sizeof(LispObject)を
@@ -28,13 +26,7 @@ typedef struct {
     LispObject cdr;
 } LispCons;
 
-// milestone 23: パッケージ（common-lisp-user/keyword等）ごとに独立したシンボルテーブルを持つ
-typedef struct {
-    char name[LISP_PACKAGE_NAME_MAX];
-    LispObject symbols[LISP_MAX_SYMBOLS];
-    UINTN symbol_count;
-    int is_keyword_package; // 真なら自己評価し印字時に":"を前置する特別なパッケージ
-} LispPackage;
+struct LispClosure; // LispSymbol.packageから前方参照するための宣言（定義は下記）
 
 typedef struct {
     LispObject gc_next;   // milestone 32: LispConsと同じ追跡リスト用（先頭2フィールド揃え必須）
@@ -42,12 +34,15 @@ typedef struct {
     char name[LISP_SYMBOL_NAME_MAX];
     int is_special;      // milestone 18: defvar/defparameterで真になる動的変数フラグ
     LispObject value;    // is_specialが真の場合の現在の動的値。let/let*が退避・書き換えする
-    LispPackage *package; // milestone 23: 属するパッケージ。gensymの未interned symbolはNULL
+    struct LispClosure *package; // milestone 23: 属するパッケージ。gensymの未interned symbolはNULL。
+                                  // milestone 68でLispPackageを廃しLispClosureのescape hatchに
+                                  // 統合したため生ポインタの指す先もLispClosureになった
+                                  // （タグ付きLispObject化はmilestone 70で行う）
 } LispSymbol;
 
 typedef LispObject (*LispBuiltinFn)(LispObject args);
 
-typedef struct {
+typedef struct LispClosure {
     LispObject gc_next;   // milestone 32: LispConsと同じ追跡リスト用（先頭2フィールド揃え必須）
     int gc_marked;
     LispObject params; // 仮引数シンボルのリスト（builtinの場合は未使用）
@@ -77,6 +72,11 @@ typedef struct {
     LispObject upvalues;      // milestone38: インスタンス側。OP_MAKE_CLOSUREが実際に捕捉した
                                // box参照を格納するベクタ（lisp_make_vector互換）。テンプレート
                                // 自身はNILのまま
+    char *pkg_name; // milestone 68: NULLならパッケージではない。非NULLならパッケージ名（0終端）
+    LispObject pkg_symbols; // パッケージ内にinternされた全シンボルのconsリスト（milestone71統合）
+    LispObject pkg_exports; // exportされたシンボルのconsリスト（milestone76まで常にNIL）
+    LispObject pkg_uses;    // use-packageしている他パッケージのconsリスト（milestone77まで常にNIL）
+    int pkg_is_keyword;     // 真なら自己評価し印字時に":"を前置する特別なパッケージ
 } LispClosure;
 
 static inline LispObject lisp_make_fixnum(long long value) {
@@ -138,6 +138,11 @@ static inline int lisp_is_vector(LispObject obj) {
 // VMコンパイル済み関数も同じくLISP_TAG_CLOSUREを共有するescape hatch（milestone 34/35）
 static inline int lisp_is_compiled(LispObject obj) {
     return lisp_is_closure(obj) && lisp_closure_cell(obj)->bytecode != 0;
+}
+
+// パッケージも同じくLISP_TAG_CLOSUREを共有するescape hatch（milestone 68）
+static inline int lisp_is_package(LispObject obj) {
+    return lisp_is_closure(obj) && lisp_closure_cell(obj)->pkg_name != 0;
 }
 
 static inline int lisp_is_number(LispObject obj) {
@@ -335,6 +340,11 @@ LispObject lisp_make_closure(LispObject params, LispObject body, LispObject env)
     closure->nargs = 0;
     closure->upvalue_descs = LISP_NIL;
     closure->upvalues = LISP_NIL;
+    closure->pkg_name = 0;
+    closure->pkg_symbols = LISP_NIL;
+    closure->pkg_exports = LISP_NIL;
+    closure->pkg_uses = LISP_NIL;
+    closure->pkg_is_keyword = 0;
     return ((LispObject)closure) | LISP_TAG_CLOSURE;
 }
 
@@ -361,6 +371,11 @@ LispObject lisp_make_builtin(LispBuiltinFn fn) {
     closure->nargs = 0;
     closure->upvalue_descs = LISP_NIL;
     closure->upvalues = LISP_NIL;
+    closure->pkg_name = 0;
+    closure->pkg_symbols = LISP_NIL;
+    closure->pkg_exports = LISP_NIL;
+    closure->pkg_uses = LISP_NIL;
+    closure->pkg_is_keyword = 0;
     return ((LispObject)closure) | LISP_TAG_CLOSURE;
 }
 
@@ -389,6 +404,11 @@ LispObject lisp_make_macro(LispObject params, LispObject body, LispObject env) {
     closure->nargs = 0;
     closure->upvalue_descs = LISP_NIL;
     closure->upvalues = LISP_NIL;
+    closure->pkg_name = 0;
+    closure->pkg_symbols = LISP_NIL;
+    closure->pkg_exports = LISP_NIL;
+    closure->pkg_uses = LISP_NIL;
+    closure->pkg_is_keyword = 0;
     return ((LispObject)closure) | LISP_TAG_CLOSURE;
 }
 
@@ -424,6 +444,11 @@ LispObject lisp_make_string(const char *chars, UINTN len) {
     closure->nargs = 0;
     closure->upvalue_descs = LISP_NIL;
     closure->upvalues = LISP_NIL;
+    closure->pkg_name = 0;
+    closure->pkg_symbols = LISP_NIL;
+    closure->pkg_exports = LISP_NIL;
+    closure->pkg_uses = LISP_NIL;
+    closure->pkg_is_keyword = 0;
     return ((LispObject)closure) | LISP_TAG_CLOSURE;
 }
 
@@ -453,6 +478,11 @@ LispObject lisp_make_float(double value) {
     closure->nargs = 0;
     closure->upvalue_descs = LISP_NIL;
     closure->upvalues = LISP_NIL;
+    closure->pkg_name = 0;
+    closure->pkg_symbols = LISP_NIL;
+    closure->pkg_exports = LISP_NIL;
+    closure->pkg_uses = LISP_NIL;
+    closure->pkg_is_keyword = 0;
     return ((LispObject)closure) | LISP_TAG_CLOSURE;
 }
 
@@ -487,6 +517,11 @@ LispObject lisp_make_bignum(const UINT32 *digits, UINTN len, int negative) {
     closure->nargs = 0;
     closure->upvalue_descs = LISP_NIL;
     closure->upvalues = LISP_NIL;
+    closure->pkg_name = 0;
+    closure->pkg_symbols = LISP_NIL;
+    closure->pkg_exports = LISP_NIL;
+    closure->pkg_uses = LISP_NIL;
+    closure->pkg_is_keyword = 0;
     return ((LispObject)closure) | LISP_TAG_CLOSURE;
 }
 
@@ -522,6 +557,11 @@ LispObject lisp_make_vector(UINTN len, LispObject fill) {
     closure->nargs = 0;
     closure->upvalue_descs = LISP_NIL;
     closure->upvalues = LISP_NIL;
+    closure->pkg_name = 0;
+    closure->pkg_symbols = LISP_NIL;
+    closure->pkg_exports = LISP_NIL;
+    closure->pkg_uses = LISP_NIL;
+    closure->pkg_is_keyword = 0;
     return ((LispObject)closure) | LISP_TAG_CLOSURE;
 }
 
@@ -560,6 +600,11 @@ LispObject lisp_make_compiled(const unsigned char *bytecode, UINTN bytecode_len,
     closure->nargs = nargs;
     closure->upvalue_descs = LISP_NIL;
     closure->upvalues = LISP_NIL;
+    closure->pkg_name = 0;
+    closure->pkg_symbols = LISP_NIL;
+    closure->pkg_exports = LISP_NIL;
+    closure->pkg_uses = LISP_NIL;
+    closure->pkg_is_keyword = 0;
     return ((LispObject)closure) | LISP_TAG_CLOSURE;
 }
 
@@ -766,38 +811,78 @@ static int lisp_streq(const char *a, const char *b) {
     return *a == *b;
 }
 
-// milestone 23: パッケージの集合。common-lisp-user/keywordの2つで始まるが、将来
-// lisp_make_packageを追加で呼ぶだけで3つ目以降のパッケージを増やせる（LISP_MAX_PACKAGESの範囲内）
-static LispPackage lisp_packages[LISP_MAX_PACKAGES];
-static UINTN lisp_package_count = 0;
-static LispPackage *lisp_cl_user_package;
-static LispPackage *lisp_keyword_package;
+// milestone 68: パッケージ自体をLISP_TAG_CLOSUREのescape hatchを共有する第一級のGC管理
+// オブジェクトにする（文字列/float/bignum/vector/コンパイル済み関数と同じパターン）。
+// symbols/exports/usesは固定長配列ではなく最初からconsリストとして持つ（milestone71として
+// 計画していたシンボル集合のconsリスト化は、パッケージ自体のヒープオブジェクト化と同時に
+// 行うほうが手戻りが無いため本milestoneへ統合済み。LISP_MAX_SYMBOLSの容量上限もこの統合に
+// より最初から存在しない）
+static LispObject lisp_make_package_object(const char *name, int is_keyword_package) {
+    LispClosure *closure = (LispClosure *)lisp_alloc_tracked(sizeof(LispClosure), LISP_TAG_CLOSURE);
+    closure->params = LISP_NIL;
+    closure->body = LISP_NIL;
+    closure->env = LISP_NIL;
+    closure->builtin = 0;
+    closure->is_macro = 0;
+    closure->str_data = 0;
+    closure->str_len = 0;
+    closure->is_float = 0;
+    closure->float_value = 0.0;
+    closure->big_digits = 0;
+    closure->big_len = 0;
+    closure->big_negative = 0;
+    closure->vec_data = 0;
+    closure->vec_len = 0;
+    closure->bytecode = 0;
+    closure->bytecode_len = 0;
+    closure->constants = 0;
+    closure->constants_len = 0;
+    closure->nargs = 0;
+    closure->upvalue_descs = LISP_NIL;
+    closure->upvalues = LISP_NIL;
+    UINTN len = 0;
+    while (name[len] != '\0') {
+        len++;
+    }
+    char *buf = (char *)lisp_alloc(len + 1);
+    for (UINTN i = 0; i < len; i++) {
+        buf[i] = name[i];
+    }
+    buf[len] = '\0';
+    closure->pkg_name = buf;
+    closure->pkg_symbols = LISP_NIL;
+    closure->pkg_exports = LISP_NIL;
+    closure->pkg_uses = LISP_NIL;
+    closure->pkg_is_keyword = is_keyword_package;
+    return ((LispObject)closure) | LISP_TAG_CLOSURE;
+}
 
-static LispPackage *lisp_make_package(const char *name, int is_keyword_package) {
+// milestone 23: パッケージの集合。common-lisp-user/keywordの2つで始まるが、将来
+// lisp_make_packageを追加で呼ぶだけで3つ目以降のパッケージを増やせる（LISP_MAX_PACKAGESの範囲内。
+// この配列自体をconsリスト化して上限を撤廃するのはmilestone69の範囲）
+static LispObject lisp_packages[LISP_MAX_PACKAGES];
+static UINTN lisp_package_count = 0;
+static LispObject lisp_cl_user_package;
+static LispObject lisp_keyword_package;
+
+static LispObject lisp_make_package(const char *name, int is_keyword_package) {
     if (lisp_package_count >= LISP_MAX_PACKAGES) {
         lisp_panic_fatal(L"package table exhausted");
     }
-    LispPackage *pkg = &lisp_packages[lisp_package_count];
-    UINTN i = 0;
-    while (name[i] != '\0' && i < LISP_PACKAGE_NAME_MAX - 1) {
-        pkg->name[i] = name[i];
-        i++;
-    }
-    pkg->name[i] = '\0';
-    pkg->symbol_count = 0;
-    pkg->is_keyword_package = is_keyword_package;
+    LispObject pkg = lisp_make_package_object(name, is_keyword_package);
+    lisp_packages[lisp_package_count] = pkg;
     lisp_package_count++;
     return pkg;
 }
 
 // 現時点ではLispからは使わない内部APIだが、将来の`find-package`相当の土台として用意しておく
-static LispPackage *lisp_find_package(const char *name) {
+static LispObject lisp_find_package(const char *name) {
     for (UINTN i = 0; i < lisp_package_count; i++) {
-        if (lisp_streq(lisp_packages[i].name, name)) {
-            return &lisp_packages[i];
+        if (lisp_streq(lisp_closure_cell(lisp_packages[i])->pkg_name, name)) {
+            return lisp_packages[i];
         }
     }
-    return 0;
+    return LISP_NIL;
 }
 
 void lisp_packages_init(void) {
@@ -806,11 +891,11 @@ void lisp_packages_init(void) {
 }
 
 // 同じ名前でintern済みのシンボルがpkg内にあれば同一のLispObjectを返す（eqで比較可能にする）。
-// 無ければ新規に確保してpkgのテーブルに登録する。比較・格納の両方で先にLISP_SYMBOL_NAME_MAX-1文字に
+// 無ければ新規に確保してpkgのconsリストへ追加する。比較・格納の両方で先にLISP_SYMBOL_NAME_MAX-1文字に
 // 切り詰めてから扱うことで、name自体を切り詰めずにlisp_streqへ渡すと「格納済みの切り詰め済み名」
 // と「今回渡された切り詰め前のnama」が食い違って毎回別シンボルを生成してしまう
 // （呼ぶたびにeqが成立せずunbound variableになる）バグを避ける
-LispObject lisp_intern_in_package(LispPackage *pkg, const char *name) {
+LispObject lisp_intern_in_package(LispObject pkg, const char *name) {
     char truncated[LISP_SYMBOL_NAME_MAX];
     UINTN len = 0;
     while (name[len] != '\0' && len < LISP_SYMBOL_NAME_MAX - 1) {
@@ -819,15 +904,13 @@ LispObject lisp_intern_in_package(LispPackage *pkg, const char *name) {
     }
     truncated[len] = '\0';
 
-    for (UINTN i = 0; i < pkg->symbol_count; i++) {
-        LispSymbol *sym = lisp_symbol_cell(pkg->symbols[i]);
+    LispClosure *pkg_cell = lisp_closure_cell(pkg);
+    for (LispObject cur = pkg_cell->pkg_symbols; cur != LISP_NIL; cur = lisp_cdr(cur)) {
+        LispObject existing = lisp_car(cur);
+        LispSymbol *sym = lisp_symbol_cell(existing);
         if (lisp_streq(sym->name, truncated)) {
-            return pkg->symbols[i];
+            return existing;
         }
-    }
-
-    if (pkg->symbol_count >= LISP_MAX_SYMBOLS) {
-        lisp_panic_fatal(L"symbol table exhausted");
     }
 
     LispSymbol *sym = (LispSymbol *)lisp_alloc_tracked(sizeof(LispSymbol), LISP_TAG_SYMBOL);
@@ -839,11 +922,10 @@ LispObject lisp_intern_in_package(LispPackage *pkg, const char *name) {
     sym->name[i] = '\0';
     sym->is_special = 0;
     sym->value = LISP_NIL;
-    sym->package = pkg;
+    sym->package = pkg_cell;
 
     LispObject obj = ((LispObject)sym) | LISP_TAG_SYMBOL;
-    pkg->symbols[pkg->symbol_count] = obj;
-    pkg->symbol_count++;
+    pkg_cell->pkg_symbols = lisp_cons(obj, pkg_cell->pkg_symbols);
     return obj;
 }
 
@@ -1147,7 +1229,7 @@ void lisp_print(LispOutputStream *stream, LispObject obj) {
     if (lisp_is_symbol(obj)) {
         LispSymbol *sym = lisp_symbol_cell(obj);
         // milestone 23: keywordパッケージのシンボルは":"を前置して印字する
-        if (sym->package != 0 && sym->package->is_keyword_package) {
+        if (sym->package != 0 && sym->package->pkg_is_keyword) {
             lisp_print_ascii(stream, ":");
         }
         lisp_print_ascii(stream, sym->name);
@@ -1639,6 +1721,11 @@ static LispObject lisp_vm_run(LispClosure *cl, UINTN fp) {
                 instance->nargs = template_cl->nargs;
                 instance->upvalue_descs = template_cl->upvalue_descs;
                 instance->upvalues = upvalues;
+                instance->pkg_name = 0;
+                instance->pkg_symbols = LISP_NIL;
+                instance->pkg_exports = LISP_NIL;
+                instance->pkg_uses = LISP_NIL;
+                instance->pkg_is_keyword = 0;
                 lisp_vm_push(((LispObject)instance) | LISP_TAG_CLOSURE);
                 break;
             }
@@ -1811,19 +1898,25 @@ static void lisp_gc_mark(LispObject obj) {
 }
 
 // GCのルート集合: グローバル環境（alist。closureのenvも同じ表現を共有するため、生きている
-// closureがマークされた時点でそのenvも連動して辿られる）、全パッケージに登録された全シンボル
-// （t等の特殊シンボルキャッシュもすべてこの中に含まれるため個別マークは不要）、非局所脱出用の
-// シグナル（return-fromのタグ不一致panicがこの2つをクリアしない既知の挙動があるため、保守的に
-// 常に生きているとみなす）、およびVMデータスタック（milestone34。vm_stack[0..vm_sp)には
-// lisp_vm_execが評価中の中間値が生のLispObjectとして置かれるため、Cローカル変数と同様GCの
+// closureがマークされた時点でそのenvも連動して辿られる）、全パッケージオブジェクトとそこに
+// 登録された全シンボル（t等の特殊シンボルキャッシュもすべてこの中に含まれるため個別マークは
+// 不要。milestone68でパッケージ自体がLispClosureのescape hatchを共有するGC管理オブジェクトに
+// なったため、pkg自身をmarkしないとsweepでフリーリストへ回収されてしまう。symbols/exports/uses
+// はpkg自身のmarkだけでは辿られない生フィールドなので個別にmarkする——lisp_gc_markのclosure分岐
+// 自体をパッケージ用に拡張してglobal_packages経由の1行markへ一本化するのはmilestone72の範囲）、
+// 非局所脱出用のシグナル（return-fromのタグ不一致panicがこの2つをクリアしない既知の挙動がある
+// ため、保守的に常に生きているとみなす）、およびVMデータスタック（milestone34。vm_stack[0..vm_sp)
+// にはlisp_vm_execが評価中の中間値が生のLispObjectとして置かれるため、Cローカル変数と同様GCの
 // 追跡対象外になってしまう。ここでルートに加えないとバンプ確保のたびに回収されてしまう）
 static void lisp_gc_mark_roots(void) {
     lisp_gc_mark(global_env);
     for (UINTN i = 0; i < lisp_package_count; i++) {
-        LispPackage *pkg = &lisp_packages[i];
-        for (UINTN j = 0; j < pkg->symbol_count; j++) {
-            lisp_gc_mark(pkg->symbols[j]);
-        }
+        LispObject pkg = lisp_packages[i];
+        lisp_gc_mark(pkg);
+        LispClosure *pkg_cell = lisp_closure_cell(pkg);
+        lisp_gc_mark(pkg_cell->pkg_symbols);
+        lisp_gc_mark(pkg_cell->pkg_exports);
+        lisp_gc_mark(pkg_cell->pkg_uses);
     }
     lisp_gc_mark(lisp_return_tag);
     lisp_gc_mark(lisp_return_value);
@@ -2158,7 +2251,7 @@ LispObject lisp_eval(LispObject expr, LispObject env) {
     if (lisp_is_symbol(expr)) {
         LispSymbol *cell = lisp_symbol_cell(expr);
         // milestone 23: keywordパッケージのシンボルはtと同様に自己評価する
-        if (expr == lisp_sym_t || (cell->package != 0 && cell->package->is_keyword_package)) {
+        if (expr == lisp_sym_t || (cell->package != 0 && cell->package->pkg_is_keyword)) {
             return expr;
         }
         return lisp_env_lookup(env, expr);
@@ -2618,7 +2711,7 @@ LispObject lisp_builtin_keywordp(LispObject args) {
         return LISP_NIL;
     }
     LispSymbol *cell = lisp_symbol_cell(obj);
-    return (cell->package != 0 && cell->package->is_keyword_package) ? lisp_sym_t : LISP_NIL;
+    return (cell->package != 0 && cell->package->pkg_is_keyword) ? lisp_sym_t : LISP_NIL;
 }
 
 // (rplaca cons-cell new-car): cons-cellのcarをnew-carへ破壊的に書き換え、cons-cell自身を
