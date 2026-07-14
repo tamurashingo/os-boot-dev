@@ -1237,6 +1237,48 @@ static void lisp_print_vector(LispOutputStream *stream, LispClosure *vec) {
     lisp_print_ascii(stream, ")");
 }
 
+// sym_objが対象パッケージ(pkg_cell)のpkg_exportsに含まれるか（eq基準）を調べる
+// （milestone76のexport/milestone74のリーダー単一コロン修飾子と同じ線形探索）
+static int lisp_symbol_exported_from(LispObject sym_obj, LispClosure *pkg_cell) {
+    for (LispObject e = pkg_cell->pkg_exports; e != LISP_NIL; e = lisp_cdr(e)) {
+        if (lisp_car(e) == sym_obj) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+// sym_objがそのホームパッケージからexportされているかを判定する（milestone79、
+// printerの単一コロン/二重コロン切り分けに使う。uninterned(gensym)symbolは
+// ホームパッケージを持たないため常に0を返す）
+static int lisp_symbol_is_exported(LispObject sym_obj) {
+    LispSymbol *sym = lisp_symbol_cell(sym_obj);
+    if (sym->package == LISP_NIL) {
+        return 0;
+    }
+    return lisp_symbol_exported_from(sym_obj, lisp_closure_cell(sym->package));
+}
+
+// sym_objが現在の*package*から無修飾名で解決できる（＝可視）かを判定する（milestone79）。
+// lisp_intern_in_package（milestone77）の探索順序「自パッケージのローカルシンボル→
+// useしている各パッケージのexportシンボル」と対称な判定にする（printerがreaderの
+// 逆変換になるようにするため）。uninterned(gensym)symbolはそもそもどのパッケージにも
+// 属さないため、この判定を経由せず呼び出し側で無条件に無修飾表示する
+static int lisp_symbol_visible_in_current_package(LispObject sym_obj) {
+    LispObject cur_pkg = lisp_symbol_cell(lisp_sym_package)->value;
+    LispSymbol *sym = lisp_symbol_cell(sym_obj);
+    if (sym->package == cur_pkg) {
+        return 1;
+    }
+    LispClosure *cur_cell = lisp_closure_cell(cur_pkg);
+    for (LispObject u = cur_cell->pkg_uses; u != LISP_NIL; u = lisp_cdr(u)) {
+        if (lisp_symbol_exported_from(sym_obj, lisp_closure_cell(lisp_car(u)))) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 // LispObjectを人間が読める形式でコンソールに表示する。
 // fixnumは10進、symbolは名前、consは(a b c)または(a . b)形式、nilはnilと表示する
 void lisp_print(LispOutputStream *stream, LispObject obj) {
@@ -1270,6 +1312,16 @@ void lisp_print(LispOutputStream *stream, LispObject obj) {
         // milestone 23: keywordパッケージのシンボルは":"を前置して印字する
         if (lisp_symbol_package_is_keyword(sym)) {
             lisp_print_ascii(stream, ":");
+            lisp_print_ascii(stream, sym->name);
+            return;
+        }
+        // milestone 79: ホームパッケージを持つ（uninterned/gensymでない）シンボルが
+        // 現在の*package*から無修飾名で見えない場合、pkgname:symbol（exportされていれば）
+        // またはpkgname::symbol（されていなければ）で修飾して印字する。gensymは常に
+        // 無修飾のまま（既存milestone20の挙動を変更しない）
+        if (sym->package != LISP_NIL && !lisp_symbol_visible_in_current_package(obj)) {
+            lisp_print_ascii(stream, lisp_closure_cell(sym->package)->pkg_name);
+            lisp_print_ascii(stream, lisp_symbol_is_exported(obj) ? ":" : "::");
         }
         lisp_print_ascii(stream, sym->name);
         return;
