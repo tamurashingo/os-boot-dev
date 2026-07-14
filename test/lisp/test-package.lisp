@@ -64,10 +64,32 @@
        (eq (use-package (make-package "test-pkg77d") (find-package "common-lisp-user")) t)
        (eq (use-package (make-package "test-pkg77a")) t)))
 
+; milestone 78: internは指定パッケージ(省略時は*package*)へシンボルを帰属させ、同名の
+;再internは同一オブジェクト(eq)を返す。defpackageは:export/:use句を文字列で受け取り、
+; make-package/export/use-packageへ展開してエラーなく対象パッケージオブジェクトを返し、
+; 同名で再度defpackageしても同一オブジェクト(#69の重複名冪等性)を返す。いずれも本ファイル内
+; での呼び出しだけで検証できる範囲(*package*の切替や、切替後に無修飾名を読むことには
+; 依存しない)に限る。in-packageで*package*を切り替えた後に無修飾名がexportされたシンボルと
+; 同一オブジェクトに解決されること自体は、milestone76/77と同根の理由(load はファイル全体を
+; 読み切ってから評価する)でこのファイルでは検証できず、C内部API直呼びの自己テスト
+; (lisp_reader_defpackage_selftest、lisp.c)と個別の対話REPLセッションで別途行う。
+(defun run-test-package-intern ()
+  (and (eq (intern "intern-test-78a") (intern "intern-test-78a"))
+       (eq (intern "intern-test-78b" (find-package "common-lisp-user"))
+           (intern "intern-test-78b"))))
+
+(defun run-test-package-defpackage ()
+  (and (eq (defpackage "test-pkg78" (:export "pkg78-sym-a") (:use "common-lisp-user"))
+           (find-package "test-pkg78"))
+       (eq (defpackage "test-pkg78" (:export "pkg78-sym-a") (:use "common-lisp-user"))
+           (defpackage "test-pkg78" (:export "pkg78-sym-a") (:use "common-lisp-user")))))
+
 (defun run-test-package ()
   (and (run-test-package-keyword-identity)
        (run-test-package-namespace-separation)
        (run-test-package-star-package-var)
        (run-test-package-make-find)
        (run-test-package-export)
-       (run-test-package-use)))
+       (run-test-package-use)
+       (run-test-package-intern)
+       (run-test-package-defpackage)))

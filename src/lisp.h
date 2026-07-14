@@ -129,6 +129,14 @@ int lisp_reader_export_selftest(void);
 // （milestone76と同根の制約）、C内で直接呼び出し順序を制御して検証する。真なら成功
 int lisp_reader_use_package_selftest(void);
 
+// milestone 78: Lisp呼び出し可能なintern・in-packageビルトインと、lisp/stdlib.lispの
+// defpackageマクロを組み合わせた自己テスト。「in-packageで*package*を切り替えた後に無修飾名を
+// internして解決する」という順序をtest/lisp/配下のファイル(load経由)では組めないため
+// （milestone76/77と同根の制約）、C内で直接呼び出し順序を制御して検証する。defpackageマクロは
+// stdlib.lisp読込済み（lisp_compiler_ready後）が前提のため、main.cでのstdlib.lisp自動load後に
+// 呼び出す必要がある。真なら成功
+int lisp_reader_defpackage_selftest(void);
+
 // --- VMオペコード (milestone 35) ---
 // 各命令は1byteのopcode+固定長の即値オペランド（今のところ0または2byte、リトルエンディアン）
 // から成る。手動でバイトコード配列を構築する目標1の各マイルストン（35〜39）はこの定義を直接使う
@@ -214,6 +222,15 @@ int lisp_reader_use_package_selftest(void);
                             // OP_RETURNと同様にこのフレームを早期returnする（対応するOP_BLOCKに
                             // 出会うまで、途中のOP_CALL/OP_BLOCKフレームは戻り値を見る前に
                             // lisp_return_tagを確認し、そのまま自分も早期returnして伝播し続ける）
+
+// --- スタック最上位を捨てる命令 (milestone 78) ---
+// (progn e1 e2)のe1のように、値を評価する必要はあるが結果は使わない式のためのオペコード。
+// OP_MAKE_LOCAL（let）を代わりに使うとその場でボックス化されスタック上に永続的に残り続ける
+// （対応する解放命令が存在しないため）。let/progn/and/or/cond/when/unlessがtail位置にある
+// 限りはOP_RETURNがフレーム全体を捨てるので無害だが、関数呼び出しの引数のようなnon-tail位置で
+// 使うと後続の計算（OP_CALLのnargsが期待するスタック深さ等）を壊してしまう。OP_POPは値を
+// スタックに残さず単純に捨てるため、この問題を起こさない
+#define OP_POP 20   // スタック最上位をpopし、捨てる（pushし直さない）
 
 // bytecode(bytecode_len byte)とconstants(constants_len個のLispObject)を保持するVM
 // コンパイル済み関数オブジェクトを作る（LispClosureのescape hatch方式、milestone15/22/26と

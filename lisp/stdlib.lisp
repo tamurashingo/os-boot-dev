@@ -60,3 +60,39 @@
   (if (null lst)
       nil
       (sort-insert pred (car lst) (sort pred (cdr lst)))))
+
+; milestone 78: defpackageマクロ。:export/:use句の値はmake-package/find-packageと同じ文字列
+; とする(bare symbolを使わない理由): "load"はファイル全体を読み切ってから評価するため
+; (milestone72/76/77と同根の制約)、:exportにbare symbolを書くと、defpackageのマクロ展開
+; (=評価)より前にリーダーが呼び出し元の*package*へ先にinternしてしまう。後で
+; (in-package name)して同じ無修飾名を書いても、lisp_intern_in_packageのfallback(見つから
+; なければ新規作成)が別オブジェクトを作ってしまい、eq同一性が壊れる。文字列で受け取り、
+; 展開内でintern(milestone78の新規組み込み関数)を明示的に呼んで対象パッケージへ帰属させて
+; おくことでこの順序問題を回避する
+(defun defpackage-clause-names (clauses keyword)
+  (if (null clauses)
+      nil
+      (if (eq (car (car clauses)) keyword)
+          (append (cdr (car clauses)) (defpackage-clause-names (cdr clauses) keyword))
+          (defpackage-clause-names (cdr clauses) keyword))))
+
+(defun defpackage-export-form (name sym-name)
+  (list 'export (list 'intern sym-name (list 'find-package name)) (list 'find-package name)))
+
+(defun defpackage-use-form (name pkg-name)
+  (list 'use-package (list 'find-package pkg-name) (list 'find-package name)))
+
+; 仮引数リスト全体を単一symbolにする書き方(milestone29のrest-arg機構、listやmapcar自身と
+; 同じ形)で、パッケージ名(文字列)と可変長の句((:export ...)/(:use ...))を受け取る
+(defmacro defpackage defpackage-form
+  (let* ((name (car defpackage-form))
+         (clauses (cdr defpackage-form))
+         (export-forms (mapcar (lambda (n) (defpackage-export-form name n))
+                                (defpackage-clause-names clauses :export)))
+         (use-forms (mapcar (lambda (n) (defpackage-use-form name n))
+                             (defpackage-clause-names clauses :use))))
+    (cons 'progn
+          (append (list (list 'make-package name))
+                  (append export-forms
+                          (append use-forms
+                                  (list (list 'find-package name))))))))

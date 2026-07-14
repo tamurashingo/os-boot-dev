@@ -1011,6 +1011,7 @@ static LispObject lisp_sym_defparameter;
 static LispObject lisp_sym_block;
 static LispObject lisp_sym_return_from;
 static LispObject lisp_sym_macroexpand_hook;
+static LispObject lisp_sym_compile_and_run;
 
 void lisp_symbols_init(void) {
     lisp_sym_t = lisp_intern("t");
@@ -1036,6 +1037,13 @@ void lisp_symbols_init(void) {
     lisp_sym_block = lisp_intern("block");
     lisp_sym_return_from = lisp_intern("return-from");
     lisp_sym_macroexpand_hook = lisp_intern("*macroexpand-hook*");
+    // milestone 78 (バグ修正): compile-and-runは他の特殊形式シンボルと同様、*package*が
+    // common-lisp-userの間にここで1度だけinternしてキャッシュする。lisp_eval_toplevel内で
+    // 都度lisp_internし直すと、milestone73以降lisp_internが*package*依存になっているため、
+    // in-packageで*package*を切り替えた後は毎回別オブジェクトが生成され、global_envの
+    // 解決に失敗してunbound variableパニックになる(defmacro/rest-arg defun以外の
+    // 全トップレベル評価が壊れる重大バグだった)
+    lisp_sym_compile_and_run = lisp_intern("compile-and-run");
 }
 
 
@@ -1728,6 +1736,10 @@ static LispObject lisp_vm_run(LispClosure *cl, UINTN fp) {
             case OP_MAKE_LOCAL: {
                 LispObject value = lisp_vm_pop();
                 lisp_vm_push(lisp_cons(value, LISP_NIL));
+                break;
+            }
+            case OP_POP: {
+                lisp_vm_pop();
                 break;
             }
             case OP_CALL: {
@@ -2749,7 +2761,7 @@ LispObject lisp_eval_toplevel(LispObject expr) {
     LispObject result;
     int defun_restarg = (op == lisp_sym_defun) && lisp_defun_params_is_restarg(expr);
     if (lisp_compiler_ready && op != lisp_sym_defmacro && !defun_restarg) {
-        LispObject compile_and_run = lisp_env_lookup(global_env, lisp_intern("compile-and-run"));
+        LispObject compile_and_run = lisp_env_lookup(global_env, lisp_sym_compile_and_run);
         result = lisp_apply(compile_and_run, lisp_cons(expr, LISP_NIL));
     } else {
         result = lisp_eval(expr, global_env);
@@ -2934,6 +2946,35 @@ LispObject lisp_builtin_use_package(LispObject args) {
     return lisp_sym_t;
 }
 
+// (intern name &optional package): nameはLisp文字列。packageを省略すると*package*
+// （現在のパッケージ）を対象にする。lisp_intern_in_packageへそのまま委譲する薄いラッパー
+// （milestone78）。#76の`export`はどのパッケージのシンボルでも受け付ける緩い実装のため、
+// `defpackage`の`:export`句が対象パッケージへ正しく帰属したシンボルをexportできるように、
+// 事前にこの`intern`で対象パッケージへ帰属させておく必要がある。これにより、後で
+// `(in-package name)`してから無修飾名で書いても同一オブジェクト（`eq`）に解決される
+LispObject lisp_builtin_intern(LispObject args) {
+    LispObject name_obj = lisp_car(args);
+    lisp_assert_string(name_obj);
+    LispObject rest = lisp_cdr(args);
+    LispObject pkg = lisp_is_cons(rest) ? lisp_resolve_package_designator(lisp_car(rest))
+                                         : lisp_symbol_cell(lisp_sym_package)->value;
+    return lisp_intern_in_package(pkg, lisp_closure_cell(name_obj)->str_data);
+}
+
+// (in-package name): nameはパッケージ名の文字列。find-packageで見つからなければpanicし、
+// 見つかれば*package*（動的変数）のシンボルセルのvalueを直接書き換えて対象パッケージへ
+// 切り替える（milestone78）
+LispObject lisp_builtin_in_package(LispObject args) {
+    LispObject name_obj = lisp_car(args);
+    lisp_assert_string(name_obj);
+    LispObject pkg = lisp_find_package(lisp_closure_cell(name_obj)->str_data);
+    if (pkg == LISP_NIL) {
+        lisp_panic(L"in-package: unknown package name");
+    }
+    lisp_symbol_cell(lisp_sym_package)->value = pkg;
+    return pkg;
+}
+
 // milestone 76: lisp_builtin_export（Lisp呼び出し可能なexport）と#74のリーダー修飾子を
 // 組み合わせた自己テスト。「exportを評価した後にpkg:symを読む」という順序は、lisp_load_eval_buffer
 // がファイル全体を読み切ってから評価する実装のため test/lisp/ 配下のファイル(load経由)では
@@ -3072,6 +3113,105 @@ int lisp_reader_use_package_selftest(void) {
         return 0;
     }
     if (lisp_intern("f-sym77") != f_sym) {
+        return 0;
+    }
+
+    return 1;
+}
+
+// milestone 78: intern（Lisp呼び出し可能なintern）・in-package（*package*切替）・defpackage
+// マクロ（lisp/stdlib.lisp）を組み合わせた自己テスト。「in-packageで*package*を切り替えた後に
+// 無修飾名をinternして解決する」という順序はmilestone76/77と同根の理由でtest/lisp/配下
+// (load経由)では組めないため、C内で直接呼び出し順序を制御して検証する。defpackageマクロ自体も
+// (defpackage "name" (:export "sym") (:use "pkg"))相当のフォームをlisp_evalで直接評価して
+// 展開結果の正しさ（対象パッケージへ実際にintern済みのシンボルをexportしていること）を確認する
+int lisp_reader_defpackage_selftest(void) {
+    LispObject saved_package = lisp_symbol_cell(lisp_sym_package)->value;
+
+    // internの基本動作: 指定パッケージへ帰属したシンボルを返し、同名を再internすると
+    // 同一オブジェクト(eq)を返す。lisp_intern_in_packageの直接呼び出しと一致することも確認する
+    LispObject pkg_x = lisp_make_package("selftest-pkg78x", 0);
+    LispObject name_x = lisp_make_string("intern-sym78", 12);
+    LispObject intern_args_x = lisp_cons(name_x, lisp_cons(pkg_x, LISP_NIL));
+    LispObject sym_x1 = lisp_builtin_intern(intern_args_x);
+    LispObject sym_x2 = lisp_builtin_intern(intern_args_x);
+    if (sym_x1 != sym_x2) {
+        return 0;
+    }
+    if (lisp_intern_in_package(pkg_x, "intern-sym78") != sym_x1) {
+        return 0;
+    }
+
+    // in-packageは*package*を書き換えて対象パッケージオブジェクトを返す。以後、packageを
+    // 省略したinternは*package*(切替後)を対象にする
+    LispObject pkg_y = lisp_make_package("selftest-pkg78y", 0);
+    LispObject in_package_args = lisp_cons(lisp_make_string("selftest-pkg78y", 15), LISP_NIL);
+    if (lisp_builtin_in_package(in_package_args) != pkg_y) {
+        return 0;
+    }
+    if (lisp_symbol_cell(lisp_sym_package)->value != pkg_y) {
+        return 0;
+    }
+    LispObject name_y = lisp_make_string("intern-sym78y", 13);
+    LispObject sym_y1 = lisp_builtin_intern(lisp_cons(name_y, LISP_NIL));
+    if (lisp_intern_in_package(pkg_y, "intern-sym78y") != sym_y1) {
+        return 0;
+    }
+    lisp_symbol_cell(lisp_sym_package)->value = saved_package;
+
+    // defpackageマクロの展開・評価: (defpackage "selftest-pkg78z" (:export "z-sym78")
+    // (:use "selftest-pkg78x"))相当のフォームを直接構築してlisp_evalする
+    LispObject pkg_name_z = lisp_make_string("selftest-pkg78z", 15);
+    LispObject export_clause = lisp_cons(lisp_intern_keyword("export"),
+                                          lisp_cons(lisp_make_string("z-sym78", 7), LISP_NIL));
+    LispObject use_clause = lisp_cons(lisp_intern_keyword("use"),
+                                       lisp_cons(lisp_make_string("selftest-pkg78x", 15), LISP_NIL));
+    LispObject defpackage_form = lisp_cons(lisp_intern("defpackage"),
+                                   lisp_cons(pkg_name_z,
+                                   lisp_cons(export_clause,
+                                   lisp_cons(use_clause, LISP_NIL))));
+    LispObject pkg_z = lisp_eval(defpackage_form, global_env);
+    if (lisp_return_tag != LISP_NIL) {
+        return 0;
+    }
+    if (!lisp_is_package(pkg_z)) {
+        return 0;
+    }
+    if (lisp_find_package("selftest-pkg78z") != pkg_z) {
+        return 0;
+    }
+
+    // :export句で渡した"z-sym78"は展開内のinternによりpkg_zへ正しく帰属した上でexportされて
+    // いる。in-packageでpkg_zへ切り替えて無修飾名を読んだ場合と同一オブジェクト(eq)であることが、
+    // 本マイルストーンが解決すべき核心の識別性保証にあたる
+    LispObject z_sym = lisp_intern_in_package(pkg_z, "z-sym78");
+    LispClosure *pkg_z_cell = lisp_closure_cell(pkg_z);
+    int z_exported = 0;
+    for (LispObject e = pkg_z_cell->pkg_exports; e != LISP_NIL; e = lisp_cdr(e)) {
+        if (lisp_car(e) == z_sym) {
+            z_exported = 1;
+            break;
+        }
+    }
+    if (!z_exported) {
+        return 0;
+    }
+    lisp_symbol_cell(lisp_sym_package)->value = pkg_z;
+    LispObject z_sym_unqualified = lisp_intern("z-sym78");
+    lisp_symbol_cell(lisp_sym_package)->value = saved_package;
+    if (z_sym_unqualified != z_sym) {
+        return 0;
+    }
+
+    // :use句で渡した"selftest-pkg78x"がpkg_zのpkg_usesへ実際に追加されていることも確認する
+    int used_x = 0;
+    for (LispObject u = pkg_z_cell->pkg_uses; u != LISP_NIL; u = lisp_cdr(u)) {
+        if (lisp_car(u) == pkg_x) {
+            used_x = 1;
+            break;
+        }
+    }
+    if (!used_x) {
         return 0;
     }
 
@@ -3685,6 +3825,8 @@ LispObject lisp_builtins_init(void) {
     env = lisp_env_extend(env, lisp_intern("find-package"), lisp_make_builtin(lisp_builtin_find_package));
     env = lisp_env_extend(env, lisp_intern("export"), lisp_make_builtin(lisp_builtin_export));
     env = lisp_env_extend(env, lisp_intern("use-package"), lisp_make_builtin(lisp_builtin_use_package));
+    env = lisp_env_extend(env, lisp_intern("intern"), lisp_make_builtin(lisp_builtin_intern));
+    env = lisp_env_extend(env, lisp_intern("in-package"), lisp_make_builtin(lisp_builtin_in_package));
     env = lisp_env_extend(env, lisp_intern("rplaca"), lisp_make_builtin(lisp_builtin_rplaca));
     env = lisp_env_extend(env, lisp_intern("rplacd"), lisp_make_builtin(lisp_builtin_rplacd));
     env = lisp_env_extend(env, lisp_intern("hash-code"), lisp_make_builtin(lisp_builtin_hash_code));

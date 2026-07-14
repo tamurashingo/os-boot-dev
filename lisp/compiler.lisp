@@ -173,6 +173,7 @@
 (defvar *op-global-set*    17)
 (defvar *op-block*         18)
 (defvar *op-return-from*   19)
+(defvar *op-pop*           20)
 
 (defun asm-label-p (instr) (eq (car instr) 'label))
 
@@ -723,26 +724,30 @@
 ; 脱糖(desugar)する。具体的には「新しいS式を組み立てて、それをcompile-exprへ再度渡す」
 ; という形で実装する(生のIRを自分で組み立てない)。この方法を選んだ理由は、let束縛や
 ; ifの分岐にまつわるスコープ拡張・ラベル発行・ジャンプ先解決を、既に検証済みのcompile-let/
-; compile-ifにそのまま委譲できるため(自分で新しいIRパターンを作ると、ローカル変数用の
-; ボックス(OP_MAKE_LOCAL)がスタック上に永続的に残るという既存のlet/ifの前提を、
-; 自分で正しく再現し直す必要が生じてしまう)。ここで組み立てるif/let/progn/cond/and/or
+; compile-ifにそのまま委譲できるため。ここで組み立てるif/let/progn/cond/and/or
 ; はいずれもmacroexpand-allの対象外の特殊形式(macroexpand-all-special-form-p)であり、
 ; compile-exprに渡す前に呼び出し元(compile-and-run等)が既にmacroexpand-allを1回
 ; 通しているため、ここで組み立てるサブフォーム自体を再度macroexpand-allする必要はない
 ; (もともとのformの一部を再利用しているだけで、新しいマクロ呼び出しを持ち込んでは
 ; いないため)
 
-; (progn) => nil、(progn e) => e、(progn e1 e2...) => (let ((_ e1)) (progn e2...))
-; の3ケースに帰着させる。gensymで作る束縛名は本体から絶対に参照されない
-; (OP_MAKE_LOCALでボックス化されるだけの「使い捨て」の副作用発生用スロットで、
-; milestone37の再帰呼び出しテストで既に使われている「使わない束縛」と同じ技法)
+; 修正 (milestone 78): 当初は(progn e1 e2...) => (let ((gensym e1)) (progn e2...))
+; とletのOP_MAKE_LOCAL経由でe1の値を捨てていたが、OP_MAKE_LOCALはボックス化した値を
+; スタック上に永続的に残す(対応する解放命令が無い、let束縛スロットの前提そのもの)。
+; これはprogn/let全体が関数のtail位置にある場合はOP_RETURNがフレーム全体を捨てるため
+; 無害だが、(eq (progn a b) (progn c d))のように関数呼び出しの引数(non-tail位置)として
+; 使われた場合、捨てられなかったボックスがスタックに残り続け、後続の引数やOP_CALLの
+; nargsが期待するスタック深さを壊してcompile-callの「1つのサブ式は必ず1つの値だけを
+; スタックに残す」という前提全体を崩壊させる重大バグだった(defpackageの展開結果を
+; eqの引数として直接比較するテストで発覚)。let(OP_MAKE_LOCAL)を経由せず、e1を評価して
+; 値を残さず捨てるだけの専用命令OP_POPを新設し、それに置き換えて解決する
 (defun compile-progn-body (forms ctx scope)
   (cond
     ((null forms) (compile-expr nil ctx scope))
     ((null (cdr forms)) (compile-expr (car forms) ctx scope))
-    (t (compile-expr (list 'let (list (list (gensym) (car forms)))
-                           (cons 'progn (cdr forms)))
-                      ctx scope))))
+    (t (compile-concat (compile-expr (car forms) ctx scope)
+                        (list (list *op-pop*))
+                        (compile-progn-body (cdr forms) ctx scope)))))
 
 (defun compile-progn (form ctx scope) (compile-progn-body (cdr form) ctx scope))
 
