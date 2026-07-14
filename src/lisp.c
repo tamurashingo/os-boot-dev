@@ -1898,6 +1898,14 @@ static void lisp_gc_mark(LispObject obj) {
         // （milestone38: 通常のcons/vectorオブジェクト）なのでparams/bodyと同じ1回のmarkで足りる
         lisp_gc_mark(cl->upvalue_descs);
         lisp_gc_mark(cl->upvalues);
+        // milestone72: パッケージ（pkg_name != 0のescape hatch）のsymbols/exports/usesは
+        // vec_data/constantsと同じ「clに属する生フィールド」なので、closure分岐に組み込んで
+        // lisp_gc_mark_roots側の個別ループを不要にする
+        if (cl->pkg_name) {
+            lisp_gc_mark(cl->pkg_symbols);
+            lisp_gc_mark(cl->pkg_exports);
+            lisp_gc_mark(cl->pkg_uses);
+        }
         obj = cl->env;
     }
 }
@@ -1905,24 +1913,17 @@ static void lisp_gc_mark(LispObject obj) {
 // GCのルート集合: グローバル環境（alist。closureのenvも同じ表現を共有するため、生きている
 // closureがマークされた時点でそのenvも連動して辿られる）、全パッケージオブジェクトとそこに
 // 登録された全シンボル（t等の特殊シンボルキャッシュもすべてこの中に含まれるため個別マークは
-// 不要。milestone69でglobal_packages自体が本物のconsリスト（LispObject）になったため、
-// lisp_gc_mark(global_packages)の1呼び出しでスパイン自身の各consセルと各パッケージオブジェクト
-// （car）がlisp_gc_markのcons/closure分岐経由で連動して辿られる。symbols/exports/usesは
-// pkg自身のmarkだけでは辿られない生フィールドなので個別にmarkする——lisp_gc_markのclosure分岐
-// 自体をパッケージ用に拡張してこの個別mark自体を無くすのはmilestone72の範囲）、非局所脱出用の
-// シグナル（return-fromのタグ不一致panicがこの2つをクリアしない既知の挙動があるため、保守的に
+// 不要。milestone69でglobal_packages自体が本物のconsリスト（LispObject）になり、milestone72で
+// lisp_gc_markのclosure分岐がpkg_symbols/pkg_exports/pkg_usesも辿るようになったため、
+// lisp_gc_mark(global_packages)の1呼び出しだけでスパイン自身の各consセル・各パッケージ
+// オブジェクト・その所属シンボル全てが連動して辿られる）、非局所脱出用のシグナル
+// （return-fromのタグ不一致panicがこの2つをクリアしない既知の挙動があるため、保守的に
 // 常に生きているとみなす）、およびVMデータスタック（milestone34。vm_stack[0..vm_sp)には
 // lisp_vm_execが評価中の中間値が生のLispObjectとして置かれるため、Cローカル変数と同様GCの
 // 追跡対象外になってしまう。ここでルートに加えないとバンプ確保のたびに回収されてしまう）
 static void lisp_gc_mark_roots(void) {
     lisp_gc_mark(global_env);
     lisp_gc_mark(global_packages);
-    for (LispObject cur = global_packages; cur != LISP_NIL; cur = lisp_cdr(cur)) {
-        LispClosure *pkg_cell = lisp_closure_cell(lisp_car(cur));
-        lisp_gc_mark(pkg_cell->pkg_symbols);
-        lisp_gc_mark(pkg_cell->pkg_exports);
-        lisp_gc_mark(pkg_cell->pkg_uses);
-    }
     lisp_gc_mark(lisp_return_tag);
     lisp_gc_mark(lisp_return_value);
     for (UINTN i = 0; i < vm_sp; i++) {
