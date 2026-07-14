@@ -29,7 +29,9 @@
   フィクスチャをQEMU/OVMFヘッドレス起動で実行するハーネス）とREPL基本動作の目視確認で行う。
 
 マイルストーン番号は既存の1〜67に続く**68から**開始する（68〜82の非公式使用が無いことをgrepで
-確認済み）。
+確認済み）。フェーズF（83〜84）はmilestone78で発見した非tail位置スタックリークの、フェーズG
+（85〜86）はmilestone81着手時に発見した特殊形式トークンの可視性問題の、それぞれ切り出しにより
+追加した。
 
 ### 設計にあたり確定している方針
 
@@ -105,7 +107,7 @@
 
 | # | マイルストーン | 状態 | 主な内容 |
 |---|---|---|---|
-| 81 | VM/コンパイラのグローバル参照とシンボル同一性の回帰検証 | 未着手 | `OP_GLOBAL_REF`/`OP_GLOBAL_SET`（`lisp_vm_integration.md`マイルストーン51）が`global_env`をシンボルの`eq`同一性で解決する前提が`*package*`導入後も壊れていないことを専用テストで確認する: 同一パッケージ内での`defun`前方参照・相互再帰（既存カバレッジの再確認）、`(in-package)`を挟んでも同一パッケージ・同一名の再読込みが常に同一シンボルオブジェクトに再解決されること、`*package*`が非既定値を指している最中に`(gc)`を実行しても`*package*`自身の値と束縛中のシンボル群が回収されないこと。 |
+| 81 | VM/コンパイラのグローバル参照とシンボル同一性の回帰検証 | 完了 | 着手時、`*package*`を`common-lisp-user`以外へ切り替えると`:use "common-lisp-user"`していても`defun`/`if`/`let`等の特殊形式トークンまで`unbound variable`でpanicすることを対話REPL検証で発見した。原因は特殊形式シンボル（`lisp_sym_defun`等）がeval側で`eq`同一性チェックされる一方、`common-lisp-user`自身のビルトイン・特殊形式トークンが一切`export`されていないため（milestone79で発見した制約と同根）、別パッケージで読んだ`defun`という語がuse-list経由で`lisp_sym_defun`へ解決されず、別の新規シンボルとして生成されてしまうことにある。ユーザーの明示的な判断により、この特殊形式可視性の問題自体はmilestone78の`progn`スタックリーク発見時と同様のパターンで新規マイルストーン（#85〜86、フェーズG）として切り出し、本マイルストーンは`*package*`導入後もグローバル参照がシンボル`eq`同一性で正しく解決されるかの回帰検証に限定してスコープを狭めた。新設した自己テスト`lisp_global_ref_package_identity_selftest`（`src/lisp.c`/`src/lisp.h`、`main.c`起動シーケンスに`lisp_bootstrap_package_context_selftest_run`の直後・`lisp_load_init_file`の直前に組み込み）は次の3点を検証する: (a) `common-lisp-user`内で`defun`による前方参照・相互再帰（`m81-even`/`m81-odd`の相互再帰関数を`lisp_eval`で定義し`(m81-even 10)`が`t`を返すこと）が既存カバレッジと同様に動作すること、(b) `*package*`を（`lisp_sym_package`のシンボルセルを直接書き換える形で）別パッケージへ切り替えてから`common-lisp-user`へ戻し、同名関数`m81-redef-fn`を再定義しても`lisp_intern`が常に同一シンボルオブジェクト（`eq`）を返し、`global_env`解決も再定義後の新しい関数本体に正しく追従すること（`defun`自体の評価は特殊形式可視性制約に触れないよう常に`*package*`が`common-lisp-user`の状態で行い、パッケージ切替はC内部でのポインタ代入に限定した）、(c) `*package*`が非既定のパッケージオブジェクトを指している最中に`lisp_gc()`を実行しても、`*package*`自身の値、およびその最中に`lisp_intern_in_package`でinternしたシンボル（`m81-probe`）のいずれも回収されないこと——これは`global_packages`が`lisp_gc_mark_roots`のルートであり、`*package*`の現在値に関わらず**全**パッケージ・全所属シンボルが常にmilestone72の設計で保護される、という既存の保証を明示的に固定するテストである。`make build`および`make test`（17ファイル全PASS、新規自己テストの`PASS`ログを含む）で確認した。 |
 | 82 | パッケージシステム統合テスト・既存回帰の総点検 | 未着手 | `test/lisp/test-package.lisp`を`make-package`/`export`/`use-package`/`defpackage`/`in-package`/修飾子リーダー/修飾子プリンタを一通り経由する統合シナリオへ拡張し、既存自己テスト群（`run-test-*`）全件・QEMUシリアルログでのPASS/FAIL目視確認を再実施する。ロードマップ全体の完了条件。 |
 
 ### フェーズF: 非tail位置のlet系スタックリークの根本修正（milestone78で発見）
@@ -114,6 +116,13 @@
 |---|---|---|---|
 | 83 | `let`/`let*`/`or`/`cond`(test-onlyクローズ)の非tail位置スタックリーク修正 | 未着手 | milestone78の`progn`修正（`OP_POP`導入）で解決したのと同じ根本原因——`OP_MAKE_LOCAL`がボックス化した値をスタック上に永続的に残し、対応する解放命令が無いこと——により、`let`/`let*`/`or`/`cond`のtest-onlyクローズ（いずれも実際に参照される束縛を`OP_MAKE_LOCAL`経由で作る）自体も、関数呼び出しの引数のような非tail位置で2個以上の兄弟式として使われると、スタック上のゴミが後続の計算を壊し`Lisp panic: expected a cons cell but got something else`等で異常終了することを確認済み（例: `(cons (let ((x 1)) x) (let ((y 2)) y))`）。`progn`の捨てる束縛と異なり、これらは束縛の値がbody中で実際に参照されるため、単純に`OP_POP`を挟むだけでは修正できない——束縛が保持していた値をボックスの外に取り出し、ボックス自体をスタックから取り除く（深い位置の値を捨てて浅い位置の値だけ残す）新規機構が必要になる。設計・実装は未着手。 |
 | 84 | milestone83修正の回帰検証と既存コードベースの棚卸し | 未着手 | milestone83の修正後、`make test`全件・`compiler.lisp`/`stdlib.lisp`自身（tree-walkedおよびVMコンパイル経由の両方）に同種のパターン（`let`/`let*`/`or`/`cond`を非tail位置の兄弟引数として使う箇所）が既存コード中に無いか`grep`等で棚卸しし、暗黙に依存していた既存コードが無いことを確認する。 |
+
+### フェーズG: 特殊形式トークンの可視性修正（milestone81で発見）
+
+| # | マイルストーン | 状態 | 主な内容 |
+|---|---|---|---|
+| 85 | 特殊形式・ビルトイントークンの`common-lisp-user`からのexport対応 | 未着手 | milestone81の着手時に発見した制約——`*package*`を`common-lisp-user`以外へ切り替えると、`:use "common-lisp-user"`していても`defun`/`if`/`let`/`quote`/`lambda`/`defmacro`/`progn`/`setq`/`cond`/`and`/`or`/`when`/`unless`/`block`/`return-from`等の特殊形式トークン、および`car`/`cons`/`+`等のビルトインまで無修飾では解決できなくなる（`unbound variable`でpanicする、または特殊形式として認識されず関数呼び出しとして評価されて失敗する）——を解消する。`lisp_symbols_init`でintern済みの特殊形式シンボル群と`lisp_builtins_init`で`global_env`へ束縛する全ビルトインシンボルを、`common-lisp-user`の`pkg_exports`へ登録する（初期化時に`lisp_builtin_export`相当の処理をC内部から直接呼ぶ、または`pkg_exports`へ直接cons追加する）。既存の`:use "common-lisp-user"`をしているパッケージの動作は、追加のexportにより無修飾解決できる範囲が広がるだけで後方互換になることを確認する。`in-package`自身が無修飾で呼べないため二重コロン修飾（`common-lisp-user::in-package`）でしか復帰できない、というmilestone79で発見した制約もこれで解消され、通常の`in-package`呼び出しで復帰できるようになることを確認する。 |
+| 86 | milestone85修正の回帰検証 | 未着手 | milestone85の修正後、`make test`全件（特に修飾子リーダー・修飾子プリンタ・`use-package`関連の既存自己テスト）に回帰が無いことを確認する。加えて、`*package*`を新規パッケージ（`:use "common-lisp-user"`のみ）へ切り替えた対話REPLセッションで、`defun`によるユーザー定義関数の作成、`in-package`による無修飾での`common-lisp-user`への復帰、`(quote 症状のあったビルトイン呼び出し)`が全て無修飾で成功することを目視確認する。milestone81の自己テストがC内部操作（`lisp_sym_package`の直接書き換え）に限定していた制約が本マイルストーンの完了により解消されるため、必要であれば同等のシナリオをLisp評価のみで再テストするかどうかを検討する。 |
 
 ### 既知のリスク: `LISP_LOAD_BUFFER_MAX`の再発パターン
 

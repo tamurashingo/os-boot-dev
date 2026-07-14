@@ -91,6 +91,16 @@ static void lisp_bootstrap_package_context_selftest_run(EFI_SYSTEM_TABLE *System
     }
 }
 
+// --- グローバル参照とシンボル同一性の回帰自己テスト (milestone 81) ---
+static void lisp_global_ref_package_identity_selftest_run(EFI_SYSTEM_TABLE *SystemTable) {
+    if (lisp_global_ref_package_identity_selftest()) {
+        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"Global ref package identity self-test: PASS\r\n");
+    } else {
+        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"Global ref package identity self-test: FAIL\r\n");
+        for (;;) {}
+    }
+}
+
 // --- VM最小実行ループ自己テスト (milestone 35) ---
 // OP_CONST 1, OP_CONST 2, OP_ADD, OP_RETURN相当を手動でバイトコード配列として構築し、
 // lisp_vm_execに渡して3が返ることを確認する。定数オブジェクトはlisp_make_fixnum相当の
@@ -539,6 +549,7 @@ EFI_STATUS EFIAPI EfiMain(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable)
             lisp_reader_use_package_selftest_run(SystemTable); // milestone 77: use-packageビルトイン+use-list継承intern解決自己テスト
             lisp_reader_defpackage_selftest_run(SystemTable); // milestone 78: intern/in-packageビルトイン+defpackageマクロ自己テスト
             lisp_bootstrap_package_context_selftest_run(SystemTable); // milestone 80: ブートストラップのパッケージ文脈自己テスト
+            lisp_global_ref_package_identity_selftest_run(SystemTable); // milestone 81: グローバル参照とシンボル同一性の回帰自己テスト
 
             lisp_load_init_file(); // milestone 47: EFI/BOOT/init.lispがあれば読み込む(無ければ何もしない)
 

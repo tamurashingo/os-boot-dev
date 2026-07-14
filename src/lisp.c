@@ -3307,6 +3307,67 @@ int lisp_bootstrap_package_context_selftest(void) {
     return 1;
 }
 
+// milestone 81: OP_GLOBAL_REF/OP_GLOBAL_SET（lisp_vm_integration.mdマイルストーン51）が
+// global_envをシンボルのeq同一性で解決する前提が*package*導入後も壊れていないことを確認する
+// 自己テスト。(a)同一パッケージ内でのdefun前方参照・相互再帰、(b)in-packageを挟んでも同一
+// パッケージ・同一名の再読込みが常に同一シンボルオブジェクトに再解決されること、(c)*package*
+// が非既定値を指している最中にlisp_gc()を実行しても*package*自身の値・その最中にinternした
+// シンボルが回収されないこと（global_packagesがGCルートのため、"現在の"パッケージかどうかに
+// 関わらず全パッケージ・全所属シンボルが常に保護されるという既存設計(milestone72)の直接確認）。
+// 特殊形式トークン（defun/if/let等）はcommon-lisp-userからexportされていないため、
+// use-packageしていてもcommon-lisp-user以外のパッケージへin-packageすると無修飾では使えなく
+// なる（milestone79の対話検証で判明した既知の制約）。本テストはその制約に触れないよう、
+// defun等のLisp評価は常に*package*がcommon-lisp-userのままの状態で行い、パッケージ切替自体は
+// *package*のシンボルセルを直接書き換えるC内部操作に限定する
+int lisp_global_ref_package_identity_selftest(void) {
+    LispObject saved_package = lisp_symbol_cell(lisp_sym_package)->value;
+
+    // (a) 同一パッケージ内でのdefun前方参照・相互再帰（既存カバレッジの再確認）
+    lisp_eval(lisp_read_from_buffer(
+        "(defun m81-even (n) (if (eq n 0) t (m81-odd (- n 1))))"), global_env);
+    lisp_eval(lisp_read_from_buffer(
+        "(defun m81-odd (n) (if (eq n 0) nil (m81-even (- n 1))))"), global_env);
+    if (lisp_eval(lisp_read_from_buffer("(m81-even 10)"), global_env) != lisp_sym_t) {
+        return 0;
+    }
+
+    // (b) in-packageを挟んでも同一パッケージ・同一名の再読込みが常に同一シンボルオブジェクトに
+    // 再解決されること。パッケージ切替自体はlisp_sym_packageのvalueを直接書き換えて行い、
+    // defunの評価はcommon-lisp-userへ戻してから行う（上記の特殊形式export制約を踏まないため）
+    LispObject other_pkg = lisp_make_package("selftest-pkg81-other", 0);
+    LispObject fn_sym_before = lisp_intern("m81-redef-fn");
+    lisp_eval(lisp_read_from_buffer("(defun m81-redef-fn (x) (+ x 1))"), global_env);
+
+    lisp_symbol_cell(lisp_sym_package)->value = other_pkg;
+    lisp_symbol_cell(lisp_sym_package)->value = lisp_cl_user_package;
+    if (lisp_intern("m81-redef-fn") != fn_sym_before) {
+        return 0;
+    }
+
+    lisp_eval(lisp_read_from_buffer("(defun m81-redef-fn (x) (+ x 2))"), global_env);
+    if (lisp_intern("m81-redef-fn") != fn_sym_before) {
+        return 0;
+    }
+    if (lisp_eval(lisp_read_from_buffer("(m81-redef-fn 10)"), global_env) != lisp_make_fixnum(12)) {
+        return 0;
+    }
+
+    // (c) *package*が非既定値(other_pkg)を指している最中にlisp_gc()を実行しても、*package*
+    // 自身の値、およびそのpkg_symbolsへinternしたシンボルが回収されないこと
+    lisp_symbol_cell(lisp_sym_package)->value = other_pkg;
+    LispObject probe_sym = lisp_intern_in_package(other_pkg, "m81-probe");
+    lisp_gc();
+    if (lisp_symbol_cell(lisp_sym_package)->value != other_pkg) {
+        return 0;
+    }
+    if (lisp_intern_in_package(other_pkg, "m81-probe") != probe_sym) {
+        return 0;
+    }
+
+    lisp_symbol_cell(lisp_sym_package)->value = saved_package;
+    return 1;
+}
+
 // (rplaca cons-cell new-car): cons-cellのcarをnew-carへ破壊的に書き換え、cons-cell自身を
 // 返す（milestone 27。CommonLispのrplacaと同じ「書き換えたコンスセル自身を返す」仕様で、
 // svsetがvalueを返すのとは異なる）。既存のlisp_set_carがlisp_assert_consを内包しているため

@@ -144,6 +144,12 @@ int lisp_reader_defpackage_selftest(void);
 // 真なら成功
 int lisp_bootstrap_package_context_selftest(void);
 
+// milestone 81: OP_GLOBAL_REF/OP_GLOBAL_SETがglobal_envをシンボルのeq同一性で解決する前提が
+// *package*導入後も壊れていないことを確認する自己テスト。同一パッケージ内でのdefun前方参照・
+// 相互再帰、in-packageを挟んだ同一名再解決のシンボル同一性、*package*が非既定値の最中の
+// lisp_gc()安全性を検証する。main.cでのstdlib.lisp自動load後に呼び出す必要がある。真なら成功
+int lisp_global_ref_package_identity_selftest(void);
+
 // --- VMオペコード (milestone 35) ---
 // 各命令は1byteのopcode+固定長の即値オペランド（今のところ0または2byte、リトルエンディアン）
 // から成る。手動でバイトコード配列を構築する目標1の各マイルストン（35〜39）はこの定義を直接使う
