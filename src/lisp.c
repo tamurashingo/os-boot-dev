@@ -2578,6 +2578,19 @@ LispObject lisp_builtin_cons(LispObject args) {
     return lisp_cons(lisp_car(args), lisp_car(lisp_cdr(args)));
 }
 
+// (funcall fn a1 a2 ...): argsの先頭がfn、残りが評価済みの実引数列そのもの。
+// lisp_apply(milestone53、コンパイル済み・インタプリタ・ビルトインいずれのクロージャも
+// 一貫して呼び出せる)へそのまま委譲するだけで、呼び出し先の種別による分岐は不要
+LispObject lisp_builtin_funcall(LispObject args) {
+    return lisp_apply(lisp_car(args), lisp_cdr(args));
+}
+
+// (apply fn arg-list): 実引数はargsの先頭(fn)ではなく2番目の要素として渡された
+// 「評価済みの実引数のリスト」自体である点がfuncallとの唯一の違い
+LispObject lisp_builtin_apply(LispObject args) {
+    return lisp_apply(lisp_car(args), lisp_car(lisp_cdr(args)));
+}
+
 LispObject lisp_builtin_eq(LispObject args) {
     LispObject a = lisp_car(args);
     LispObject b = lisp_car(lisp_cdr(args));
@@ -3004,8 +3017,11 @@ static EFI_GUID lisp_guid_simple_file_system = EFI_SIMPLE_FILE_SYSTEM_PROTOCOL_G
 // milestone 41: lisp/stdlib.lispがコメントを含めて8192byteを超えたため、無警告で
 // 末尾が読み捨てられる(truncateされてもlisp_load_eval_buffer側はEOFとして正常終了する
 // ため検知できない)事故を防ぐ目的で32768byteへ拡張した。milestone46でstdlib.lispが
-// 再び32768byteを超えたため65536byteへ再拡張した(同じ理由の再発)
-#define LISP_LOAD_BUFFER_MAX 65536
+// 再び32768byteを超えたため65536byteへ再拡張した(同じ理由の再発)。milestone61で
+// funcall/apply/reduce/sortの追加によりstdlib.lispが65536byteを再び超え、末尾の
+// (mark-compiler-ready)が無警告で読み捨てられてcompiler-ready-pが恒久的にnilになる
+// という形で実際に再発した(3度目)。今後の再発を先回りして防ぐため131072byteへ拡張する
+#define LISP_LOAD_BUFFER_MAX 131072
 static char lisp_load_buffer[LISP_LOAD_BUFFER_MAX];
 
 // (load)と(write-file)共通: EfiMainのImageHandle→LoadedImage→DeviceHandle→
@@ -3193,6 +3209,8 @@ LispObject lisp_builtins_init(void) {
     env = lisp_env_extend(env, lisp_intern("car"), lisp_make_builtin(lisp_builtin_car));
     env = lisp_env_extend(env, lisp_intern("cdr"), lisp_make_builtin(lisp_builtin_cdr));
     env = lisp_env_extend(env, lisp_intern("cons"), lisp_make_builtin(lisp_builtin_cons));
+    env = lisp_env_extend(env, lisp_intern("funcall"), lisp_make_builtin(lisp_builtin_funcall));
+    env = lisp_env_extend(env, lisp_intern("apply"), lisp_make_builtin(lisp_builtin_apply));
     env = lisp_env_extend(env, lisp_intern("eq"), lisp_make_builtin(lisp_builtin_eq));
     env = lisp_env_extend(env, lisp_intern("atom"), lisp_make_builtin(lisp_builtin_atom));
     env = lisp_env_extend(env, lisp_intern("symbolp"), lisp_make_builtin(lisp_builtin_symbolp));

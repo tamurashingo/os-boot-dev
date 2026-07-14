@@ -50,6 +50,32 @@
       nil
       (cons (fn (car lst)) (mapcar fn (cdr lst)))))
 
+; milestone61: funcall/apply(C側のlisp_applyへの薄いラッパー、コンパイル済み・
+; インタプリタ・ビルトインいずれのクロージャも一貫して呼び出せる)を使って、
+; fnがローカル変数(仮引数)の場合の呼び出しディスパッチも検証する。CLのreduceと
+; 異なりinitは必須(空リストの場合の初期値をfnから逆算する仕組みは持たない)、
+; 2引数のみサポートする(明示的な範囲の限定、append/>等と同じ方針)
+(defun reduce (fn lst init)
+  (if (null lst)
+      init
+      (reduce fn (cdr lst) (funcall fn init (car lst)))))
+
+; predは2引数の述語(a bでa<bならt相当)。挿入ソート(O(n^2))で十分な規模の想定
+; (このLisp処理系にheap-remaining程度の性能インセンティブしか無いため、複雑な
+; アルゴリズムを導入する理由が無い)。applyは(pred a b)の代わりに明示的に使い、
+; 引数リストを経由する呼び出し経路(funcallとは異なる)も一貫して動くことを検証する
+(defun sort-insert (pred x lst)
+  (if (null lst)
+      (cons x nil)
+      (if (apply pred (list x (car lst)))
+          (cons x lst)
+          (cons (car lst) (sort-insert pred x (cdr lst))))))
+
+(defun sort (pred lst)
+  (if (null lst)
+      nil
+      (sort-insert pred (car lst) (sort pred (cdr lst)))))
+
 ; --- コンパイラフロントエンド: マクロ展開 (milestone 40, documents/lisp_vm.md 目標2着手) ---
 ; macroexpand-all は既存の macroexpand-1 (milestone 21) を式全体に再帰的に適用し、
 ; 入力S式からマクロ呼び出しを完全に消し去る。quote/quasiquoteの内側はデータであり
