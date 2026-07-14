@@ -476,6 +476,7 @@ EFI_STATUS EFIAPI EfiMain(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable)
             lisp_symbols_init();
             global_env = lisp_builtins_init();
             lisp_load_boot_file("stdlib.lisp"); // milestone 29: 標準ライブラリを起動時に読み込む
+            lisp_load_boot_file("compiler.lisp"); // milestone 63: コンパイラ本体を分割したファイルを読み込む
             lisp_setjmp_selftest(SystemTable); // milestone 30: setjmp/longjmp自己テスト
             lisp_vm_gc_root_selftest_run(SystemTable); // milestone 34: VMデータスタックGCルート自己テスト
             lisp_vm_arith_selftest_run(SystemTable); // milestone 35: VM最小実行ループ自己テスト
