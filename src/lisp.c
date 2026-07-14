@@ -2910,7 +2910,16 @@ LispObject lisp_builtin_vm_make_closure(LispObject args) {
         }
         LispObject b = lisp_car(cur);
         lisp_assert_fixnum(b);
-        bytecode[bytecode_len++] = (unsigned char)lisp_fixnum_value(b);
+        long long b_value = lisp_fixnum_value(b);
+        if (b_value < 0 || b_value > 255) {
+            // milestone 66: low-byte/high-byte(lisp/compiler.lisp)が2byte(0-65535)
+            // オペランドをリトルエンディアン分割する際、実際のオペランド値(ジャンプ先
+            // オフセット・定数プール/ローカル/upvalue索引)が65535を超えるとhigh-byteが
+            // 255を超える値を返し、下のキャストでサイレントに切り捨てられてバイトコードが
+            // 静かに破損する。ここで1byteに収まらない値を明示的なpanicで落とす
+            lisp_panic_vm_bridge_limit_exceeded(L"vm-make-closure: bytecode byte out of range", 255);
+        }
+        bytecode[bytecode_len++] = (unsigned char)b_value;
         cur = lisp_cdr(cur);
     }
 
