@@ -18,6 +18,15 @@
   (and (eq (eq (quote foo) :foo) nil)
        (eq (quote foo) (quote foo))))
 
+; milestone 73: *package*が通常のdefvarと同じ動的変数として確立されており、既定値が
+; nilでない(=common-lisp-userパッケージオブジェクト)ことを確認する。*package*自身の
+; パッケージオブジェクトはこの時点ではLispからfind-package等で取り出せないため
+; (milestone75)、eqで直接比較はできず、special-variable-pとnilでないことのみ検証する。
+(defun run-test-package-star-package-var ()
+  (and (special-variable-p (quote *package*))
+       (eq (eq *package* nil) nil)))
+
 (defun run-test-package ()
   (and (run-test-package-keyword-identity)
-       (run-test-package-namespace-separation)))
+       (run-test-package-namespace-separation)
+       (run-test-package-star-package-var)))

@@ -859,6 +859,11 @@ static LispObject lisp_make_package_object(const char *name, int is_keyword_pack
 static LispObject global_packages = LISP_NIL;
 static LispObject lisp_cl_user_package;
 static LispObject lisp_keyword_package;
+// milestone 73: 現在のパッケージを指す動的変数*package*のシンボル。lisp_internが読む
+// ため、lisp_packages_init内でlisp_intern自身より先にlisp_intern_in_packageで直接
+// internし、is_special/valueをdefvarと同じ形で直接セットアップする（*macroexpand-hook*と
+// 同じパターン）
+static LispObject lisp_sym_package;
 
 // 現時点ではLispからは使わない内部APIだが、将来の`find-package`相当の土台として用意しておく
 static LispObject lisp_find_package(const char *name) {
@@ -881,11 +886,6 @@ static LispObject lisp_make_package(const char *name, int is_keyword_package) {
     LispObject pkg = lisp_make_package_object(name, is_keyword_package);
     global_packages = lisp_cons(pkg, global_packages);
     return pkg;
-}
-
-void lisp_packages_init(void) {
-    lisp_cl_user_package = lisp_make_package("common-lisp-user", 0);
-    lisp_keyword_package = lisp_make_package("keyword", 1);
 }
 
 // 同じ名前でintern済みのシンボルがpkg内にあれば同一のLispObjectを返す（eqで比較可能にする）。
@@ -927,8 +927,21 @@ LispObject lisp_intern_in_package(LispObject pkg, const char *name) {
     return obj;
 }
 
+void lisp_packages_init(void) {
+    lisp_cl_user_package = lisp_make_package("common-lisp-user", 0);
+    lisp_keyword_package = lisp_make_package("keyword", 1);
+
+    // *package*自身はlisp_internではなくlisp_intern_in_packageで直接common-lisp-userへ
+    // internする。lisp_internはこの後*package*の値を読むように切り替えるため、
+    // ここで先に確立しておかないと*package*を確立するためのintern呼び出しが循環する
+    lisp_sym_package = lisp_intern_in_package(lisp_cl_user_package, "*package*");
+    LispSymbol *pkg_var_cell = lisp_symbol_cell(lisp_sym_package);
+    pkg_var_cell->value = lisp_cl_user_package;
+    pkg_var_cell->is_special = 1;
+}
+
 LispObject lisp_intern(const char *name) {
-    return lisp_intern_in_package(lisp_cl_user_package, name);
+    return lisp_intern_in_package(lisp_symbol_cell(lisp_sym_package)->value, name);
 }
 
 static LispObject lisp_intern_keyword(const char *name) {
