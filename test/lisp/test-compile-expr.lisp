@@ -57,14 +57,14 @@
   ; assembleした最終バイト列(ラベル解決済みの絶対offsetのみが残る)で比較する
   (let ((ctx (compile-make-ctx)))
     (let ((bytes (assemble (compile-expr '(if 1 2 3) ctx (compile-make-top-scope)))))
-      (and (struct-eq bytes (list 0 0 4 8 0 1 3 10 0 2))
+      (and (struct-eq bytes (list 0 0 0 4 12 0 0 1 0 3 15 0 0 2 0))
            (struct-eq (compile-ctx-constants ctx) (list 1 2 3))))))
 
 (defun run-test-compile-expr-if-without-else ()
   ; (if 0 1)。elseを省略するとnilが定数として登録される
   (let ((ctx (compile-make-ctx)))
     (let ((bytes (assemble (compile-expr '(if 0 1) ctx (compile-make-top-scope)))))
-      (and (struct-eq bytes (list 0 0 4 8 0 1 3 10 0 2))
+      (and (struct-eq bytes (list 0 0 0 4 12 0 0 1 0 3 15 0 0 2 0))
            (struct-eq (compile-ctx-constants ctx) (list 0 1 nil))))))
 
 (defun run-test-compile-expr-nested-if ()
@@ -72,7 +72,7 @@
   ; ctxの定数プールが内側外側を通して正しく1つに保たれることを検証する
   (let ((ctx (compile-make-ctx)))
     (let ((bytes (assemble (compile-expr '(if 1 (if 2 3 4) 5) ctx (compile-make-top-scope)))))
-      (and (struct-eq bytes (list 0 0 4 16 0 1 4 12 0 2 3 14 0 3 3 18 0 4))
+      (and (struct-eq bytes (list 0 0 0 4 24 0 0 1 0 4 18 0 0 2 0 3 21 0 0 3 0 3 27 0 0 4 0))
            (struct-eq (compile-ctx-constants ctx) (list 1 2 3 4 5))))))
 
 ; --- milestone43: コンパイル時レキシカル環境とlet/変数参照/setq ---
@@ -82,7 +82,7 @@
   ; 本体のxはOP_LOAD_LOCAL 0に解決される
   (let ((ctx (compile-make-ctx)))
     (let ((bytes (assemble (compile-expr '(let ((x 5)) x) ctx (compile-make-top-scope)))))
-      (and (struct-eq bytes (list 0 0 7 5 0))
+      (and (struct-eq bytes (list 0 0 0 7 5 0 0))
            (struct-eq (compile-ctx-constants ctx) (list 5))))))
 
 (defun run-test-compile-expr-let-multiple-bindings ()
@@ -90,7 +90,7 @@
   ; 本体のyはOP_LOAD_LOCAL 1に解決される
   (let ((ctx (compile-make-ctx)))
     (let ((bytes (assemble (compile-expr '(let ((x 1) (y 2)) y) ctx (compile-make-top-scope)))))
-      (and (struct-eq bytes (list 0 0 7 0 1 7 5 1))
+      (and (struct-eq bytes (list 0 0 0 7 0 1 0 7 5 1 0))
            (struct-eq (compile-ctx-constants ctx) (list 1 2))))))
 
 (defun run-test-compile-expr-let-setq ()
@@ -98,7 +98,7 @@
   ; 同じスロットを読み直し、代入した値2をそのまま式の値として残す
   (let ((ctx (compile-make-ctx)))
     (let ((bytes (assemble (compile-expr '(let ((x 1)) (setq x 2)) ctx (compile-make-top-scope)))))
-      (and (struct-eq bytes (list 0 0 7 0 1 6 0 5 0))
+      (and (struct-eq bytes (list 0 0 0 7 0 1 0 6 0 0 5 0 0))
            (struct-eq (compile-ctx-constants ctx) (list 1 2))))))
 
 (defun run-test-compile-expr-let-nested-shadow ()
@@ -106,7 +106,7 @@
   ; 本体のxは内側の束縛(slot1)を正しくシャドーイングする(外側slot0は読まれない)
   (let ((ctx (compile-make-ctx)))
     (let ((bytes (assemble (compile-expr '(let ((x 1)) (let ((x 2)) x)) ctx (compile-make-top-scope)))))
-      (and (struct-eq bytes (list 0 0 7 0 1 7 5 1))
+      (and (struct-eq bytes (list 0 0 0 7 0 1 0 7 5 1 0))
            (struct-eq (compile-ctx-constants ctx) (list 1 2))))))
 
 (defun run-test-compile-expr-let-unbound-symbol-falls-back ()
@@ -115,7 +115,7 @@
   ; 自己評価的な定数へフォールバックしていたが、それは誤りだったため置き換えた)
   (let ((ctx (compile-make-ctx)))
     (let ((bytes (assemble (compile-expr '(let ((x 1)) y) ctx (compile-make-top-scope)))))
-      (and (struct-eq bytes (list 0 0 7 16 1))
+      (and (struct-eq bytes (list 0 0 0 7 16 1 0))
            (struct-eq (compile-ctx-constants ctx) (list 1 'y))))))
 
 (defun run-test-compile-expr-let-parallel-bindings-dont-see-each-other ()
@@ -124,7 +124,7 @@
   ; グローバル参照(OP_GLOBAL_REF)としてコンパイルされる(milestone51)
   (let ((ctx (compile-make-ctx)))
     (let ((bytes (assemble (compile-expr '(let ((x 1) (y x)) y) ctx (compile-make-top-scope)))))
-      (and (struct-eq bytes (list 0 0 7 16 1 7 5 1))
+      (and (struct-eq bytes (list 0 0 0 7 16 1 0 7 5 1 0))
            (struct-eq (compile-ctx-constants ctx) (list 1 'x))))))
 
 (defun run-test-compile-expr-let-with-if ()
@@ -132,7 +132,7 @@
   ; 正しく渡り、then節のxがOP_LOAD_LOCAL 0に解決されることを検証する
   (let ((ctx (compile-make-ctx)))
     (let ((bytes (assemble (compile-expr '(let ((x 5)) (if 1 x 9)) ctx (compile-make-top-scope)))))
-      (and (struct-eq bytes (list 0 0 7 0 1 4 11 5 0 3 13 0 2))
+      (and (struct-eq bytes (list 0 0 0 7 0 1 0 4 16 0 5 0 0 3 19 0 0 2 0))
            (struct-eq (compile-ctx-constants ctx) (list 5 1 9))))))
 
 ; --- milestone44: compile-expr(lambdaとクロージャ捕捉) ---
@@ -143,18 +143,18 @@
   ; (milestone46: compile-lambdaが本体コード末尾に明示的にOP_RETURNを追加するようになった)
   (let ((ctx (compile-make-ctx)))
     (let ((bytes (assemble (compile-expr '(lambda (x) x) ctx (compile-make-top-scope)))))
-      (and (struct-eq bytes (list 9 0))
+      (and (struct-eq bytes (list 9 0 0))
            (struct-eq (compile-ctx-constants ctx)
-                      (list (list 'closure-template 1 (list 5 0 2) nil nil)))))))
+                      (list (list 'closure-template 1 (list 5 0 0 2) nil nil)))))))
 
 (defun run-test-compile-expr-lambda-nargs ()
   ; (lambda (x y) x) -> 仮引数は宣言順にslot0,1へ割り当てられ、パッケージの
   ; 2番目の要素(nargs)が2になることを検証する
   (let ((ctx (compile-make-ctx)))
     (let ((bytes (assemble (compile-expr '(lambda (x y) x) ctx (compile-make-top-scope)))))
-      (and (struct-eq bytes (list 9 0))
+      (and (struct-eq bytes (list 9 0 0))
            (struct-eq (compile-ctx-constants ctx)
-                      (list (list 'closure-template 2 (list 5 0 2) nil nil)))))))
+                      (list (list 'closure-template 2 (list 5 0 0 2) nil nil)))))))
 
 (defun run-test-compile-expr-lambda-captures-outer-local ()
   ; (let ((n 5)) (lambda () n)) -> nはlambdaの外側scopeのローカル(slot0)なので、
@@ -162,9 +162,9 @@
   ; 本体はOP_LOAD_UPVALUE 0に解決される
   (let ((ctx (compile-make-ctx)))
     (let ((bytes (assemble (compile-expr '(let ((n 5)) (lambda () n)) ctx (compile-make-top-scope)))))
-      (and (struct-eq bytes (list 0 0 7 9 1))
+      (and (struct-eq bytes (list 0 0 0 7 9 1 0))
            (struct-eq (compile-ctx-constants ctx)
-                      (list 5 (list 'closure-template 0 (list 10 0 2) nil (list (cons 0 0)))))))))
+                      (list 5 (list 'closure-template 0 (list 10 0 0 2) nil (list (cons 0 0)))))))))
 
 (defun run-test-compile-expr-lambda-nested-capture-flattens ()
   ; (let ((n 5)) (lambda () (lambda () n))) -> nを直接使うのは2段内側のlambdaだけ。
@@ -173,9 +173,9 @@
   ; フラット化できることを検証する
   (let ((ctx (compile-make-ctx)))
     (let ((bytes (assemble (compile-expr '(let ((n 5)) (lambda () (lambda () n))) ctx (compile-make-top-scope)))))
-      (let ((innermost-package (list 'closure-template 0 (list 10 0 2) nil (list (cons 1 0)))))
-        (let ((middle-package (list 'closure-template 0 (list 9 0 2) (list innermost-package) (list (cons 0 0)))))
-          (and (struct-eq bytes (list 0 0 7 9 1))
+      (let ((innermost-package (list 'closure-template 0 (list 10 0 0 2) nil (list (cons 1 0)))))
+        (let ((middle-package (list 'closure-template 0 (list 9 0 0 2) (list innermost-package) (list (cons 0 0)))))
+          (and (struct-eq bytes (list 0 0 0 7 9 1 0))
                (struct-eq (compile-ctx-constants ctx) (list 5 middle-package))))))))
 
 (defun run-test-compile-expr-lambda-two-captures-memoized ()
@@ -184,8 +184,8 @@
   ; 増えず(memoize)、両方の参照が同じOP_LOAD_UPVALUE 1に解決されることを検証する
   (let ((ctx (compile-make-ctx)))
     (let ((bytes (assemble (compile-expr '(let ((a 1) (b 2)) (lambda () (if a b b))) ctx (compile-make-top-scope)))))
-      (let ((package (list 'closure-template 0 (list 10 0 4 8 10 1 3 10 10 1 2) nil (list (cons 0 0) (cons 0 1)))))
-        (and (struct-eq bytes (list 0 0 7 0 1 7 9 2))
+      (let ((package (list 'closure-template 0 (list 10 0 0 4 12 0 10 1 0 3 15 0 10 1 0 2) nil (list (cons 0 0) (cons 0 1)))))
+        (and (struct-eq bytes (list 0 0 0 7 0 1 0 7 9 2 0))
              (struct-eq (compile-ctx-constants ctx) (list 1 2 package)))))))
 
 (defun run-test-compile-expr-lambda-param-and-capture-together ()
@@ -194,8 +194,8 @@
   ; 1つの本体の中で共存できることを検証する
   (let ((ctx (compile-make-ctx)))
     (let ((bytes (assemble (compile-expr '(let ((n 100)) (lambda (x) (if x n x))) ctx (compile-make-top-scope)))))
-      (let ((package (list 'closure-template 1 (list 5 0 4 8 10 0 3 10 5 0 2) nil (list (cons 0 0)))))
-        (and (struct-eq bytes (list 0 0 7 9 1))
+      (let ((package (list 'closure-template 1 (list 5 0 0 4 12 0 10 0 0 3 15 0 5 0 0 2) nil (list (cons 0 0)))))
+        (and (struct-eq bytes (list 0 0 0 7 9 1 0))
              (struct-eq (compile-ctx-constants ctx) (list 100 package)))))))
 
 ; --- milestone45: compile-expr(関数呼び出し・プリミティブ呼び出し) ---
@@ -205,20 +205,20 @@
   ; carになる1を先に、cdrになる2を後にコンパイルして積む
   (let ((ctx (compile-make-ctx)))
     (let ((bytes (assemble (compile-expr '(cons 1 2) ctx (compile-make-top-scope)))))
-      (and (struct-eq bytes (list 0 0 0 1 12))
+      (and (struct-eq bytes (list 0 0 0 0 1 0 12))
            (struct-eq (compile-ctx-constants ctx) (list 1 2))))))
 
 (defun run-test-compile-expr-car ()
   ; (car (cons 1 2)) -> 引数式のコンパイル結果の直後にOP_CARを1つ追加するだけ
   (let ((ctx (compile-make-ctx)))
     (let ((bytes (assemble (compile-expr '(car (cons 1 2)) ctx (compile-make-top-scope)))))
-      (and (struct-eq bytes (list 0 0 0 1 12 13))
+      (and (struct-eq bytes (list 0 0 0 0 1 0 12 13))
            (struct-eq (compile-ctx-constants ctx) (list 1 2))))))
 
 (defun run-test-compile-expr-cdr ()
   (let ((ctx (compile-make-ctx)))
     (let ((bytes (assemble (compile-expr '(cdr (cons 1 2)) ctx (compile-make-top-scope)))))
-      (and (struct-eq bytes (list 0 0 0 1 12 14))
+      (and (struct-eq bytes (list 0 0 0 0 1 0 12 14))
            (struct-eq (compile-ctx-constants ctx) (list 1 2))))))
 
 (defun run-test-compile-expr-eq ()
@@ -226,7 +226,7 @@
   ; 発行するため、同じ値1でもconstantsには2回登録される
   (let ((ctx (compile-make-ctx)))
     (let ((bytes (assemble (compile-expr '(eq 1 1) ctx (compile-make-top-scope)))))
-      (and (struct-eq bytes (list 0 0 0 1 15))
+      (and (struct-eq bytes (list 0 0 0 0 1 0 15))
            (struct-eq (compile-ctx-constants ctx) (list 1 1))))))
 
 (defun run-test-compile-expr-call-simple ()
@@ -235,8 +235,8 @@
   ; その後に積んでからOP_CALL 1を発行する
   (let ((ctx (compile-make-ctx)))
     (let ((bytes (assemble (compile-expr '(let ((f (lambda (x) x))) (f 5)) ctx (compile-make-top-scope)))))
-      (let ((package (list 'closure-template 1 (list 5 0 2) nil nil)))
-        (and (struct-eq bytes (list 9 0 7 0 1 5 0 8 1))
+      (let ((package (list 'closure-template 1 (list 5 0 0 2) nil nil)))
+        (and (struct-eq bytes (list 9 0 0 7 0 1 0 5 0 0 8 1 0))
              (struct-eq (compile-ctx-constants ctx) (list package 5)))))))
 
 (defun run-test-compile-expr-call-immediate-lambda-multiple-args ()
@@ -246,8 +246,8 @@
   ; 生成コード)が積まれてからOP_CALL 2が発行される
   (let ((ctx (compile-make-ctx)))
     (let ((bytes (assemble (compile-expr '((lambda (x y) x) 1 2) ctx (compile-make-top-scope)))))
-      (let ((package (list 'closure-template 2 (list 5 0 2) nil nil)))
-        (and (struct-eq bytes (list 0 0 0 1 9 2 8 2))
+      (let ((package (list 'closure-template 2 (list 5 0 0 2) nil nil)))
+        (and (struct-eq bytes (list 0 0 0 0 1 0 9 2 0 8 2 0))
              (struct-eq (compile-ctx-constants ctx) (list 1 2 package)))))))
 
 (defun run-test-compile-expr-call-primitive-composition ()
@@ -255,7 +255,7 @@
   ; 呼び出しの引数の中でさらに別のプリミティブ呼び出しが使われるケース
   (let ((ctx (compile-make-ctx)))
     (let ((bytes (assemble (compile-expr '(cons (car (quote (a b))) 3) ctx (compile-make-top-scope)))))
-      (and (struct-eq bytes (list 0 0 13 0 1 12))
+      (and (struct-eq bytes (list 0 0 0 13 0 1 0 12))
            (struct-eq (compile-ctx-constants ctx) (list (list 'a 'b) 3))))))
 
 (defun run-test-compile-expr ()

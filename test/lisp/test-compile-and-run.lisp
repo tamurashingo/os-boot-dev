@@ -95,7 +95,7 @@
 ; あらかじめvm-make-closureでコンパイル済みクロージャを作って束縛しておく((lambda (x) (+ x 1))相当)
 (defvar *compile51-global-fn*
   (vm-make-closure 1
-                    (list *op-load-local* 0 *op-const* 0 *op-add* *op-return*)
+                    (list *op-load-local* 0 0 *op-const* 0 0 *op-add* *op-return*)
                     (list 1)
                     nil))
 
@@ -118,7 +118,7 @@
 ; ウォークインタプリタ(lisp_eval)から直接コンパイル済みクロージャを呼び出す
 (defun run-test-lisp-apply-compiled-closure-direct ()
   (let ((f (vm-make-closure 1
-                             (list *op-load-local* 0 *op-const* 0 *op-add* *op-return*)
+                             (list *op-load-local* 0 0 *op-const* 0 0 *op-add* *op-return*)
                              (list 1)
                              nil)))
     (eq (f 10) 11)))
@@ -129,7 +129,7 @@
 ; 第一級の値として扱えることを確認する
 (defun run-test-lisp-apply-compiled-closure-via-mapcar ()
   (let ((f (vm-make-closure 1
-                             (list *op-load-local* 0 *op-const* 0 *op-add* *op-return*)
+                             (list *op-load-local* 0 0 *op-const* 0 0 *op-add* *op-return*)
                              (list 1)
                              nil)))
     (struct-eq (mapcar f (list 1 2 3)) (list 2 3 4))))

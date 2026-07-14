@@ -46,7 +46,7 @@ static void lisp_vm_gc_root_selftest_run(EFI_SYSTEM_TABLE *SystemTable) {
 // lisp_vm_execに渡して3が返ることを確認する。定数オブジェクトはlisp_make_fixnum相当の
 // 内部APIを直接使わず、既に公開されているlisp_read_from_bufferを経由して作る
 static void lisp_vm_arith_selftest_run(EFI_SYSTEM_TABLE *SystemTable) {
-    unsigned char code[] = { OP_CONST, 0, OP_CONST, 1, OP_ADD, OP_RETURN };
+    unsigned char code[] = { OP_CONST, 0, 0, OP_CONST, 1, 0, OP_ADD, OP_RETURN };
     LispObject constants[2] = { lisp_read_from_buffer("1"), lisp_read_from_buffer("2") };
     LispObject fn = lisp_make_compiled(code, sizeof(code), constants, 2, 0);
     LispObject result = lisp_vm_exec(fn);
@@ -64,28 +64,28 @@ static void lisp_vm_arith_selftest_run(EFI_SYSTEM_TABLE *SystemTable) {
 // を手動バイトコードで構築し、testがnil/非nilそれぞれの場合に正しい分岐を通り、
 // ローカル変数のボックス経由での読み書きも正しく行われることを確認する。
 //   [0]  OP_CONST 0        ; 10をpush
-//   [2]  OP_MAKE_LOCAL      ; local0 = box(10)
-//   [3]  OP_CONST 1         ; testをpush
-//   [5]  OP_JUMP_IF_FALSE 13 ; nilならelseへ
-//   [7]  OP_CONST 2         ; 20をpush (then)
-//   [9]  OP_STORE_LOCAL 0   ; local0 <- 20
-//   [11] OP_JUMP 17          ; elseを飛び越す
-//   [13] OP_CONST 3         ; 30をpush (else)
-//   [15] OP_STORE_LOCAL 0   ; local0 <- 30
-//   [17] OP_LOAD_LOCAL 0    ; local0を読む
-//   [19] OP_RETURN
+//   [3]  OP_MAKE_LOCAL      ; local0 = box(10)
+//   [4]  OP_CONST 1         ; testをpush
+//   [7]  OP_JUMP_IF_FALSE 19 ; nilならelseへ
+//   [10] OP_CONST 2         ; 20をpush (then)
+//   [13] OP_STORE_LOCAL 0   ; local0 <- 20
+//   [16] OP_JUMP 25          ; elseを飛び越す
+//   [19] OP_CONST 3         ; 30をpush (else)
+//   [22] OP_STORE_LOCAL 0   ; local0 <- 30
+//   [25] OP_LOAD_LOCAL 0    ; local0を読む
+//   [28] OP_RETURN
 static void lisp_vm_control_flow_selftest_run(EFI_SYSTEM_TABLE *SystemTable) {
     unsigned char code[] = {
-        OP_CONST, 0,
+        OP_CONST, 0, 0,
         OP_MAKE_LOCAL,
-        OP_CONST, 1,
-        OP_JUMP_IF_FALSE, 13,
-        OP_CONST, 2,
-        OP_STORE_LOCAL, 0,
-        OP_JUMP, 17,
-        OP_CONST, 3,
-        OP_STORE_LOCAL, 0,
-        OP_LOAD_LOCAL, 0,
+        OP_CONST, 1, 0,
+        OP_JUMP_IF_FALSE, 19, 0,
+        OP_CONST, 2, 0,
+        OP_STORE_LOCAL, 0, 0,
+        OP_JUMP, 25, 0,
+        OP_CONST, 3, 0,
+        OP_STORE_LOCAL, 0, 0,
+        OP_LOAD_LOCAL, 0, 0,
         OP_RETURN
     };
 
@@ -122,28 +122,28 @@ static void lisp_vm_control_flow_selftest_run(EFI_SYSTEM_TABLE *SystemTable) {
 // 見せかけではない本物の再帰呼び出しであり、2段のネストしたスタックフレーム構築・
 // 引数ボックス化・戻り値伝播を検証する
 //   [0]  OP_LOAD_LOCAL 1     ; n をpush
-//   [2]  OP_JUMP_IF_FALSE 16 ; nilなら基底部へ
-//   [4]  OP_LOAD_LOCAL 0     ; self をpush（次段呼び出しのself引数）
-//   [6]  OP_CONST 0          ; nil をpush（次段呼び出しのn引数）
-//   [8]  OP_LOAD_LOCAL 0     ; self をpush（呼び出す関数参照）
-//   [10] OP_CALL 2           ; self(self, nil) を呼び出す
-//   [12] OP_LOAD_LOCAL 1     ; 自分のn をpush
-//   [14] OP_ADD               ; 再帰結果 + 自分のn
-//   [15] OP_RETURN
-//   [16] OP_CONST 1          ; 0 をpush（基底部）
-//   [18] OP_RETURN
+//   [3]  OP_JUMP_IF_FALSE 23 ; nilなら基底部へ
+//   [6]  OP_LOAD_LOCAL 0     ; self をpush（次段呼び出しのself引数）
+//   [9]  OP_CONST 0          ; nil をpush（次段呼び出しのn引数）
+//   [12] OP_LOAD_LOCAL 0     ; self をpush（呼び出す関数参照）
+//   [15] OP_CALL 2           ; self(self, nil) を呼び出す
+//   [18] OP_LOAD_LOCAL 1     ; 自分のn をpush
+//   [21] OP_ADD               ; 再帰結果 + 自分のn
+//   [22] OP_RETURN
+//   [23] OP_CONST 1          ; 0 をpush（基底部）
+//   [26] OP_RETURN
 static void lisp_vm_call_selftest_run(EFI_SYSTEM_TABLE *SystemTable) {
     unsigned char f_code[] = {
-        OP_LOAD_LOCAL, 1,
-        OP_JUMP_IF_FALSE, 16,
-        OP_LOAD_LOCAL, 0,
-        OP_CONST, 0,
-        OP_LOAD_LOCAL, 0,
-        OP_CALL, 2,
-        OP_LOAD_LOCAL, 1,
+        OP_LOAD_LOCAL, 1, 0,
+        OP_JUMP_IF_FALSE, 23, 0,
+        OP_LOAD_LOCAL, 0, 0,
+        OP_CONST, 0, 0,
+        OP_LOAD_LOCAL, 0, 0,
+        OP_CALL, 2, 0,
+        OP_LOAD_LOCAL, 1, 0,
         OP_ADD,
         OP_RETURN,
-        OP_CONST, 1,
+        OP_CONST, 1, 0,
         OP_RETURN
     };
     LispObject nil = lisp_read_from_buffer("()");
@@ -154,10 +154,10 @@ static void lisp_vm_call_selftest_run(EFI_SYSTEM_TABLE *SystemTable) {
     // driver: f(f, 5) を呼び出す。driverの定数配列はfの構築が終わった後に組むので、
     // f自身が自分の値を知らなくてもここでは自己参照の鶏と卵問題は生じない
     unsigned char driver_code[] = {
-        OP_CONST, 0,
-        OP_CONST, 1,
-        OP_CONST, 0,
-        OP_CALL, 2,
+        OP_CONST, 0, 0,
+        OP_CONST, 1, 0,
+        OP_CONST, 0, 0,
+        OP_CALL, 2, 0,
         OP_RETURN
     };
     LispObject five = lisp_read_from_buffer("5");
@@ -185,22 +185,22 @@ static void lisp_vm_call_selftest_run(EFI_SYSTEM_TABLE *SystemTable) {
 //   - c1とc2はmake-counterの呼び出しごとに異なるボックスを捕捉し、状態が独立している
 //     （c2が10ベースの値へ汚染されていれば合計は124にならない）
 //   inc_code:
-//     [0] OP_LOAD_UPVALUE 0   ; 現在のnをpush
-//     [2] OP_CONST 0           ; 1をpush
-//     [4] OP_ADD                 ; n+1
-//     [5] OP_STORE_UPVALUE 0  ; upvalue[0]へ書き戻す
-//     [7] OP_LOAD_UPVALUE 0   ; 更新後のnをpushして返り値にする
-//     [9] OP_RETURN
+//     [0]  OP_LOAD_UPVALUE 0   ; 現在のnをpush
+//     [3]  OP_CONST 0           ; 1をpush
+//     [6]  OP_ADD                 ; n+1
+//     [7]  OP_STORE_UPVALUE 0  ; upvalue[0]へ書き戻す
+//     [10] OP_LOAD_UPVALUE 0   ; 更新後のnをpushして返り値にする
+//     [13] OP_RETURN
 //   make_counter_code:
 //     [0] OP_MAKE_CLOSURE 0    ; 定数0番（inc template）からインスタンスを作る
-//     [2] OP_RETURN
+//     [3] OP_RETURN
 static void lisp_vm_closure_selftest_run(EFI_SYSTEM_TABLE *SystemTable) {
     unsigned char inc_code[] = {
-        OP_LOAD_UPVALUE, 0,
-        OP_CONST, 0,
+        OP_LOAD_UPVALUE, 0, 0,
+        OP_CONST, 0, 0,
         OP_ADD,
-        OP_STORE_UPVALUE, 0,
-        OP_LOAD_UPVALUE, 0,
+        OP_STORE_UPVALUE, 0, 0,
+        OP_LOAD_UPVALUE, 0, 0,
         OP_RETURN
     };
     LispObject one = lisp_read_from_buffer("1");
@@ -211,7 +211,7 @@ static void lisp_vm_closure_selftest_run(EFI_SYSTEM_TABLE *SystemTable) {
     lisp_compiled_set_upvalue_descs(inc, lisp_make_upvalue_descs(desc_kinds, desc_indices, 1));
 
     unsigned char make_counter_code[] = {
-        OP_MAKE_CLOSURE, 0,
+        OP_MAKE_CLOSURE, 0, 0,
         OP_RETURN
     };
     LispObject make_counter_constants[1] = { inc };
@@ -221,21 +221,21 @@ static void lisp_vm_closure_selftest_run(EFI_SYSTEM_TABLE *SystemTable) {
     // driver: c1=make-counter(10), c2=make-counter(100)を作り、c1を2回・c2を1回呼んで
     // 11+12+101=124を返す
     unsigned char driver_code[] = {
-        OP_CONST, 0,
-        OP_CONST, 2,
-        OP_CALL, 1,
+        OP_CONST, 0, 0,
+        OP_CONST, 2, 0,
+        OP_CALL, 1, 0,
         OP_MAKE_LOCAL,
-        OP_CONST, 1,
-        OP_CONST, 2,
-        OP_CALL, 1,
+        OP_CONST, 1, 0,
+        OP_CONST, 2, 0,
+        OP_CALL, 1, 0,
         OP_MAKE_LOCAL,
-        OP_LOAD_LOCAL, 0,
-        OP_CALL, 0,
-        OP_LOAD_LOCAL, 0,
-        OP_CALL, 0,
+        OP_LOAD_LOCAL, 0, 0,
+        OP_CALL, 0, 0,
+        OP_LOAD_LOCAL, 0, 0,
+        OP_CALL, 0, 0,
         OP_ADD,
-        OP_LOAD_LOCAL, 1,
-        OP_CALL, 0,
+        OP_LOAD_LOCAL, 1, 0,
+        OP_CALL, 0, 0,
         OP_ADD,
         OP_RETURN
     };
@@ -263,37 +263,37 @@ static void lisp_vm_closure_selftest_run(EFI_SYSTEM_TABLE *SystemTable) {
 // （milestone37）で再帰呼び出し（OP_CALL）し、carval+cdrval+recを返す。milestone37と異なり
 // OP_EQで0との真の比較ができるため、今回は見せかけではない実際のfixnum減算による停止判定になっている
 //   [0]  OP_LOAD_LOCAL 1       ; n をpush
-//   [2]  OP_CONST 0             ; 0 をpush
-//   [4]  OP_EQ                    ; n==0 ?
-//   [5]  OP_JUMP_IF_FALSE 10   ; 等しくなければelseへ
-//   [7]  OP_CONST 0             ; 基底部: 0 をpush
-//   [9]  OP_RETURN
-//   [10] OP_LOAD_LOCAL 1       ; n をpush
-//   [12] OP_LOAD_LOCAL 2       ; counter をpush
-//   [14] OP_CALL 0                ; step = counter()
-//   [16] OP_CONS                  ; pair = cons(n, step)
-//   [17] OP_MAKE_LOCAL           ; local3 = box(pair)
-//   [18] OP_LOAD_LOCAL 3       ; pair をpush
-//   [20] OP_CAR                    ; carval = car(pair)  (== n)
-//   [21] OP_LOAD_LOCAL 3       ; pair をpush
-//   [23] OP_CDR                    ; cdrval = cdr(pair)  (== step)
-//   [24] OP_LOAD_LOCAL 0       ; self をpush（再帰呼び出しのarg1）
-//   [26] OP_LOAD_LOCAL 1       ; n をpush
-//   [28] OP_CONST 1             ; -1 をpush
-//   [30] OP_ADD                    ; n + (-1)   （再帰呼び出しのarg2）
-//   [31] OP_LOAD_LOCAL 2       ; counter をpush（再帰呼び出しのarg3）
-//   [33] OP_LOAD_LOCAL 0       ; self をpush（再帰呼び出しの関数参照）
-//   [35] OP_CALL 3                ; rec = self(self, n-1, counter)
-//   [37] OP_ADD                    ; cdrval + rec
-//   [38] OP_ADD                    ; carval + (cdrval + rec)
-//   [39] OP_RETURN
+//   [3]  OP_CONST 0             ; 0 をpush
+//   [6]  OP_EQ                    ; n==0 ?
+//   [7]  OP_JUMP_IF_FALSE 14   ; 等しくなければelseへ
+//   [10] OP_CONST 0             ; 基底部: 0 をpush
+//   [13] OP_RETURN
+//   [14] OP_LOAD_LOCAL 1       ; n をpush
+//   [17] OP_LOAD_LOCAL 2       ; counter をpush
+//   [20] OP_CALL 0                ; step = counter()
+//   [23] OP_CONS                  ; pair = cons(n, step)
+//   [24] OP_MAKE_LOCAL           ; local3 = box(pair)
+//   [25] OP_LOAD_LOCAL 3       ; pair をpush
+//   [28] OP_CAR                    ; carval = car(pair)  (== n)
+//   [29] OP_LOAD_LOCAL 3       ; pair をpush
+//   [32] OP_CDR                    ; cdrval = cdr(pair)  (== step)
+//   [33] OP_LOAD_LOCAL 0       ; self をpush（再帰呼び出しのarg1）
+//   [36] OP_LOAD_LOCAL 1       ; n をpush
+//   [39] OP_CONST 1             ; -1 をpush
+//   [42] OP_ADD                    ; n + (-1)   （再帰呼び出しのarg2）
+//   [43] OP_LOAD_LOCAL 2       ; counter をpush（再帰呼び出しのarg3）
+//   [46] OP_LOAD_LOCAL 0       ; self をpush（再帰呼び出しの関数参照）
+//   [49] OP_CALL 3                ; rec = self(self, n-1, counter)
+//   [52] OP_ADD                    ; cdrval + rec
+//   [53] OP_ADD                    ; carval + (cdrval + rec)
+//   [54] OP_RETURN
 static void lisp_vm_integrated_selftest_run(EFI_SYSTEM_TABLE *SystemTable) {
     unsigned char inc_code[] = {
-        OP_LOAD_UPVALUE, 0,
-        OP_CONST, 0,
+        OP_LOAD_UPVALUE, 0, 0,
+        OP_CONST, 0, 0,
         OP_ADD,
-        OP_STORE_UPVALUE, 0,
-        OP_LOAD_UPVALUE, 0,
+        OP_STORE_UPVALUE, 0, 0,
+        OP_LOAD_UPVALUE, 0, 0,
         OP_RETURN
     };
     LispObject one = lisp_read_from_buffer("1");
@@ -304,7 +304,7 @@ static void lisp_vm_integrated_selftest_run(EFI_SYSTEM_TABLE *SystemTable) {
     lisp_compiled_set_upvalue_descs(inc, lisp_make_upvalue_descs(desc_kinds, desc_indices, 1));
 
     unsigned char make_counter_code[] = {
-        OP_MAKE_CLOSURE, 0,
+        OP_MAKE_CLOSURE, 0, 0,
         OP_RETURN
     };
     LispObject make_counter_constants[1] = { inc };
@@ -312,28 +312,28 @@ static void lisp_vm_integrated_selftest_run(EFI_SYSTEM_TABLE *SystemTable) {
                                                   make_counter_constants, 1, 1);
 
     unsigned char f_code[] = {
-        OP_LOAD_LOCAL, 1,
-        OP_CONST, 0,
+        OP_LOAD_LOCAL, 1, 0,
+        OP_CONST, 0, 0,
         OP_EQ,
-        OP_JUMP_IF_FALSE, 10,
-        OP_CONST, 0,
+        OP_JUMP_IF_FALSE, 14, 0,
+        OP_CONST, 0, 0,
         OP_RETURN,
-        OP_LOAD_LOCAL, 1,
-        OP_LOAD_LOCAL, 2,
-        OP_CALL, 0,
+        OP_LOAD_LOCAL, 1, 0,
+        OP_LOAD_LOCAL, 2, 0,
+        OP_CALL, 0, 0,
         OP_CONS,
         OP_MAKE_LOCAL,
-        OP_LOAD_LOCAL, 3,
+        OP_LOAD_LOCAL, 3, 0,
         OP_CAR,
-        OP_LOAD_LOCAL, 3,
+        OP_LOAD_LOCAL, 3, 0,
         OP_CDR,
-        OP_LOAD_LOCAL, 0,
-        OP_LOAD_LOCAL, 1,
-        OP_CONST, 1,
+        OP_LOAD_LOCAL, 0, 0,
+        OP_LOAD_LOCAL, 1, 0,
+        OP_CONST, 1, 0,
         OP_ADD,
-        OP_LOAD_LOCAL, 2,
-        OP_LOAD_LOCAL, 0,
-        OP_CALL, 3,
+        OP_LOAD_LOCAL, 2, 0,
+        OP_LOAD_LOCAL, 0, 0,
+        OP_CALL, 3, 0,
         OP_ADD,
         OP_ADD,
         OP_RETURN
@@ -346,13 +346,13 @@ static void lisp_vm_integrated_selftest_run(EFI_SYSTEM_TABLE *SystemTable) {
     // driver: counter=make-counter(0)をf呼び出しのちょうどarg3の位置に積んでから
     // f(f, 3, counter)を呼び出す
     unsigned char driver_code[] = {
-        OP_CONST, 0,
-        OP_CONST, 1,
-        OP_CONST, 2,
-        OP_CONST, 3,
-        OP_CALL, 1,
-        OP_CONST, 0,
-        OP_CALL, 3,
+        OP_CONST, 0, 0,
+        OP_CONST, 1, 0,
+        OP_CONST, 2, 0,
+        OP_CONST, 3, 0,
+        OP_CALL, 1, 0,
+        OP_CONST, 0, 0,
+        OP_CALL, 3, 0,
         OP_RETURN
     };
     LispObject three = lisp_read_from_buffer("3");

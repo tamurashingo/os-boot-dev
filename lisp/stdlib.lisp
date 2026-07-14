@@ -144,9 +144,9 @@
 ; IRは命令のリスト。各要素は次のいずれかの形:
 ;   (label name)          -- 現在位置にnameというラベルを置く。バイトは出力しない
 ;   (opcode)               -- オペランド無しの1byte命令(例: (OP_ADD)、(OP_RETURN))
-;   (opcode n)              -- オペランドnをそのままバイト値として使う2byte命令
+;   (opcode n)              -- オペランドnを2byte(リトルエンディアン)値として使う3byte命令
 ;                              (例: (OP_CONST 0)、(OP_LOAD_LOCAL 1))
-;   (opcode (ref name))    -- オペランドがラベルnameの絶対バイト位置に解決される2byte命令
+;   (opcode (ref name))    -- オペランドがラベルnameの絶対バイト位置に解決される3byte命令
 ;                              (OP_JUMP/OP_JUMP_IF_FALSE用)
 ; オペランドがfixnumかラベル参照(ref name)かは、consかどうか(atom)で判別できるため、
 ; symbolp/numberpのような型判定ビルトインが無くても実装できる(fixnum/symbolはどちらも
@@ -176,9 +176,22 @@
 
 (defun asm-label-p (instr) (eq (car instr) 'label))
 
-; ラベル定義は0byte、オペランド無し命令は1byte、オペランド有り命令は2byte
+; ラベル定義は0byte、オペランド無し命令は1byte、オペランド有り命令は3byte
+; (milestone60: オペランドは元々1byteだったが、defunを既定でコンパイルするようになった結果
+; 実際にジャンプ先/定数indexが255を超える関数が現れ、オペランドを2byte(リトルエンディアン)へ
+; 拡張した。opcode 1byte + オペランド2byte = 3byte)
 (defun asm-instr-length (instr)
-  (if (null (cdr instr)) 1 2))
+  (if (null (cdr instr)) 1 3))
+
+; オペランド値(fixnum、0〜65535を想定)を2byte(リトルエンディアン)へ分割するための
+; 下位byte/上位byteの取り出し。*・/・mod・ashのようなビルトインは存在しないため、
+; +/-/<のみで256を引き続けることで実装する(オペランド値はVM_BRIDGE_MAX_BYTECODE程度に
+; 収まる範囲なので再帰の深さも小さい)
+(defun low-byte (v)
+  (if (< v 256) v (low-byte (- v 256))))
+
+(defun high-byte (v)
+  (if (< v 256) 0 (+ 1 (high-byte (- v 256)))))
 
 ; instrsを先頭から辿り、各labelの出現位置(先頭からの絶対バイトオフセット)を
 ; ((name . offset) ...)というalistとして集める。ラベル自身はバイトを消費しないため、
@@ -204,13 +217,15 @@
       operand
       (asm-label-offset (car (cdr operand)) labels)))
 
-; 1命令分のバイト列を返す(ラベル定義はnil、すなわち0byte)
+; 1命令分のバイト列を返す(ラベル定義はnil、すなわち0byte)。オペランドは2byte
+; (リトルエンディアン、下位byte→上位byteの順)へ分割して出力する
 (defun asm-emit-instr (instr labels)
   (if (asm-label-p instr)
       nil
       (if (null (cdr instr))
           (list (car instr))
-          (list (car instr) (asm-resolve-operand (car (cdr instr)) labels)))))
+          (let ((value (asm-resolve-operand (car (cdr instr)) labels)))
+            (list (car instr) (low-byte value) (high-byte value))))))
 
 (defun asm-emit-all (instrs labels)
   (if (null instrs)
@@ -304,21 +319,37 @@
 ; --- compile-expr: lambdaとクロージャ捕捉 (milestone 44, documents/lisp_vm.md 目標2) ---
 ; milestone43までのenv(単純な(symbol . slot)のalist)を、lambdaの境界をまたいで
 ; 自由変数を解決できる「スコープ」構造に拡張する。1つのスコープは
-;   (locals captures . enclosing)
-; の3要素からなる:
-;   locals    -- このスコープ(関数)自身のローカル変数alist。milestone43のenvと同じ形
-;   captures  -- このスコープがさらに外側から捕捉したupvalueの記録(下記compile-make-captures)
-;   enclosing -- 直接囲む関数のスコープ、トップレベル(囲むlambdaが無い)ならnil
+;   (locals captures next-slot-box . enclosing)
+; の4要素からなる:
+;   locals        -- このスコープ(関数)自身のローカル変数alist。milestone43のenvと同じ形
+;   captures      -- このスコープがさらに外側から捕捉したupvalueの記録(下記compile-make-captures)
+;   next-slot-box -- このスコープが属する関数活性化フレーム全体で「次に割り当てる
+;                    物理フレームスロット番号」を保持するミュータブルな箱(cons、
+;                    ctxの定数カウンタと同じ仕組み)。OP_MAKE_LOCALは一度確保した
+;                    スロットを解放しない(下記compile-let-extend-scopeのコメント参照)
+;                    ため、let同士がifの2分岐のように排他的でなく逐次実行される場合
+;                    (milestone54のand/or/progn等が生成する入れ子)でもスロット番号が
+;                    衝突しないよう、レキシカルな可視性(compile-env-length)ではなく
+;                    この関数全体で共有される単調増加カウンタから割り当てる。lambdaの
+;                    境界(新しい関数活性化フレーム)でのみ新しい箱を作り直す
+;   enclosing     -- 直接囲む関数のスコープ、トップレベル(囲むlambdaが無い)ならnil
 ; トップレベルのcompile-expr呼び出しもnilではなく実体を持つスコープを渡す
 ; (compile-make-top-scope)必要がある。これはcompile-resolveがenclosingの有無だけで
 ; 「もうこれ以上外側を辿れない」を判定し、scopeそのものをnilにはしないという設計の
 ; ため(scope-locals等をnilに対して呼ぶと(car nil)でpanicしてしまう)
-(defun compile-make-scope (locals captures enclosing)
-  (cons locals (cons captures enclosing)))
+(defun compile-make-scope (locals captures next-slot-box enclosing)
+  (cons locals (cons captures (cons next-slot-box enclosing))))
 
 (defun scope-locals (scope) (car scope))
 (defun scope-captures (scope) (car (cdr scope)))
-(defun scope-enclosing (scope) (cdr (cdr scope)))
+(defun scope-next-slot-box (scope) (car (cdr (cdr scope))))
+(defun scope-enclosing (scope) (cdr (cdr (cdr scope))))
+
+(defun compile-make-next-slot-box (initial) (cons initial nil))
+(defun compile-alloc-slot (box)
+  (let ((idx (car box)))
+    (rplaca box (+ idx 1))
+    idx))
 
 ; capturesは「このスコープがまだ捕捉していないupvalueを新規に捕捉した記述子を
 ; 登録していく場所」。desc-ctxはcompile-make-ctxを再利用した(kind . index)記述子の
@@ -335,7 +366,8 @@
   (rplaca (captures-lookup-box captures)
           (cons (cons name idx) (captures-lookup-alist captures))))
 
-(defun compile-make-top-scope () (compile-make-scope nil (compile-make-captures) nil))
+(defun compile-make-top-scope ()
+  (compile-make-scope nil (compile-make-captures) (compile-make-next-slot-box 0) nil))
 
 ; symbol1つをスコープ連鎖に沿って解決する。戻り値は('local . slot)/('upvalue . idx)/nil
 ; のいずれか。まず自分自身のlocalsを見て、無ければ自分がすでに捕捉済みのupvalueの
@@ -395,36 +427,119 @@
 
 ; letはlet*と異なり、全てのinit-formを束縛前の外側scope(この関数の引数scope、
 ; まだ拡張していないもの)で評価する(milestone17のlisp_eval同様、束縛同士が
-; 互いを参照できない並行束縛)。各init-formのコードの直後にOP_MAKE_LOCALを
-; 1つ発行することで、その結果をそのままボックス化して並行に確保していく
-(defun compile-let-bindings (bindings ctx scope)
-  (if (null bindings)
-      nil
-      (compile-concat (compile-expr (car (cdr (car bindings))) ctx scope)
-                      (list (list *op-make-local*))
-                      (compile-let-bindings (cdr bindings) ctx scope))))
+; 互いを参照できない並行束縛)。
+;
+; is_specialな名前(milestone18のdefvar/defparameterで既に確立済みの動的変数)を
+; letで束縛する場合は、milestone57で既知の制限として明記した「真の動的束縛」を
+; ここで実現する。is_specialはdefvarが実際に実行された時点で確定する性質だが、
+; コンパイラ自身がこの処理系上で動くLisp関数である(コンパイル専用の別ステージが
+; 存在しない)ため、compile-let-process-bindingsが今まさにコンパイルしている
+; 時点でspecial-variable-pを直接呼んで判定できる(compile-defvarが自分自身の
+; establish前後でこの値を実行時にしか判定できないのとは違う場面であることに注意)。
+; special名の束縛は、通常のOP_MAKE_LOCALによるレキシカルシャドーイングではなく、
+; 「シンボル自身のvalue(sym->value、lisp_env_lookup/lisp_env_setが最優先で見る
+; 場所)を退避してから書き換え、let脱出時に復元する」という形にコンパイルする。
+;
+; 重要な制約: OP_MAKE_LOCALは値スタックの「最上位」だけを箱化(cons化)する命令で、
+; 深さを指定して特定の位置を箱化することはできない(pop 1つ→push 1つで同じ位置に
+; 置き換えるだけ)。そのため「全bindingのinit-formを先にpushし尽くしてから、まとめて
+; 複数回OP_MAKE_LOCALを呼ぶ」という組み方は成立しない(2回目以降のOP_MAKE_LOCALは
+; 1回目が箱化した値を再び箱化するだけで、それより下の値には決して届かない)。
+; したがってOP_MAKE_LOCALは「値をpushした直後」に必ず1対1で対応させる必要がある。
+;
+; 一方、letの並行束縛semantics(どのinit-formも他のbindingの新しい値を見てはならない)
+; を守るために本当に遅延させなければならないのは、special名の「グローバルの値
+; (sym->value)そのものへの書き込み(OP_GLOBAL_SET)」だけである。push直後に
+; OP_MAKE_LOCALで名前の無い隠しローカルへ値を箱化しておくだけなら、scope-locals
+; にまだ登録していない限り他のどのinit-formからも参照できない(レキシカルには
+; 見つからずcompile-global-ref経由でも、そのシンボルのグローバル値自体はまだ
+; 書き換えていないので古い値が見える)。よってcompile-let-process-bindingsは
+; bindingを先頭から順に1つずつ処理し、各bindingについて次を隣接して行う:
+;   非special名: init-formのコード(元のscope、未拡張)→OP_MAKE_LOCAL
+;                (このslotをlocals-additionsとして記録し、後でscope-localsへ足す)
+;   special名: [OP_GLOBAL_REFで現在値をpush]→OP_MAKE_LOCAL(退避用の隠しslotへ)、
+;              続けてinit-formのコード(元のscope)→OP_MAKE_LOCAL(新しい値用の
+;              隠しslotへ)。この時点ではまだOP_GLOBAL_SETを呼ばないため、後続の
+;              bindingのinit-formが誤って新しい値を見ることはない。
+; 全bindingのpush+箱化が終わった後(compile-letが)、special名の「新しい値」slotを
+; まとめてOP_LOAD_LOCAL→OP_GLOBAL_SETし、ここで初めて実際にグローバルへ反映する
+; (この時点で全init-formの評価は完了済みなので、他のbindingを巻き込む余地は無い)。
+; bodyの実行後、同じ要領で退避slotから読み出してOP_GLOBAL_SETし元の値へ戻す。
+;
+; ただしreturn-fromでbodyから早期脱出した場合はこの復元コードを素通りしてしまう
+; (VMにunwind-protect相当の機構が無いため)。milestone57の既知の制限のうち
+; return-from安全性に関する部分は本milestoneでも意図的に対象外のままとする。
+(defun compile-let-restore-one (entry ctx)
+  (list (list *op-load-local* (cdr entry))
+        (list *op-global-set* (compile-register-const ctx (car entry)))))
 
-; bindingsの各変数名に、外側scopeのlocalsの長さから始まる連番のスロット番号を
-; 割り当てた新しいscopeを返す(compile-let-bindingsがOP_MAKE_LOCALを発行する順序と
-; 一致させるため、先頭の束縛から順に外側localsの長さ、+1、+2...という番号を振る)。
-; letは関数境界をまたがないため、captures/enclosingは元のscopeのものをそのまま
-; 引き継ぎ、locals部分だけを拡張する
-(defun compile-let-extend-scope (bindings scope)
+(defun compile-let-restore-code (restores ctx)
+  (if (null restores)
+      nil
+      (compile-concat (compile-let-restore-one (car restores) ctx)
+                      (compile-let-restore-code (cdr restores) ctx))))
+
+; push-irが値を1つpushするコードである前提で、直後にOP_MAKE_LOCALを連結し新しい
+; slotを割り当てる。(cons ir-with-make-local slot)を返す
+(defun compile-let-push-and-box (push-ir scope)
+  (let ((slot (compile-alloc-slot (scope-next-slot-box scope))))
+    (cons (compile-concat push-ir (list (list *op-make-local*))) slot)))
+
+; bindingsを先頭から順に処理し、(ir locals-additions commits restores)の
+; 4要素リストを返す。ir中のOP_MAKE_LOCALは全てpush直後に隣接しており、
+; special名のOP_GLOBAL_SETは一切含まない(commits/restoresとして呼び出し側へ
+; 返すのみで、実際の発行はcompile-letが全binding処理後にまとめて行う)
+(defun compile-let-process-bindings (bindings ctx scope)
   (if (null bindings)
+      (list nil nil nil nil)
+      (let ((sym (car (car bindings)))
+            (init-form (car (cdr (car bindings)))))
+        (if (special-variable-p sym)
+            (let ((sym-idx (compile-register-const ctx sym)))
+              (let ((saved (compile-let-push-and-box
+                             (list (list *op-global-ref* sym-idx)) scope)))
+                (let ((newval (compile-let-push-and-box
+                               (compile-expr init-form ctx scope) scope)))
+                  (let ((rest (compile-let-process-bindings (cdr bindings) ctx scope)))
+                    (list
+                      (compile-concat (car saved) (car newval) (car rest))
+                      (car (cdr rest))
+                      (cons (cons sym (cdr newval)) (car (cdr (cdr rest))))
+                      (cons (cons sym (cdr saved)) (car (cdr (cdr (cdr rest))))))))))
+            (let ((boxed (compile-let-push-and-box (compile-expr init-form ctx scope) scope)))
+              (let ((rest (compile-let-process-bindings (cdr bindings) ctx scope)))
+                (list
+                  (compile-concat (car boxed) (car rest))
+                  (cons (cons sym (cdr boxed)) (car (cdr rest)))
+                  (car (cdr (cdr rest)))
+                  (car (cdr (cdr (cdr rest)))))))))))
+
+; locals-additions(通常束縛の(sym . slot))を先頭から順にscope-localsへ足していく。
+; special束縛はlocals-additionsに含まれないため、bodyの中でその名前を参照すると
+; レキシカルには見つからずcompile-global-ref(is_special対応)経由で正しく解決される
+(defun compile-let-add-locals (locals-additions scope)
+  (if (null locals-additions)
       scope
-      (compile-let-extend-scope
-        (cdr bindings)
+      (compile-let-add-locals
+        (cdr locals-additions)
         (compile-make-scope
-          (cons (cons (car (car bindings)) (compile-env-length (scope-locals scope)))
-                (scope-locals scope))
+          (cons (car locals-additions) (scope-locals scope))
           (scope-captures scope)
+          (scope-next-slot-box scope)
           (scope-enclosing scope)))))
 
 (defun compile-let (form ctx scope)
   (let ((bindings (car (cdr form)))
         (body (car (cdr (cdr form)))))
-    (compile-concat (compile-let-bindings bindings ctx scope)
-                    (compile-expr body ctx (compile-let-extend-scope bindings scope)))))
+    (let ((processed (compile-let-process-bindings bindings ctx scope)))
+      (let ((bindings-ir (car processed))
+            (locals-additions (car (cdr processed)))
+            (commits (car (cdr (cdr processed))))
+            (restores (car (cdr (cdr (cdr processed))))))
+        (compile-concat bindings-ir
+                        (compile-let-restore-code commits ctx)
+                        (compile-expr body ctx (compile-let-add-locals locals-additions scope))
+                        (compile-let-restore-code restores ctx))))))
 
 ; setqは代入した値をそのまま式の値として返す(Common Lisp/既存lisp_evalと同じ)。
 ; OP_STORE_LOCAL/OP_STORE_UPVALUEはストアと同時にスタック最上位をpopしてしまう
@@ -522,6 +637,7 @@
     (let ((inner-ctx (compile-make-ctx)))
       (let ((inner-scope (compile-make-scope (compile-lambda-param-locals params 0)
                                               (compile-make-captures)
+                                              (compile-make-next-slot-box (compile-env-length params))
                                               scope)))
         (let ((body-code (assemble (compile-concat (compile-expr body inner-ctx inner-scope)
                                                     (list (list *op-return*))))))
@@ -790,6 +906,25 @@
         (value-form (car (cdr (cdr form)))))
     (compile-expr (list 'establish-special (list 'quote sym) value-form) ctx scope)))
 
+; milestone 60: defun本体はlambdaと全く同じ規約(bodyは単一formのみ、milestone21の
+; gotchaを継承)でコンパイルできるため、(defun name params body) =>
+; (establish-global-function (quote name) (lambda params body))という新しいS式を
+; 組み立ててcompile-exprへ再度渡す(milestone54のprogn等と同じ「S式レベルの脱糖」技法)。
+; establish-global-function(src/lisp.c)はツリーウォークのdefun特殊形式と全く同じ
+; lisp_env_extendでglobal_envへ束縛する新規Cビルトインで、既存のOP_CALL経由で呼ぶ。
+; rest-arg形式(paramsがbare symbol、milestone29)のdefunは、コンパイル済みクロージャの
+; 呼び出し規約(closure->nargsの厳密一致、OP_CALL/lisp_apply)がrest-argを一切サポート
+; しない(documents/lisp_vm_integration.mdのスコープ外として明記済み)ため、この分岐には
+; 来ない: lisp_eval_toplevel(src/lisp.c)がlisp_defun_params_is_restargで判定して
+; そのケースだけ既存のツリーウォークへ振り分ける
+(defun compile-defun (form ctx scope)
+  (let ((name (car (cdr form)))
+        (params (car (cdr (cdr form))))
+        (body (car (cdr (cdr (cdr form))))))
+    (compile-expr (list 'establish-global-function (list 'quote name)
+                                                     (list 'lambda params body))
+                  ctx scope)))
+
 ; atomは(既にレキシカル束縛の有無を確認する)compile-variable-refに委ねる。
 ; cons/car/cdr/eq/+はインライン化された専用命令へ、それ以外の形式(carがsymbol
 ; でもlambda式でも構わない)はすべて汎用の関数呼び出しcompile-callへコンパイル
@@ -813,6 +948,7 @@
     ((eq (car form) 'return-from) (compile-return-from form ctx scope))
     ((eq (car form) 'defvar) (compile-defvar form ctx scope))
     ((eq (car form) 'defparameter) (compile-defparameter form ctx scope))
+    ((eq (car form) 'defun) (compile-defun form ctx scope))
     ((eq (car form) 'setq) (compile-setq form ctx scope))
     ((eq (car form) 'lambda) (compile-lambda form ctx scope))
     ((eq (car form) '+) (compile-add form ctx scope))

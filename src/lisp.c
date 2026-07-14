@@ -1502,8 +1502,8 @@ static LispObject lisp_vm_run(LispClosure *cl, UINTN fp) {
         pc++;
         switch (op) {
             case OP_CONST: {
-                unsigned char idx = *pc;
-                pc++;
+                unsigned int idx = pc[0] | (pc[1] << 8);
+                pc += 2;
                 lisp_vm_push(cl->constants[idx]);
                 break;
             }
@@ -1514,13 +1514,13 @@ static LispObject lisp_vm_run(LispClosure *cl, UINTN fp) {
                 break;
             }
             case OP_JUMP: {
-                unsigned char target = *pc;
+                unsigned int target = pc[0] | (pc[1] << 8);
                 pc = cl->bytecode + target;
                 break;
             }
             case OP_JUMP_IF_FALSE: {
-                unsigned char target = *pc;
-                pc++;
+                unsigned int target = pc[0] | (pc[1] << 8);
+                pc += 2;
                 LispObject test = lisp_vm_pop();
                 if (test == LISP_NIL) {
                     pc = cl->bytecode + target;
@@ -1528,14 +1528,14 @@ static LispObject lisp_vm_run(LispClosure *cl, UINTN fp) {
                 break;
             }
             case OP_LOAD_LOCAL: {
-                unsigned char idx = *pc;
-                pc++;
+                unsigned int idx = pc[0] | (pc[1] << 8);
+                pc += 2;
                 lisp_vm_push(lisp_car(vm_stack[fp + idx]));
                 break;
             }
             case OP_STORE_LOCAL: {
-                unsigned char idx = *pc;
-                pc++;
+                unsigned int idx = pc[0] | (pc[1] << 8);
+                pc += 2;
                 LispObject value = lisp_vm_pop();
                 lisp_set_car(vm_stack[fp + idx], value);
                 break;
@@ -1546,8 +1546,8 @@ static LispObject lisp_vm_run(LispClosure *cl, UINTN fp) {
                 break;
             }
             case OP_CALL: {
-                unsigned char nargs = *pc;
-                pc++;
+                unsigned int nargs = pc[0] | (pc[1] << 8);
+                pc += 2;
                 LispObject fn_obj = lisp_vm_pop();
                 if (vm_sp < nargs) {
                     lisp_panic(L"VM stack underflow");
@@ -1593,8 +1593,8 @@ static LispObject lisp_vm_run(LispClosure *cl, UINTN fp) {
                 break;
             }
             case OP_MAKE_CLOSURE: {
-                unsigned char idx = *pc;
-                pc++;
+                unsigned int idx = pc[0] | (pc[1] << 8);
+                pc += 2;
                 LispClosure *template_cl = lisp_closure_cell(cl->constants[idx]);
                 LispObject descs = template_cl->upvalue_descs;
                 UINTN n = 0;
@@ -1643,15 +1643,15 @@ static LispObject lisp_vm_run(LispClosure *cl, UINTN fp) {
                 break;
             }
             case OP_LOAD_UPVALUE: {
-                unsigned char idx = *pc;
-                pc++;
+                unsigned int idx = pc[0] | (pc[1] << 8);
+                pc += 2;
                 LispClosure *upvalues_cell = lisp_closure_cell(cl->upvalues);
                 lisp_vm_push(lisp_car(upvalues_cell->vec_data[idx]));
                 break;
             }
             case OP_STORE_UPVALUE: {
-                unsigned char idx = *pc;
-                pc++;
+                unsigned int idx = pc[0] | (pc[1] << 8);
+                pc += 2;
                 LispObject value = lisp_vm_pop();
                 LispClosure *upvalues_cell = lisp_closure_cell(cl->upvalues);
                 lisp_set_car(upvalues_cell->vec_data[idx], value);
@@ -1680,15 +1680,15 @@ static LispObject lisp_vm_run(LispClosure *cl, UINTN fp) {
                 break;
             }
             case OP_GLOBAL_REF: {
-                unsigned char idx = *pc;
-                pc++;
+                unsigned int idx = pc[0] | (pc[1] << 8);
+                pc += 2;
                 LispObject sym = cl->constants[idx];
                 lisp_vm_push(lisp_env_lookup(global_env, sym));
                 break;
             }
             case OP_GLOBAL_SET: {
-                unsigned char idx = *pc;
-                pc++;
+                unsigned int idx = pc[0] | (pc[1] << 8);
+                pc += 2;
                 LispObject sym = cl->constants[idx];
                 LispObject value = lisp_vm_pop();
                 lisp_env_set(global_env, sym, value);
@@ -1700,8 +1700,8 @@ static LispObject lisp_vm_run(LispClosure *cl, UINTN fp) {
                 return result;
             }
             case OP_RETURN_FROM: {
-                unsigned char idx = *pc;
-                pc++;
+                unsigned int idx = pc[0] | (pc[1] << 8);
+                pc += 2;
                 LispObject tag = cl->constants[idx];
                 LispObject value = lisp_vm_pop();
                 lisp_return_tag = tag;
@@ -1710,8 +1710,8 @@ static LispObject lisp_vm_run(LispClosure *cl, UINTN fp) {
                 return value;
             }
             case OP_BLOCK: {
-                unsigned char idx = *pc;
-                pc++;
+                unsigned int idx = pc[0] | (pc[1] << 8);
+                pc += 2;
                 LispObject tag = cl->constants[idx];
                 LispObject closure_obj = lisp_vm_pop();
                 LispClosure *body_cl = lisp_closure_cell(closure_obj);
@@ -2511,13 +2511,36 @@ LispObject lisp_builtin_compiler_ready_p(LispObject args) {
     return lisp_compiler_ready ? lisp_sym_t : LISP_NIL;
 }
 
+// milestone 60: defunをcompile-expr経由でコンパイルした結果（コンパイル済みクロージャ）を、
+// ツリーウォークのdefun特殊形式（本ファイル上部のop == lisp_sym_defun分岐）と全く同じ
+// lisp_env_extendでglobal_envへ束縛する。symを返す（defun特殊形式の戻り値と一致させる）
+LispObject lisp_builtin_establish_global_function(LispObject args) {
+    LispObject sym = lisp_car(args);
+    lisp_assert_symbol(sym);
+    LispObject closure = lisp_car(lisp_cdr(args));
+    global_env = lisp_env_extend(global_env, sym, closure);
+    return sym;
+}
+
+// milestone 60: defunのparamsが「仮引数リスト全体が1つのbare symbol」というrest-arg形式
+// （milestone29、lisp_env_bind_paramsが解釈する可変長引数の書き方）かどうかを判定する。
+// コンパイル済みクロージャの呼び出し規約（OP_CALL/lisp_applyのclosure->nargs厳密一致
+// チェック、milestone37）はrest-argを一切サポートしない（documents/lisp_vm_integration.md
+// のスコープ外として明記済み）ため、このケースのdefunだけはlisp_eval_toplevelが
+// 既存のツリーウォークへフォールバックする判定に使う
+static int lisp_defun_params_is_restarg(LispObject expr) {
+    LispObject params = lisp_car(lisp_cdr(lisp_cdr(expr)));
+    return params != LISP_NIL && lisp_is_symbol(params);
+}
+
 // REPLの1行、またはloadの1トップレベル式としてexprをglobal_env上で評価する。
 // lisp_compiler_readyが真で、かつexprの先頭がdefun/defmacroでなければ、
 // macroexpand-all→compile-expr→vm-execの新経路（lisp/stdlib.lisp）へ委譲する。
 // defmacroは恒久的にツリーウォークへフォールバックする（マクロ展開はインタプリタ操作
-// そのものであり、コンパイル時に発生する）。defunはフェーズ2（milestone60、defun自体の
-// コンパイル時コード生成化）完了までの過渡的措置として同様にフォールバックする
-// (milestone58, documents/lisp_vm_integration.md)。
+// そのものであり、コンパイル時に発生する）。defunはmilestone60でコンパイル対応した
+// （compile-defun、lisp/stdlib.lisp）が、rest-arg形式のparams（milestone29、
+// lisp_defun_params_is_restarg参照）だけはコンパイル済みクロージャの呼び出し規約が
+// サポートしないため、この形のdefunのみ個別にツリーウォークへフォールバックする。
 // return-fromの脱出シグナルが対応するblockに一度も捕捉されずここまで残っている場合、
 // タグが指す実行中のblockが存在しないというユーザー側の誤りなのでpanicする。
 // これをせずに素通しすると、残ったシグナルが次の入力の評価を最初の一歩で
@@ -2527,7 +2550,8 @@ LispObject lisp_builtin_compiler_ready_p(LispObject args) {
 LispObject lisp_eval_toplevel(LispObject expr) {
     LispObject op = lisp_is_cons(expr) ? lisp_car(expr) : LISP_NIL;
     LispObject result;
-    if (lisp_compiler_ready && op != lisp_sym_defun && op != lisp_sym_defmacro) {
+    int defun_restarg = (op == lisp_sym_defun) && lisp_defun_params_is_restarg(expr);
+    if (lisp_compiler_ready && op != lisp_sym_defmacro && !defun_restarg) {
         LispObject compile_and_run = lisp_env_lookup(global_env, lisp_intern("compile-and-run"));
         result = lisp_apply(compile_and_run, lisp_cons(expr, LISP_NIL));
     } else {
@@ -2689,6 +2713,11 @@ LispObject lisp_builtin_lt(LispObject args) {
 // 回収したオブジェクト数をfixnumで返す
 LispObject lisp_builtin_gc(LispObject args) {
     return lisp_make_fixnum((long long)lisp_gc());
+}
+
+// DIAGNOSTIC (milestone 60 regression debugging, not a deliverable): 残りヒープバイト数を返す
+LispObject lisp_builtin_heap_remaining(LispObject args) {
+    return lisp_make_fixnum((long long)(lisp_heap_end - lisp_heap_ptr));
 }
 
 // (gensym)または(gensym "prefix"): 呼ぶたびに一意な非intern済みシンボルを返す。
@@ -3180,6 +3209,7 @@ LispObject lisp_builtins_init(void) {
     env = lisp_env_extend(env, lisp_intern("sleep"), lisp_make_builtin(lisp_builtin_sleep));
     env = lisp_env_extend(env, lisp_intern("gensym"), lisp_make_builtin(lisp_builtin_gensym));
     env = lisp_env_extend(env, lisp_intern("gc"), lisp_make_builtin(lisp_builtin_gc));
+    env = lisp_env_extend(env, lisp_intern("heap-remaining"), lisp_make_builtin(lisp_builtin_heap_remaining));
     env = lisp_env_extend(env, lisp_intern("make-vector"), lisp_make_builtin(lisp_builtin_make_vector));
     env = lisp_env_extend(env, lisp_intern("svref"), lisp_make_builtin(lisp_builtin_svref));
     env = lisp_env_extend(env, lisp_intern("svset"), lisp_make_builtin(lisp_builtin_svset));
@@ -3190,6 +3220,7 @@ LispObject lisp_builtins_init(void) {
     env = lisp_env_extend(env, lisp_intern("establish-special"), lisp_make_builtin(lisp_builtin_establish_special));
     env = lisp_env_extend(env, lisp_intern("mark-compiler-ready"), lisp_make_builtin(lisp_builtin_mark_compiler_ready));
     env = lisp_env_extend(env, lisp_intern("compiler-ready-p"), lisp_make_builtin(lisp_builtin_compiler_ready_p));
+    env = lisp_env_extend(env, lisp_intern("establish-global-function"), lisp_make_builtin(lisp_builtin_establish_global_function));
 
     // *macroexpand-hook*をdefvarと同じ形（is_special=1 + 初期値）で直接セットアップする
     // (milestone 21)。動的変数はenvチェーンに束縛を積まないため、global_envへの

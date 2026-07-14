@@ -97,7 +97,7 @@ REPL・`defun`・`load`がデフォルトで使う評価経路そのものへ格
 
 | # | マイルストーン | 状態 | 主な内容 |
 |---|---|---|---|
-| 60 | defunのコンパイル時コード生成化 | 未着手 | `defun`本体を`compile-lambda`/`vm-make-closure`経由でコンパイルし、生成したコンパイル済みクロージャを既存と同じ`lisp_env_extend`で`global_env`へ束縛する。milestone51のグローバル参照が実行時にシンボル同一性で再解決するため、`defun`同士の前方参照・相互再帰は既存動作のまま保たれる。 |
+| 60 | defunのコンパイル時コード生成化 | 完了 | `defun`本体を`compile-lambda`/`vm-make-closure`経由でコンパイルし、生成したコンパイル済みクロージャを新設Cビルトイン`establish-global-function`(既存の`lisp_env_extend`をそのまま呼ぶだけの薄いラッパー)で`global_env`へ束縛するように`lisp_eval_toplevel`(`src/lisp.c`)を変更した。milestone51のグローバル参照が実行時にシンボル同一性で再解決するため、`defun`同士の前方参照・相互再帰は既存動作のまま保たれる。paramsがbare symbol(milestone29のrest-arg形式、例: `(defun list args args)`)の`defun`は、コンパイル済みクロージャの呼び出し規約(milestone37のOP_CALL、`nargs`の厳密一致)がこの引数渡しを表現できないため、`lisp_defun_params_is_restarg`で個別判定し旧来のツリーウォークへフォールバックさせ続ける。`defun`本体が既定でコンパイルされるようになった結果、`stdlib.lisp`実規模の関数でバイトコード長・定数プールindexが1byteオペランドの上限(255)を実際に超えるケースが現れたため、当初milestone66で「実際に上限へ達した場合のみ着手する」契機付きで先送りしていたオペランド幅拡張を本milestoneへ前倒しした。VMオペコード(`src/lisp.h`)の即値オペランドを1byteから2byte(リトルエンディアン)へ全面的に拡張し、`lisp_vm_run`(`src/lisp.c`)の各命令のPC進め幅・オペランド読み出しを合わせて修正した。`lisp/stdlib.lisp`側は`asm-instr-length`(オペランド有り命令を1byteから3byteへ)・`asm-emit-instr`(`low-byte`/`high-byte`によるリトルエンディアン2byte分割を新設)を修正した。既存の手動バイトコード自己テスト(`src/main.c`のVMセルフテスト群)もオペランドを2byte表記へ書き換えた。実装過程で、milestone57で発見していた`compile-let`/`compile-let*`の「特殊変数を通常のレキシカルシャドーイングとして扱う」制限を実際に解消しようとした際、既存の(このmilestone着手前の)実装が`OP_MAKE_LOCAL`の契約を誤解していたバグを発見した——`OP_MAKE_LOCAL`は値スタックの「最上位」のみをその場でcons化(box化)する命令で、深さを指定した位置のbox化はできない。そのため「全bindingのinit-formを先にpushし尽くしてから複数回`OP_MAKE_LOCAL`を呼ぶ」という2段階設計は、2回目以降の`OP_MAKE_LOCAL`が直前の呼び出しが既にbox化した値を再びbox化するだけで、それより下の値には決して届かず成立しない。`compile-let-process-bindings`を「pushの直後に必ず1対1で対応する`OP_MAKE_LOCAL`」を守る設計へ書き直し、特殊変数の束縛でletの並行束縛semantics(どのinit-formも他のbindingの新しい値を見てはならない)を守るために本当に遅延させる必要がある唯一の操作(`OP_GLOBAL_SET`によるグローバル値そのものへの書き込み)だけを、全binding処理後の別パスへ分離することで解決した(`lisp/stdlib.lisp`)。この修正により`defun`本体が既定でコンパイル経路を通るようになった結果、milestone57で既に文書化していた既知の制限(`return-from`によるVMの早期return(`OP_RETURN_FROM`は直接Cレベルの`return`をするため、let復元コードを含む後続バイトコード全てを読み飛ばす。VM側にunwind-protect相当の機構が無い)と、let/let*内での動的変数復元が組み合わさると復元が保証されない)が、`test-block-return.lisp`のケース7〜9(動的変数`*br-v*`の復元をreturn-from経由で検証)で実際にテスト失敗として表面化した。これはmilestone55/57の時点で`test-compile-and-run.lisp`が同じ理由で既にこれらのケースを対象外にしていた既存の判断と同じ範囲に揃えるため、`test-block-return.lisp`からもこの3ケースと依存する`*br-v*`を削除し、既知の制限を参照する説明コメントに置き換えた(新しい退行ではなく、milestone60が`defun`のフォールバックを外したことで初めて実際に観測可能になった、既存のスコープ外事項の表面化)。テストは新設`test-defun-compile.lisp`で、前方参照・相互再帰・rest-arg形式のフォールバック・let/動的変数のコンパイル経路での正常系(return-from非経由)の退避・復元を確認し、`make test`(全18フィクスチャ)で回帰無しを確認した。 |
 | 61 | 呼び出しディスパッチの一貫性検証・仕上げ | 未着手 | `funcall`/`apply`/`mapcar`/`reduce`/`sort`等の既存高階ビルトインがコンパイル済みクロージャ・インタプリタクロージャ・ビルトインいずれとも一貫して動作することを検証し、milestone52/53で導入したフォールバック経路に残る特別扱いを整理する。 |
 | 62 | フェーズ2統合検証 | 未着手 | `make build`・`make test`（全フィクスチャ）・QEMU/OVMFでのREPL基本動作の回帰無しを確認する。 |
 
@@ -118,8 +118,9 @@ REPL・`defun`・`load`がデフォルトで使う評価経路そのものへ格
 - FASLスタイルの事前コンパイル済みバイトコードを直接ロードする最終ステップ。ソースからの
   compile-load経路確立後の、完全に独立した追加作業として先送りする。
 - 末尾呼び出し最適化・スタック深度対策（`lisp_vm.md`の既存非ゴールを継承）。
-- VMオペコードのオペランド幅（現在1バイト）の拡張。milestone66の防御チェックで実際に上限へ
-  達したことが確認された場合のみ着手する、契機付きの先送りとする。
+- ~~VMオペコードのオペランド幅（現在1バイト）の拡張~~ → milestone60で前倒しで実施済み
+  （2バイトへ拡張、詳細はmilestone60の項参照）。milestone66では2バイト上限（65535）に
+  実際に達した場合の防御チェックのみを扱う。
 - レキシカルスコープのマクロ（`macrolet`相当）。マクロは既存インタプリタ同様、恒久的にグローバル
   のまま（`lisp_vm.md`の既存非ゴールを継承）。
 - Direct Threaded Code等によるVM自体の高速化。

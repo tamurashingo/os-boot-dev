@@ -110,21 +110,23 @@ int lisp_vm_gc_root_selftest(void);
 void lisp_vm_reset_stack(void);
 
 // --- VMオペコード (milestone 35) ---
-// 各命令は1byteのopcode+固定長の即値オペランド（今のところ0または1byte）から成る。
-// 手動でバイトコード配列を構築する目標1の各マイルストン（35〜39）はこの定義を直接使う
-#define OP_CONST  0   // 次の1byteをconstants配列のindexとして解釈し、その定数をpushする
+// 各命令は1byteのopcode+固定長の即値オペランド（今のところ0または2byte、リトルエンディアン）
+// から成る。手動でバイトコード配列を構築する目標1の各マイルストン（35〜39）はこの定義を直接使う
+// （milestone60: オペランド幅は元々1byteだったが、defunを既定でコンパイルするようになった結果
+// 実際のバイトコード長・定数indexが255を超える関数が現れたため2byteへ拡張した）
+#define OP_CONST  0   // 次の2byte（リトルエンディアン）をconstants配列のindexとして解釈し、その定数をpushする
 #define OP_ADD    1   // スタック上位2要素をpopして加算し、結果をpushする
 #define OP_RETURN 2   // スタック最上位をpopし、それを戻り値としてlisp_vm_execから返る
 
 // --- VM制御フロー/ローカル変数オペコード (milestone 36) ---
-// ジャンプ先は関数のbytecode先頭からの絶対バイト位置（1byte、0〜255）。ローカル変数は
+// ジャンプ先は関数のbytecode先頭からの絶対バイト位置（2byte、0〜65535）。ローカル変数は
 // FP（現在の呼び出しフレームの先頭、milestone37までは実行開始時のspそのもの）相対の
-// index（1byte）で指定し、実体はcons（car=値、cdr=NIL固定）をボックスとして再利用する
-#define OP_JUMP           3   // 次の1byteを絶対バイト位置として解釈し、そこへ無条件にジャンプする
-#define OP_JUMP_IF_FALSE  4   // スタック最上位をpopし、nilなら次の1byteの絶対位置へジャンプする。
+// index（2byte）で指定し、実体はcons（car=値、cdr=NIL固定）をボックスとして再利用する
+#define OP_JUMP           3   // 次の2byteを絶対バイト位置として解釈し、そこへ無条件にジャンプする
+#define OP_JUMP_IF_FALSE  4   // スタック最上位をpopし、nilなら次の2byteの絶対位置へジャンプする。
                                // nil以外ならジャンプせず次の命令（オペランドの直後）へ進む
-#define OP_LOAD_LOCAL     5   // 次の1byteをFP相対indexとして解釈し、car(vm_stack[FP+index])をpushする
-#define OP_STORE_LOCAL    6   // スタック最上位をpopし、次の1byteのFP相対indexが指すボックスへ
+#define OP_LOAD_LOCAL     5   // 次の2byteをFP相対indexとして解釈し、car(vm_stack[FP+index])をpushする
+#define OP_STORE_LOCAL    6   // スタック最上位をpopし、次の2byteのFP相対indexが指すボックスへ
                                // rplaca相当で書き込む（vm_stack上のスロット自体は書き換えない）
 #define OP_MAKE_LOCAL     7   // スタック最上位をpopし、その場でcons(値, NIL)としてボックス化しpushし直す
 
@@ -133,7 +135,7 @@ void lisp_vm_reset_stack(void);
 // 関数オブジェクト）をpushしてからOP_CALL <nargs>を発行する。OP_CALLは関数オブジェクトをpopし、
 // その下にあるnargs個のスタック位置を「その場でボックス化」して新しいフレームとし、
 // その関数のbytecodeを（C再帰で）実行する。戻り値は元のスタック位置に1個pushされる
-#define OP_CALL 8   // 次の1byteをnargsとして解釈し、上記の呼び出し規約に従って関数を呼び出す
+#define OP_CALL 8   // 次の2byteをnargsとして解釈し、上記の呼び出し規約に従って関数を呼び出す
 
 // --- VMクロージャ生成/upvalueオペコード (milestone 38) ---
 // クロージャは「テンプレート」（コンパイル時に作った、bytecode/constants/nargs/upvalue_descsを
@@ -142,11 +144,11 @@ void lisp_vm_reset_stack(void);
 // 「クロージャ生成元フレームのFP+index」のボックスをそのまま捕捉し、kind=1なら「クロージャ生成元
 // closure自身のupvalues[index]」をそのままコピーする（2階層以上の捕捉はこれでフラット化され、
 // OP_LOAD_UPVALUE/OP_STORE_UPVALUEは常に自分のupvaluesだけを見ればよい）
-#define OP_MAKE_CLOSURE   9   // 次の1byteをconstants配列のindexとして解釈し、そこにあるテンプレート
+#define OP_MAKE_CLOSURE   9   // 次の2byteをconstants配列のindexとして解釈し、そこにあるテンプレート
                                // closureから実体を1つ作ってpushする（upvalue_descsを解決してupvaluesを構築する）
-#define OP_LOAD_UPVALUE  10   // 次の1byteを自分のupvaluesベクタのindexとして解釈し、
+#define OP_LOAD_UPVALUE  10   // 次の2byteを自分のupvaluesベクタのindexとして解釈し、
                                // car(upvalues[index])をpushする
-#define OP_STORE_UPVALUE 11   // スタック最上位をpopし、次の1byteが指すupvalues[index]のボックスへ
+#define OP_STORE_UPVALUE 11   // スタック最上位をpopし、次の2byteが指すupvalues[index]のボックスへ
                                // rplaca相当で書き込む
 
 // --- VMプリミティブ最適化命令 (milestone 39) ---
@@ -163,10 +165,10 @@ void lisp_vm_reset_stack(void);
 // 問い合わせる。コンパイル時に静的な位置へは解決しない（defun同士の前方参照・相互再帰を
 // 破壊しないため、既存のlisp_env_lookup/lisp_env_setと同じ「毎回global_envを捜査する」
 // 方式をそのまま踏襲する）
-#define OP_GLOBAL_REF 16   // 次の1byteをconstants配列のindexとして解釈し、そこにあるsymbolを
+#define OP_GLOBAL_REF 16   // 次の2byteをconstants配列のindexとして解釈し、そこにあるsymbolを
                             // lisp_env_lookup(global_env, symbol)へ渡した結果をpushする
                             // （束縛が無ければlisp_env_lookupと同じくunbound variableでpanicする）
-#define OP_GLOBAL_SET 17   // スタック最上位をpopし、次の1byteが指すconstants配列のsymbolへ
+#define OP_GLOBAL_SET 17   // スタック最上位をpopし、次の2byteが指すconstants配列のsymbolへ
                             // lisp_env_set(global_env, symbol, value)相当で書き込む
                             // （OP_STORE_LOCAL/OP_STORE_UPVALUEと同様、値はpushし直さない）
 
@@ -179,7 +181,7 @@ void lisp_vm_reset_stack(void);
 // 立っていれば（このblockの担当タグでなければ）自分のフレームもそのまま
 // 早期returnして上位へ伝播する変更が入っている（lisp_apply経由でツリーウォーク
 // インタプリタ側へ委譲したケースも同じチェックで統一的に扱える）
-#define OP_BLOCK 18        // 次の1byteをconstants配列のindexとして解釈し、そこにあるsymbolを
+#define OP_BLOCK 18        // 次の2byteをconstants配列のindexとして解釈し、そこにあるsymbolを
                             // このblockのタグとする。スタック最上位（直前のOP_MAKE_CLOSUREが
                             // 積んだ、本体を表す引数無しclosure）をpopして0引数で呼び出す。
                             // 戻ってきた時点でlisp_return_tagがこのタグと一致していれば
@@ -188,7 +190,7 @@ void lisp_vm_reset_stack(void);
                             // このフレームも早期returnして伝播する。シグナルが立っていなければ
                             // 本体の戻り値をそのままpushする
 #define OP_RETURN_FROM 19  // スタック最上位をpopし、それを値としてlisp_return_valueへ、
-                            // 次の1byteが指すconstants配列のsymbolをlisp_return_tagへセットした上で、
+                            // 次の2byteが指すconstants配列のsymbolをlisp_return_tagへセットした上で、
                             // OP_RETURNと同様にこのフレームを早期returnする（対応するOP_BLOCKに
                             // 出会うまで、途中のOP_CALL/OP_BLOCKフレームは戻り値を見る前に
                             // lisp_return_tagを確認し、そのまま自分も早期returnして伝播し続ける）
