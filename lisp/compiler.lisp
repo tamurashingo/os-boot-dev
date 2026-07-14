@@ -1,10 +1,54 @@
 ; milestone63: lisp/stdlib.lispからコンパイラ本体（マクロ展開・アセンブラ・
-; compile-expr一式・compile-and-run）を切り出したファイル。EfiMainはstdlib.lisp
-; （list/append/mapcar/reduce/sort等の通常ライブラリ、compile-expr自身がmapcar等を
-; 使うため先に読み込む必要がある）を読み込んだ直後にこのファイルを読み込む。
-; この時点では両ファイルとも既存のload（ツリーウォーク評価、lisp_eval_toplevelの
-; 統一評価ドライバはこのファイル末尾のmark-compiler-ready呼び出しより後でなければ
-; 有効化されない）で読み込まれ、単一ファイルだった頃と挙動は変わらない。
+; compile-expr一式・compile-and-run）を切り出したファイル。
+;
+; milestone65: 起動シーケンスを2段階化し、EfiMainはlisp/stdlib.lispより先にこの
+; ファイルを読み込むよう順序を変更した。読み込み中はlisp_compiler_readyがまだfalse
+; なので既存のツリーウォークで評価される（compile-expr自身をcompile-expr自身で
+; コンパイルする鶏と卵問題を避ける）。
+;
+; ただし、macroexpand-all-forms/compile-expr自身の実装がnot/null/list/append/reverse/
+; mapcarを内部的に呼び出している（defun本体の話ではなく、コンパイラというプログラム
+; そのものの実装がこれらに依存している）。これらは元々stdlib.lisp側にあったため、
+; 「compiler.lispを先に読み込み、その後にstdlib.lispを読み込む」という2段階の順序と
+; 噛み合わず、stdlib.lispの最初のdefunをコンパイルしようとした瞬間に
+; unbound variableでpanicする（起動シーケンスにはREPLのlongjmp復帰トラップがまだ
+; 無いため、panicはそのままハングする）。したがってこの6つだけはコンパイラ自身の
+; ブートストラップ用の前提としてこのファイルに置き、stdlib.lisp側からは削除した
+; （どちらのファイルに書いてもglobal_envへの束縛結果は同じであり、REPLからの見え方は
+; 変わらない）。
+(defun not (x) (eq x nil))
+(defun null (x) (eq x nil))
+
+; 仮引数リスト全体を単一のsymbolにする書き方(milestone29でlisp_env_bind_paramsに
+; 追加したrest-arg機構)で可変長引数を受け取る。評価済みの実引数がそのままリストとして
+; argsに束縛されるので、それをそのまま返すだけでCLのlistと同じ挙動になる。rest-arg形式
+; のdefunはコンパイル済みクロージャの呼び出し規約がrest-argをサポートしないため、
+; lisp_eval_toplevelが個別にツリーウォークへフォールバックする（既存の
+; lisp_defun_params_is_restarg判定、src/lisp.c）。したがってlist自身は
+; lisp_compiler_readyの値に関わらず常にインタプリタクロージャのままだが、
+; macroexpand-all/compile-exprの内部実装がlistを直接呼び出すため、global_envへの
+; 束縛自体はこのファイルの中で（=lisp_compiler_readyがtrueになる前に）済ませておく
+; 必要がある
+(defun list args args)
+
+; CLのappendは可変長だが、このスコープでは2引数のみサポートする(明示的な範囲の限定)
+(defun append (a b)
+  (if (null a)
+      b
+      (cons (car a) (append (cdr a) b))))
+
+(defun reverse (lst)
+  (if (null lst)
+      nil
+      (append (reverse (cdr lst)) (cons (car lst) nil))))
+
+; fnはローカル変数（仮引数）だが、lisp_evalの関数呼び出し分岐は呼び出し式の演算子位置を
+; 常に汎用evalで評価するため、ローカル変数が指すクロージャをそのまま(fn ...)の形で
+; 呼び出せる。新しいfuncall/applyプリミティブは不要（milestone29の調査で確認済み）
+(defun mapcar (fn lst)
+  (if (null lst)
+      nil
+      (cons (fn (car lst)) (mapcar fn (cdr lst)))))
 
 ; --- コンパイラフロントエンド: マクロ展開 (milestone 40, documents/lisp_vm.md 目標2着手) ---
 ; macroexpand-all は既存の macroexpand-1 (milestone 21) を式全体に再帰的に適用し、
