@@ -14,7 +14,6 @@
 #define LISP_NIL ((LispObject)0)
 
 #define LISP_SYMBOL_NAME_MAX 64
-#define LISP_MAX_PACKAGES 8
 
 // milestone 32: gc_next/gc_markedは3構造体(LispCons/LispSymbol/LispClosure)共通で
 // 先頭2フィールドとして揃える。lisp_alloc_trackedがオフセット0/sizeof(LispObject)を
@@ -857,32 +856,34 @@ static LispObject lisp_make_package_object(const char *name, int is_keyword_pack
     return ((LispObject)closure) | LISP_TAG_CLOSURE;
 }
 
-// milestone 23: パッケージの集合。common-lisp-user/keywordの2つで始まるが、将来
-// lisp_make_packageを追加で呼ぶだけで3つ目以降のパッケージを増やせる（LISP_MAX_PACKAGESの範囲内。
-// この配列自体をconsリスト化して上限を撤廃するのはmilestone69の範囲）
-static LispObject lisp_packages[LISP_MAX_PACKAGES];
-static UINTN lisp_package_count = 0;
+// milestone 69: パッケージの集合をconsリスト(global_packages)で管理する。milestone23〜68の
+// 固定長配列(LISP_MAX_PACKAGES=8)による上限は撤廃した。common-lisp-user/keywordの2つで
+// 始まるが、lisp_make_packageを追加で呼ぶだけで何個でも増やせる
+static LispObject global_packages = LISP_NIL;
 static LispObject lisp_cl_user_package;
 static LispObject lisp_keyword_package;
 
-static LispObject lisp_make_package(const char *name, int is_keyword_package) {
-    if (lisp_package_count >= LISP_MAX_PACKAGES) {
-        lisp_panic_fatal(L"package table exhausted");
-    }
-    LispObject pkg = lisp_make_package_object(name, is_keyword_package);
-    lisp_packages[lisp_package_count] = pkg;
-    lisp_package_count++;
-    return pkg;
-}
-
 // 現時点ではLispからは使わない内部APIだが、将来の`find-package`相当の土台として用意しておく
 static LispObject lisp_find_package(const char *name) {
-    for (UINTN i = 0; i < lisp_package_count; i++) {
-        if (lisp_streq(lisp_closure_cell(lisp_packages[i])->pkg_name, name)) {
-            return lisp_packages[i];
+    for (LispObject cur = global_packages; cur != LISP_NIL; cur = lisp_cdr(cur)) {
+        LispObject pkg = lisp_car(cur);
+        if (lisp_streq(lisp_closure_cell(pkg)->pkg_name, name)) {
+            return pkg;
         }
     }
     return LISP_NIL;
+}
+
+// 名前が重複していれば新規オブジェクトを作らず既存のものを返す（defvarの再load冪等性と同じ
+// 考え方。将来defpackage/in-packageを含むファイルをloadで再読込しても状態が壊れないようにする）
+static LispObject lisp_make_package(const char *name, int is_keyword_package) {
+    LispObject existing = lisp_find_package(name);
+    if (existing != LISP_NIL) {
+        return existing;
+    }
+    LispObject pkg = lisp_make_package_object(name, is_keyword_package);
+    global_packages = lisp_cons(pkg, global_packages);
+    return pkg;
 }
 
 void lisp_packages_init(void) {
@@ -1900,20 +1901,20 @@ static void lisp_gc_mark(LispObject obj) {
 // GCのルート集合: グローバル環境（alist。closureのenvも同じ表現を共有するため、生きている
 // closureがマークされた時点でそのenvも連動して辿られる）、全パッケージオブジェクトとそこに
 // 登録された全シンボル（t等の特殊シンボルキャッシュもすべてこの中に含まれるため個別マークは
-// 不要。milestone68でパッケージ自体がLispClosureのescape hatchを共有するGC管理オブジェクトに
-// なったため、pkg自身をmarkしないとsweepでフリーリストへ回収されてしまう。symbols/exports/uses
-// はpkg自身のmarkだけでは辿られない生フィールドなので個別にmarkする——lisp_gc_markのclosure分岐
-// 自体をパッケージ用に拡張してglobal_packages経由の1行markへ一本化するのはmilestone72の範囲）、
-// 非局所脱出用のシグナル（return-fromのタグ不一致panicがこの2つをクリアしない既知の挙動がある
-// ため、保守的に常に生きているとみなす）、およびVMデータスタック（milestone34。vm_stack[0..vm_sp)
-// にはlisp_vm_execが評価中の中間値が生のLispObjectとして置かれるため、Cローカル変数と同様GCの
+// 不要。milestone69でglobal_packages自体が本物のconsリスト（LispObject）になったため、
+// lisp_gc_mark(global_packages)の1呼び出しでスパイン自身の各consセルと各パッケージオブジェクト
+// （car）がlisp_gc_markのcons/closure分岐経由で連動して辿られる。symbols/exports/usesは
+// pkg自身のmarkだけでは辿られない生フィールドなので個別にmarkする——lisp_gc_markのclosure分岐
+// 自体をパッケージ用に拡張してこの個別mark自体を無くすのはmilestone72の範囲）、非局所脱出用の
+// シグナル（return-fromのタグ不一致panicがこの2つをクリアしない既知の挙動があるため、保守的に
+// 常に生きているとみなす）、およびVMデータスタック（milestone34。vm_stack[0..vm_sp)には
+// lisp_vm_execが評価中の中間値が生のLispObjectとして置かれるため、Cローカル変数と同様GCの
 // 追跡対象外になってしまう。ここでルートに加えないとバンプ確保のたびに回収されてしまう）
 static void lisp_gc_mark_roots(void) {
     lisp_gc_mark(global_env);
-    for (UINTN i = 0; i < lisp_package_count; i++) {
-        LispObject pkg = lisp_packages[i];
-        lisp_gc_mark(pkg);
-        LispClosure *pkg_cell = lisp_closure_cell(pkg);
+    lisp_gc_mark(global_packages);
+    for (LispObject cur = global_packages; cur != LISP_NIL; cur = lisp_cdr(cur)) {
+        LispClosure *pkg_cell = lisp_closure_cell(lisp_car(cur));
         lisp_gc_mark(pkg_cell->pkg_symbols);
         lisp_gc_mark(pkg_cell->pkg_exports);
         lisp_gc_mark(pkg_cell->pkg_uses);
