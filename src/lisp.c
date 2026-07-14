@@ -25,18 +25,15 @@ typedef struct {
     LispObject cdr;
 } LispCons;
 
-struct LispClosure; // LispSymbol.packageから前方参照するための宣言（定義は下記）
-
 typedef struct {
     LispObject gc_next;   // milestone 32: LispConsと同じ追跡リスト用（先頭2フィールド揃え必須）
     int gc_marked;
     char name[LISP_SYMBOL_NAME_MAX];
     int is_special;      // milestone 18: defvar/defparameterで真になる動的変数フラグ
     LispObject value;    // is_specialが真の場合の現在の動的値。let/let*が退避・書き換えする
-    struct LispClosure *package; // milestone 23: 属するパッケージ。gensymの未interned symbolはNULL。
-                                  // milestone 68でLispPackageを廃しLispClosureのescape hatchに
-                                  // 統合したため生ポインタの指す先もLispClosureになった
-                                  // （タグ付きLispObject化はmilestone 70で行う）
+    LispObject package;  // milestone 23: 属するパッケージ。gensymの未interned symbolはLISP_NIL。
+                          // milestone 68でLispPackageを廃しLispClosureのescape hatchに統合、
+                          // milestone 70でタグ付きLispObjectへ変更した（生ポインタは廃止）
 } LispSymbol;
 
 typedef LispObject (*LispBuiltinFn)(LispObject args);
@@ -923,7 +920,7 @@ LispObject lisp_intern_in_package(LispObject pkg, const char *name) {
     sym->name[i] = '\0';
     sym->is_special = 0;
     sym->value = LISP_NIL;
-    sym->package = pkg_cell;
+    sym->package = pkg;
 
     LispObject obj = ((LispObject)sym) | LISP_TAG_SYMBOL;
     pkg_cell->pkg_symbols = lisp_cons(obj, pkg_cell->pkg_symbols);
@@ -936,6 +933,13 @@ LispObject lisp_intern(const char *name) {
 
 static LispObject lisp_intern_keyword(const char *name) {
     return lisp_intern_in_package(lisp_keyword_package, name);
+}
+
+// milestone 70: LispSymbol.packageがLISP_NIL（uninterned）でないことを確認した上で
+// 属するパッケージのpkg_is_keywordを読む。直接->package->pkg_is_keywordと書くと
+// LISP_NILに対してlisp_closure_cellを呼んでしまう箇所が複数あったため一箇所に集約する
+static int lisp_symbol_package_is_keyword(LispSymbol *sym) {
+    return sym->package != LISP_NIL && lisp_closure_cell(sym->package)->pkg_is_keyword;
 }
 
 // gensym専用 (milestone 20): どのパッケージのテーブルにも登録せず新規のLispSymbolを確保するだけの
@@ -953,7 +957,7 @@ static LispObject lisp_make_uninterned_symbol(const char *name) {
     sym->name[i] = '\0';
     sym->is_special = 0;
     sym->value = LISP_NIL;
-    sym->package = 0;
+    sym->package = LISP_NIL;
     return ((LispObject)sym) | LISP_TAG_SYMBOL;
 }
 
@@ -1230,7 +1234,7 @@ void lisp_print(LispOutputStream *stream, LispObject obj) {
     if (lisp_is_symbol(obj)) {
         LispSymbol *sym = lisp_symbol_cell(obj);
         // milestone 23: keywordパッケージのシンボルは":"を前置して印字する
-        if (sym->package != 0 && sym->package->pkg_is_keyword) {
+        if (lisp_symbol_package_is_keyword(sym)) {
             lisp_print_ascii(stream, ":");
         }
         lisp_print_ascii(stream, sym->name);
@@ -2252,7 +2256,7 @@ LispObject lisp_eval(LispObject expr, LispObject env) {
     if (lisp_is_symbol(expr)) {
         LispSymbol *cell = lisp_symbol_cell(expr);
         // milestone 23: keywordパッケージのシンボルはtと同様に自己評価する
-        if (expr == lisp_sym_t || (cell->package != 0 && cell->package->pkg_is_keyword)) {
+        if (expr == lisp_sym_t || lisp_symbol_package_is_keyword(cell)) {
             return expr;
         }
         return lisp_env_lookup(env, expr);
@@ -2712,7 +2716,7 @@ LispObject lisp_builtin_keywordp(LispObject args) {
         return LISP_NIL;
     }
     LispSymbol *cell = lisp_symbol_cell(obj);
-    return (cell->package != 0 && cell->package->pkg_is_keyword) ? lisp_sym_t : LISP_NIL;
+    return lisp_symbol_package_is_keyword(cell) ? lisp_sym_t : LISP_NIL;
 }
 
 // (rplaca cons-cell new-car): cons-cellのcarをnew-carへ破壊的に書き換え、cons-cell自身を
