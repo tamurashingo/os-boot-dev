@@ -109,6 +109,14 @@ int lisp_vm_gc_root_selftest(void);
 // トラップ復帰直後）で必ず呼ぶこと（milestone 48）
 void lisp_vm_reset_stack(void);
 
+// --- パッケージシステム再設計 (milestone 68〜) ---
+
+// milestone 74: リーダーの"pkg:sym"/"pkg::sym"修飾子構文を検証する自己テスト。
+// export/use-packageのLisp APIがまだ無いため、lisp_make_package/lisp_intern_in_packageの
+// ようなC内部APIで専用の使い捨てパッケージとexportリストを直接組み立てて確認する。
+// 真なら成功
+int lisp_reader_package_qualifier_selftest(void);
+
 // --- VMオペコード (milestone 35) ---
 // 各命令は1byteのopcode+固定長の即値オペランド（今のところ0または2byte、リトルエンディアン）
 // から成る。手動でバイトコード配列を構築する目標1の各マイルストン（35〜39）はこの定義を直接使う

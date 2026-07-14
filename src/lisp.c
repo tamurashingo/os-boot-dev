@@ -1500,6 +1500,51 @@ LispObject lisp_read(void) {
         // milestone 23: ":foo"はkeywordパッケージへintern（先頭の":"はsymbol-nameに含めない）
         return lisp_intern_keyword(token + 1);
     }
+
+    // milestone 74: 先頭以外に現れる":"/"::"を"pkg:sym"/"pkg::sym"修飾子として検出する。
+    // 文字スキャンループ自体（上のwhile）は無変更で、既に読み終えたtoken内を後から
+    // 走査するだけで済む（":"はlisp_reader_is_delimの区切り文字ではないため、
+    // "pkg:sym"は最初から1つのtokenとして捕捉されている）
+    UINTN colon_pos = 0;
+    while (token[colon_pos] != '\0' && token[colon_pos] != ':') {
+        colon_pos++;
+    }
+    if (token[colon_pos] == ':') {
+        char pkg_name[LISP_TOKEN_MAX];
+        for (UINTN i = 0; i < colon_pos; i++) {
+            pkg_name[i] = token[i];
+        }
+        pkg_name[colon_pos] = '\0';
+
+        UINTN sym_start = colon_pos + 1;
+        int internal = (token[sym_start] == ':');
+        if (internal) {
+            sym_start++;
+        }
+        const char *sym_name = token + sym_start;
+        if (sym_name[0] == '\0') {
+            lisp_panic(L"reader: malformed package-qualified symbol");
+        }
+
+        LispObject pkg = lisp_find_package(pkg_name);
+        if (pkg == LISP_NIL) {
+            lisp_panic(L"reader: unknown package in qualified symbol");
+        }
+        if (internal) {
+            // pkg::symはexportされているかどうかを問わずpkg内へ直接intern/検索する
+            return lisp_intern_in_package(pkg, sym_name);
+        }
+        // pkg:sym（単一コロン）はpkgのexportリストに載っているシンボルしか参照できない
+        LispClosure *pkg_cell = lisp_closure_cell(pkg);
+        for (LispObject cur = pkg_cell->pkg_exports; cur != LISP_NIL; cur = lisp_cdr(cur)) {
+            LispObject exported = lisp_car(cur);
+            if (lisp_streq(lisp_symbol_cell(exported)->name, sym_name)) {
+                return exported;
+            }
+        }
+        lisp_panic(L"reader: symbol not exported from package");
+    }
+
     if (lisp_token_is_fixnum(token)) {
         return lisp_token_to_number(token);
     }
@@ -1516,6 +1561,33 @@ LispObject lisp_read(void) {
 LispObject lisp_read_from_buffer(const char *str) {
     lisp_reader_pos = str;
     return lisp_read();
+}
+
+// milestone 74: "pkg:sym"/"pkg::sym"修飾子構文の自己テスト。export/use-packageの
+// Lisp APIがまだ無いため、専用の使い捨てパッケージを1つ作りC内部APIで直接
+// exportリストを組み立てる（既存のcommon-lisp-user/keywordパッケージやシンボル表を
+// 汚さないための分離）
+int lisp_reader_package_qualifier_selftest(void) {
+    LispObject pkg = lisp_make_package("selftest-pkg74", 0);
+    LispObject exported_sym = lisp_intern_in_package(pkg, "exported-sym");
+    LispObject internal_sym = lisp_intern_in_package(pkg, "internal-sym");
+    LispClosure *pkg_cell = lisp_closure_cell(pkg);
+    pkg_cell->pkg_exports = lisp_cons(exported_sym, pkg_cell->pkg_exports);
+
+    // "pkg:sym"（単一コロン）はexportされているシンボルと同一オブジェクトに解決される
+    if (lisp_read_from_buffer("selftest-pkg74:exported-sym") != exported_sym) {
+        return 0;
+    }
+    // "pkg::sym"（二重コロン）はexportされていないシンボルも同一オブジェクトに解決される
+    if (lisp_read_from_buffer("selftest-pkg74::internal-sym") != internal_sym) {
+        return 0;
+    }
+    // "pkg::sym"は未internのシンボルなら新規にpkgへinternする（=lisp_intern_in_packageと同じ）
+    LispObject read_new = lisp_read_from_buffer("selftest-pkg74::brand-new-sym");
+    if (read_new != lisp_intern_in_package(pkg, "brand-new-sym")) {
+        return 0;
+    }
+    return 1;
 }
 
 // 空白を読み飛ばした上でバッファ終端(0終端)に達しているかを調べる。lisp_read自体は
