@@ -84,6 +84,33 @@
        (eq (defpackage "test-pkg78" (:export "pkg78-sym-a") (:use "common-lisp-user"))
            (defpackage "test-pkg78" (:export "pkg78-sym-a") (:use "common-lisp-user")))))
 
+; milestone 82: 修飾子リーダーの統合テスト。main.cの自己テストlisp_reader_package_qualifier_selftest
+; (milestone74)が起動時に既に作成済みの"selftest-pkg74"(exported-symをexport・internal-symは非export)
+; を利用し、pkg:sym/pkg::sym修飾子で読んだシンボルが、intern関数で直接同じ名前をinternした結果と
+; eq(同一オブジェクト)であることを確認する。このパッケージ・exportの用意自体を本ファイル内で行うと、
+; "load"がファイル全体を読み切ってから評価する実装のため「export実行→その効果を本ファイル内で修飾子
+; 経由で読む」という順序が組めない(milestone72/76と同根の制約)が、main.cの自己テストは本ファイルの
+; loadより前に実行済みのため、この制約に触れずに検証できる
+(defun run-test-package-qualifier-reader ()
+  (and (eq (quote selftest-pkg74:exported-sym)
+           (intern "exported-sym" (find-package "selftest-pkg74")))
+       (eq (quote selftest-pkg74::internal-sym)
+           (intern "internal-sym" (find-package "selftest-pkg74")))))
+
+; milestone 82: in-packageによる*package*切替のround-trip統合テスト。ファイル全体は*package*が
+; common-lisp-userのまま読み切られるため、本テスト自身の記述(in-package/intern/find-package/eq/let
+; のいずれも無修飾)はreader側の可視性制約(milestone79/81で発見)に触れない。in-packageはランタイム
+; 関数呼び出しであり、その効果(*package*の切替)は評価順に沿って実行時にのみ発生するため、
+; 切替→切替中のintern→common-lisp-userへの復帰、という手続きをそのまま1つのdefun本体として書ける。
+; 復帰後の*package*が確実にcommon-lisp-userへ戻ることも確認する(以降のテスト・REPL評価に影響しない
+; ことの保証)
+(defun run-test-package-in-package-roundtrip ()
+  (in-package "selftest-pkg74")
+  (let ((sym-during (intern "roundtrip-sym-82")))
+    (in-package "common-lisp-user")
+    (and (eq sym-during (intern "roundtrip-sym-82" (find-package "selftest-pkg74")))
+         (eq *package* (find-package "common-lisp-user")))))
+
 (defun run-test-package ()
   (and (run-test-package-keyword-identity)
        (run-test-package-namespace-separation)
@@ -92,4 +119,6 @@
        (run-test-package-export)
        (run-test-package-use)
        (run-test-package-intern)
-       (run-test-package-defpackage)))
+       (run-test-package-defpackage)
+       (run-test-package-qualifier-reader)
+       (run-test-package-in-package-roundtrip)))

@@ -108,7 +108,7 @@
 | # | マイルストーン | 状態 | 主な内容 |
 |---|---|---|---|
 | 81 | VM/コンパイラのグローバル参照とシンボル同一性の回帰検証 | 完了 | 着手時、`*package*`を`common-lisp-user`以外へ切り替えると`:use "common-lisp-user"`していても`defun`/`if`/`let`等の特殊形式トークンまで`unbound variable`でpanicすることを対話REPL検証で発見した。原因は特殊形式シンボル（`lisp_sym_defun`等）がeval側で`eq`同一性チェックされる一方、`common-lisp-user`自身のビルトイン・特殊形式トークンが一切`export`されていないため（milestone79で発見した制約と同根）、別パッケージで読んだ`defun`という語がuse-list経由で`lisp_sym_defun`へ解決されず、別の新規シンボルとして生成されてしまうことにある。ユーザーの明示的な判断により、この特殊形式可視性の問題自体はmilestone78の`progn`スタックリーク発見時と同様のパターンで新規マイルストーン（#85〜86、フェーズG）として切り出し、本マイルストーンは`*package*`導入後もグローバル参照がシンボル`eq`同一性で正しく解決されるかの回帰検証に限定してスコープを狭めた。新設した自己テスト`lisp_global_ref_package_identity_selftest`（`src/lisp.c`/`src/lisp.h`、`main.c`起動シーケンスに`lisp_bootstrap_package_context_selftest_run`の直後・`lisp_load_init_file`の直前に組み込み）は次の3点を検証する: (a) `common-lisp-user`内で`defun`による前方参照・相互再帰（`m81-even`/`m81-odd`の相互再帰関数を`lisp_eval`で定義し`(m81-even 10)`が`t`を返すこと）が既存カバレッジと同様に動作すること、(b) `*package*`を（`lisp_sym_package`のシンボルセルを直接書き換える形で）別パッケージへ切り替えてから`common-lisp-user`へ戻し、同名関数`m81-redef-fn`を再定義しても`lisp_intern`が常に同一シンボルオブジェクト（`eq`）を返し、`global_env`解決も再定義後の新しい関数本体に正しく追従すること（`defun`自体の評価は特殊形式可視性制約に触れないよう常に`*package*`が`common-lisp-user`の状態で行い、パッケージ切替はC内部でのポインタ代入に限定した）、(c) `*package*`が非既定のパッケージオブジェクトを指している最中に`lisp_gc()`を実行しても、`*package*`自身の値、およびその最中に`lisp_intern_in_package`でinternしたシンボル（`m81-probe`）のいずれも回収されないこと——これは`global_packages`が`lisp_gc_mark_roots`のルートであり、`*package*`の現在値に関わらず**全**パッケージ・全所属シンボルが常にmilestone72の設計で保護される、という既存の保証を明示的に固定するテストである。`make build`および`make test`（17ファイル全PASS、新規自己テストの`PASS`ログを含む）で確認した。 |
-| 82 | パッケージシステム統合テスト・既存回帰の総点検 | 未着手 | `test/lisp/test-package.lisp`を`make-package`/`export`/`use-package`/`defpackage`/`in-package`/修飾子リーダー/修飾子プリンタを一通り経由する統合シナリオへ拡張し、既存自己テスト群（`run-test-*`）全件・QEMUシリアルログでのPASS/FAIL目視確認を再実施する。ロードマップ全体の完了条件。 |
+| 82 | パッケージシステム統合テスト・既存回帰の総点検 | 完了 | `test/lisp/test-package.lisp`に2件のテストを追加した。`run-test-package-qualifier-reader`は、`main.c`の自己テスト`lisp_reader_package_qualifier_selftest`（milestone74）が起動時に既に作成済みの`selftest-pkg74`（`exported-sym`をexport・`internal-sym`は非export）を利用し、`selftest-pkg74:exported-sym`（単一コロン）・`selftest-pkg74::internal-sym`（二重コロン）を読んだ結果が、`intern`関数で直接同じ名前をinternした結果と`eq`であることを確認する——このパッケージ・exportの用意自体を本ファイル内で行うと`load`のファイル全体読み切り実装（milestone72/76と同根の制約）に抵触するが、`main.c`の自己テストは本ファイルの`load`より前に実行済みのため制約に触れずに検証できることを利用した。`run-test-package-in-package-roundtrip`は、`in-package`で`selftest-pkg74`へ切り替え→切替中に`intern`→`common-lisp-user`へ復帰、という手続きを1つのdefun本体として書き（本ファイル自身は`*package*`が`common-lisp-user`のまま読み切られるため、この記述自体はmilestone79/81で発見した特殊形式可視性制約に触れない）、切替中にinternしたシンボルが復帰後も同一オブジェクト(`eq`)で見つかること、および`*package*`が確実に`common-lisp-user`へ復帰していることを確認する。修飾子プリンタの統合テストは、印字結果を文字列として捕捉するLisp APIが存在しないため`test/lisp/`への追加はできず、milestone79で実施済みの個別対話REPL検証（`print-test-a:shared-a`等）を引き続き正式な検証手段とする（本マイルストーンでの追加作業なし）。`make build`・`make test`（全19ファイル、新規2テストの`t`を含む`run-test-package`の`and`チェーン経由でのPASSと、他18ファイルの既存自己テスト群のPASSログ）で回帰が無いことを確認した。 |
 
 ### フェーズF: 非tail位置のlet系スタックリークの根本修正（milestone78で発見）
 
@@ -153,6 +153,8 @@
 両方に回帰が無いことを確認してから次のマイルストーンに進む。フェーズA（68〜72）は挙動不変な内部
 置換のみのため、特に`test/lisp/test-package.lisp`が無修正のまま全項目パスし続けることを各マイル
 ストーンの合格基準とする。フェーズの区切りごとに、それまでの全マイルストーンの回帰確認をまとめて
-行う。マイルストーン82（本ロードマップ全体の完了条件）では、`test/lisp/test-package.lisp`を
+行う。マイルストーン82（フェーズA〜Eの完了条件）では、`test/lisp/test-package.lisp`を
 `make-package`/`export`/`use-package`/`defpackage`/`in-package`/修飾子リーダー/修飾子プリンタを
-一通り経由する統合シナリオへ拡張した上で、既存自己テスト群全件の回帰確認を行う。
+一通り経由する統合シナリオへ拡張した上で、既存自己テスト群全件の回帰確認を行う。フェーズF（83〜84）
+・フェーズG（85〜86）は、フェーズA〜Eの実装中に発見した既存バグの根本修正として独立に完了させる
+ため、これらの完了までを本ロードマップ全体の完了条件とする。
