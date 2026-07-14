@@ -89,7 +89,7 @@
 
 | # | マイルストーン | 状態 | 主な内容 |
 |---|---|---|---|
-| 75 | `make-package`/`find-package`ビルトイン | 未着手 | #69のC内部APIをラップしたLisp呼び出し可能な組み込み関数を追加する。パッケージオブジェクト自身（不透明ポインタではなく本物の第一級`LispObject`）を返す。`find-package`は未存在なら`nil`を返す。 |
+| 75 | `make-package`/`find-package`ビルトイン | 完了 | `lisp_builtin_make_package`/`lisp_builtin_find_package`を新設し、それぞれ引数（Lisp文字列）を`lisp_assert_string`で検証した上で、#69で用意済みの`lisp_make_package`/`lisp_find_package`（いずれも既にstaticでC内部専用だった関数）へそのまま委譲する薄いラッパーとして実装した。`lisp_make_package`は名前重複時に既存オブジェクトを返す冪等性を持つため、`make-package`をLispから同名で何度呼んでも同一オブジェクト（`eq`）が返る。`lisp_find_package`は未存在の名前に対してもとから`LISP_NIL`を返す実装だったため変更不要だった。`env`への登録は既存の`keywordp`の直後に追加した。 |
 | 76 | `export`ビルトインとexportリスト | 未着手 | パッケージ＋シンボル（複数可）を受け取り、対象パッケージのexport consリストへ`eq`基準で重複なく追加する組み込み関数を追加する。#74のリーダーが参照する「exportされているか」判定はこのリストを直接見る。 |
 | 77 | `use-package`ビルトインとuse-list継承を反映したintern解決 | 未着手 | パッケージ間の`use-package`関係をuseリストへ追加する組み込み関数を追加し、`lisp_intern_in_package`の探索順序を「自パッケージのローカルシンボル→useしている各パッケージのexportシンボル→見つからなければ新規作成（自パッケージへ）」に拡張する。`(in-package :foo)`後に無修飾で書いた名前が、`foo`が`use-package`している別パッケージのexportシンボルと同一オブジェクト（`eq`）に解決される——本設計の核心部分。名前衝突（複数のuse対象が同名exportを持つ場合）は最小限のガードとしてエラーにする。`use-package`を呼ばない限り探索順序に追加ステップが挟まるだけで結果は不変であることを確認する。 |
 | 78 | `defpackage`マクロと`in-package`関数 | 未着手 | `in-package`はパッケージ名を受け取り`(find-package name)`が見つからなければエラー、見つかれば`*package*`のシンボルセルの`value`を直接書き換える組み込み関数として実装する。`defpackage`は`lisp/stdlib.lisp`にLispマクロとして実装し、`:export`/`:use`句を`make-package`+`export`+`use-package`呼び出し列へ展開する（既存の`cond`等と同じ「マクロで既存プリミティブへ脱糖する」パターン。`:nicknames`等の他句は対象外）。同名`defpackage`の再実行は#69の重複名冪等性によりべき等になる。 |

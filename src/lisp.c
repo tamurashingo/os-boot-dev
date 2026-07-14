@@ -865,7 +865,7 @@ static LispObject lisp_keyword_package;
 // 同じパターン）
 static LispObject lisp_sym_package;
 
-// 現時点ではLispからは使わない内部APIだが、将来の`find-package`相当の土台として用意しておく
+// milestone75の`find-package`ビルトインはこれをそのまま呼ぶ
 static LispObject lisp_find_package(const char *name) {
     for (LispObject cur = global_packages; cur != LISP_NIL; cur = lisp_cdr(cur)) {
         LispObject pkg = lisp_car(cur);
@@ -2805,6 +2805,22 @@ LispObject lisp_builtin_keywordp(LispObject args) {
     return lisp_symbol_package_is_keyword(cell) ? lisp_sym_t : LISP_NIL;
 }
 
+// (make-package name): 名前がまだ存在しなければ新規のパッケージオブジェクトを作って
+// global_packagesへ登録し、既に存在すれば既存オブジェクトをそのまま返す（milestone69の
+// lisp_make_packageの冪等性そのまま）。milestone75でLispから初めて呼び出せるようになった
+LispObject lisp_builtin_make_package(LispObject args) {
+    LispObject name_obj = lisp_car(args);
+    lisp_assert_string(name_obj);
+    return lisp_make_package(lisp_closure_cell(name_obj)->str_data, 0);
+}
+
+// (find-package name): 名前に一致するパッケージオブジェクトを返す。見つからなければnilを返す
+LispObject lisp_builtin_find_package(LispObject args) {
+    LispObject name_obj = lisp_car(args);
+    lisp_assert_string(name_obj);
+    return lisp_find_package(lisp_closure_cell(name_obj)->str_data);
+}
+
 // (rplaca cons-cell new-car): cons-cellのcarをnew-carへ破壊的に書き換え、cons-cell自身を
 // 返す（milestone 27。CommonLispのrplacaと同じ「書き換えたコンスセル自身を返す」仕様で、
 // svsetがvalueを返すのとは異なる）。既存のlisp_set_carがlisp_assert_consを内包しているため
@@ -3408,6 +3424,8 @@ LispObject lisp_builtins_init(void) {
     env = lisp_env_extend(env, lisp_intern("atom"), lisp_make_builtin(lisp_builtin_atom));
     env = lisp_env_extend(env, lisp_intern("symbolp"), lisp_make_builtin(lisp_builtin_symbolp));
     env = lisp_env_extend(env, lisp_intern("keywordp"), lisp_make_builtin(lisp_builtin_keywordp));
+    env = lisp_env_extend(env, lisp_intern("make-package"), lisp_make_builtin(lisp_builtin_make_package));
+    env = lisp_env_extend(env, lisp_intern("find-package"), lisp_make_builtin(lisp_builtin_find_package));
     env = lisp_env_extend(env, lisp_intern("rplaca"), lisp_make_builtin(lisp_builtin_rplaca));
     env = lisp_env_extend(env, lisp_intern("rplacd"), lisp_make_builtin(lisp_builtin_rplacd));
     env = lisp_env_extend(env, lisp_intern("hash-code"), lisp_make_builtin(lisp_builtin_hash_code));

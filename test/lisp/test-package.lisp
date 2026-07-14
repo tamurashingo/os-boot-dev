@@ -26,7 +26,16 @@
   (and (special-variable-p (quote *package*))
        (eq (eq *package* nil) nil)))
 
+; milestone 75: make-packageは同じ名前で2度呼んでも同一オブジェクト(eq)を返し(冪等性)、
+; find-packageはその同一オブジェクトを見つけられ、未存在の名前にはnilを返すことを確認する
+(defun run-test-package-make-find ()
+  (and (eq (make-package "test-pkg75") (make-package "test-pkg75"))
+       (eq (find-package "test-pkg75") (make-package "test-pkg75"))
+       (eq (find-package "no-such-package-75") nil)
+       (eq (find-package "common-lisp-user") (make-package "common-lisp-user"))))
+
 (defun run-test-package ()
   (and (run-test-package-keyword-identity)
        (run-test-package-namespace-separation)
-       (run-test-package-star-package-var)))
+       (run-test-package-star-package-var)
+       (run-test-package-make-find)))
