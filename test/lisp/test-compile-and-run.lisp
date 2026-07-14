@@ -259,6 +259,45 @@
        (run-test-compile-and-run-quasiquote-splicing)
        (run-test-compile-and-run-quasiquote-nested-literal)))
 
+; milestone 57: compile-expr: defvar/defparameter対応の回帰テスト。test-dynamic-vars.lisp
+; (interpreter側、milestone18)のdefvar/defparameter単体テストをcompile-and-run経由に
+; 対応させる。*compile57-...*は他のテストで使われていない新しいシンボルを使い、
+; 「まだis_specialでない状態からdefvar/defparameterで確立する」過程自体を検証する
+; (compile-let/compile-let*はis_specialを考慮しないため、letによる動的再束縛の
+; 回帰テストはここに含めない。lisp/stdlib.lispのcompile-defvar手前のコメント参照)
+
+(defun run-test-compile-and-run-defvar-establishes ()
+  (and (eq (compile-and-run '(defvar *compile57-dv-a* 111)) '*compile57-dv-a*)
+       (eq *compile57-dv-a* 111)))
+
+(defun run-test-compile-and-run-defvar-no-overwrite ()
+  ; 既にis_specialなので、この2回目のdefvarは値を書き換えない
+  (and (eq (compile-and-run '(defvar *compile57-dv-a* 999)) '*compile57-dv-a*)
+       (eq *compile57-dv-a* 111)))
+
+(defun run-test-compile-and-run-defparameter-overwrite ()
+  ; defparameterは既存の値があっても常に上書きする
+  (and (eq (compile-and-run '(defparameter *compile57-dv-a* 222)) '*compile57-dv-a*)
+       (eq *compile57-dv-a* 222)))
+
+(defun run-test-compile-and-run-defvar-global-ref-after-establish ()
+  ; 確立後は通常のグローバル変数参照(OP_GLOBAL_REF)としても正しく見える
+  (eq (compile-and-run '(+ *compile57-dv-a* 1)) 223))
+
+(defun run-test-compile-and-run-defvar-return-from-aborts ()
+  ; value-formの評価中にreturn-fromが発生した場合、is_specialは立たない
+  ; (lisp_evalのdefvar特殊形式、src/lisp.cと同じ安全性)
+  (and (eq (compile-and-run '(block b (defvar *compile57-dv-c* (return-from b 'aborted))))
+           'aborted)
+       (eq (special-variable-p '*compile57-dv-c*) nil)))
+
+(defun run-test-compile-and-run-defvar ()
+  (and (run-test-compile-and-run-defvar-establishes)
+       (run-test-compile-and-run-defvar-no-overwrite)
+       (run-test-compile-and-run-defparameter-overwrite)
+       (run-test-compile-and-run-defvar-global-ref-after-establish)
+       (run-test-compile-and-run-defvar-return-from-aborts)))
+
 (defun run-test-compile-and-run ()
   (and (run-test-compile-and-run-arithmetic)
        (run-test-compile-and-run-if-then)
@@ -284,5 +323,6 @@
        (run-test-compile-and-run-when)
        (run-test-compile-and-run-unless)
        (run-test-compile-and-run-block-return)
-       (run-test-compile-and-run-quasiquote)))
+       (run-test-compile-and-run-quasiquote)
+       (run-test-compile-and-run-defvar)))
 

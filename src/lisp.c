@@ -2745,6 +2745,31 @@ LispObject lisp_builtin_svset(LispObject args) {
     return value;
 }
 
+// milestone 57: compile-expr側でdefvar/defparameterを脱糖するための最小プリミティブ。
+// is_specialはコンパイル時に静的解決できない実行時の可変プロパティ（defvarが実際に
+// 実行されるまで真にならない）なので、新opcodeではなく通常のOP_CALL経由で呼べる
+// ビルトインとして公開する（milestone56がappendを再利用したのと同じ考え方）。
+// lisp_evalのdefvar/defparameter特殊形式（本ファイル上部）と同じis_special/valueの
+// 直接操作を行うが、値の評価タイミング（既存is_specialなら評価しない等）は
+// compile-defvar側（lisp/stdlib.lisp）でif/prognへ脱糖して制御する
+LispObject lisp_builtin_special_variable_p(LispObject args) {
+    LispObject sym = lisp_car(args);
+    lisp_assert_symbol(sym);
+    return lisp_symbol_cell(sym)->is_special ? lisp_sym_t : LISP_NIL;
+}
+
+// (establish-special sym value): symをvalueで動的変数として確立する（常に上書き）。
+// symを返す
+LispObject lisp_builtin_establish_special(LispObject args) {
+    LispObject sym = lisp_car(args);
+    lisp_assert_symbol(sym);
+    LispObject value = lisp_car(lisp_cdr(args));
+    LispSymbol *cell = lisp_symbol_cell(sym);
+    cell->value = value;
+    cell->is_special = 1;
+    return sym;
+}
+
 // milestone 46: compile-expr(Lisp側)が生成したbytecode/constants/upvalue-descsの
 // リストから実際のVMコンパイル済み関数を組み立てる検証用ブリッジ。固定長のCローカル配列に
 // 一旦積んでからlisp_make_compiled等へ渡す（load時のlisp_load_bufferと同じ「静的/固定長の
@@ -3120,6 +3145,8 @@ LispObject lisp_builtins_init(void) {
     env = lisp_env_extend(env, lisp_intern("macroexpand-1"), lisp_make_builtin(lisp_builtin_macroexpand_1));
     env = lisp_env_extend(env, lisp_intern("vm-make-closure"), lisp_make_builtin(lisp_builtin_vm_make_closure));
     env = lisp_env_extend(env, lisp_intern("vm-exec"), lisp_make_builtin(lisp_builtin_vm_exec));
+    env = lisp_env_extend(env, lisp_intern("special-variable-p"), lisp_make_builtin(lisp_builtin_special_variable_p));
+    env = lisp_env_extend(env, lisp_intern("establish-special"), lisp_make_builtin(lisp_builtin_establish_special));
 
     // *macroexpand-hook*をdefvarと同じ形（is_special=1 + 初期値）で直接セットアップする
     // (milestone 21)。動的変数はenvチェーンに束縛を積まないため、global_envへの

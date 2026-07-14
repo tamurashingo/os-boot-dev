@@ -738,6 +738,41 @@
 (defun compile-quasiquote (form ctx scope)
   (compile-expr (compile-qq-desugar (car (cdr form))) ctx scope))
 
+; --- compile-expr: defvar/defparameter対応 (milestone 57, documents/lisp_vm_integration.md) ---
+; is_specialはdefvarが実際に実行されるまで真にならない実行時の可変プロパティであり、
+; コンパイル時に静的解決できない。そのため新opcodeは追加せず、is_special/valueへの
+; 最小限の直接アクセスをC側にspecial-variable-p/establish-specialという通常のビルトイン
+; として公開し(src/lisp.c)、既存のOP_CALL(milestone56がappendを再利用したのと同じ考え方)
+; 経由で呼び出す。
+; defvarは「既にis_specialなら値を評価も上書きもしない」という非対称な条件分岐を持つ
+; (lisp_evalのdefvar特殊形式、src/lisp.c、milestone18と同じ挙動)。これをVMのif/progn
+; へそのまま脱糖する(milestone54のprogn等と同じ「新しいS式を組み立てて再帰する」技法):
+;   (defvar sym value) => (if (special-variable-p 'sym) 'sym (establish-special 'sym value))
+;   (defparameter sym value) => (establish-special 'sym value)
+; value-formの評価中にreturn-fromが発生した場合、establish-specialへのOP_CALL自体が
+; バイトコード上まだ実行されていない位置で早期returnするため、is_specialは立たない
+; (lisp_evalのif (lisp_return_tag != LISP_NIL) return; と同じ安全性が、OP_CALLの
+; 引数評価が単純に後続命令へ進めなくなるというVMの構造から自然に得られる)。
+;
+; 注意: compile-let/compile-let*はis_specialを一切考慮しない。既存の特殊変数名をletで
+; 束縛すると、真の動的束縛(letを抜ける際の復元、return-fromで中断されても復元される保証)
+; ではなく通常のレキシカルシャドーイングとして扱われる。これを安全に実現するにはVM側に
+; unwind-protect相当の機構(return-fromでフレームが早期returnしても後続の「復元」命令を
+; 必ず実行する仕組み)が必要だが、これは本milestoneの一行の主旨(defvar/defparameter
+; フォーム自体のコンパイル対応)を超える範囲であり、明確に対象外とする
+(defun compile-defvar (form ctx scope)
+  (let ((sym (car (cdr form)))
+        (value-form (car (cdr (cdr form)))))
+    (compile-expr (list 'if (list 'special-variable-p (list 'quote sym))
+                             (list 'quote sym)
+                             (list 'establish-special (list 'quote sym) value-form))
+                  ctx scope)))
+
+(defun compile-defparameter (form ctx scope)
+  (let ((sym (car (cdr form)))
+        (value-form (car (cdr (cdr form)))))
+    (compile-expr (list 'establish-special (list 'quote sym) value-form) ctx scope)))
+
 ; atomは(既にレキシカル束縛の有無を確認する)compile-variable-refに委ねる。
 ; cons/car/cdr/eq/+はインライン化された専用命令へ、それ以外の形式(carがsymbol
 ; でもlambda式でも構わない)はすべて汎用の関数呼び出しcompile-callへコンパイル
@@ -759,6 +794,8 @@
     ((eq (car form) 'unless) (compile-unless form ctx scope))
     ((eq (car form) 'block) (compile-block form ctx scope))
     ((eq (car form) 'return-from) (compile-return-from form ctx scope))
+    ((eq (car form) 'defvar) (compile-defvar form ctx scope))
+    ((eq (car form) 'defparameter) (compile-defparameter form ctx scope))
     ((eq (car form) 'setq) (compile-setq form ctx scope))
     ((eq (car form) 'lambda) (compile-lambda form ctx scope))
     ((eq (car form) '+) (compile-add form ctx scope))
