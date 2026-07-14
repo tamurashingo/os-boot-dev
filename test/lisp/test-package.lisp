@@ -34,8 +34,23 @@
        (eq (find-package "no-such-package-75") nil)
        (eq (find-package "common-lisp-user") (make-package "common-lisp-user"))))
 
+; milestone 76: exportはシンボルをexportリストへ追加しtを返す。1個のシンボル・複数シンボルの
+; リスト・packageを省略した場合(*package*、現時点ではcommon-lisp-user)のいずれでもエラーなく
+; tが返ることを確認する。exportされたシンボルが実際にpkg:sym(単一コロン)で解決できることの検証は、
+; "load"がファイル全体を読み切ってから評価する実装(milestone72の既知の制約と同根)であるため、
+; 同一ファイル内でexport実行→その効果を読み取り時に要求するpkg:sym修飾子を使うテストが書けない
+; (readerがexport実行前の状態でファイル全体を読もうとして失敗する)。この組み合わせの検証は
+; C内部API直呼びの自己テスト(lisp_reader_export_selftest、lisp.c)と個別の対話REPLセッションで
+; 別途行う。
+(defun run-test-package-export ()
+  (and (eq (export (quote export-test-sym-76a)) t)
+       (eq (export (list (quote export-test-sym-76b) (quote export-test-sym-76c))) t)
+       (eq (export (quote export-test-sym-76d) (find-package "common-lisp-user")) t)
+       (eq (export (quote export-test-sym-76a)) t)))
+
 (defun run-test-package ()
   (and (run-test-package-keyword-identity)
        (run-test-package-namespace-separation)
        (run-test-package-star-package-var)
-       (run-test-package-make-find)))
+       (run-test-package-make-find)
+       (run-test-package-export)))

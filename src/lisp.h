@@ -117,6 +117,11 @@ void lisp_vm_reset_stack(void);
 // 真なら成功
 int lisp_reader_package_qualifier_selftest(void);
 
+// milestone 76: Lisp呼び出し可能なexportビルトインと#74のリーダー修飾子を組み合わせた自己テスト。
+// 「exportを評価した後にpkg:symを読む」という順序をtest/lisp/配下のファイル(load経由)では組めない
+// ため（milestone72の既知の制約と同根）、C内で直接呼び出し順序を制御して検証する。真なら成功
+int lisp_reader_export_selftest(void);
+
 // --- VMオペコード (milestone 35) ---
 // 各命令は1byteのopcode+固定長の即値オペランド（今のところ0または2byte、リトルエンディアン）
 // から成る。手動でバイトコード配列を構築する目標1の各マイルストン（35〜39）はこの定義を直接使う

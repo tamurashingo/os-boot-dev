@@ -2821,6 +2821,80 @@ LispObject lisp_builtin_find_package(LispObject args) {
     return lisp_find_package(lisp_closure_cell(name_obj)->str_data);
 }
 
+// (export symbols &optional package): symbolsは単一のsymbolまたはsymbolのリスト。
+// packageを省略すると*package*（現在のパッケージ）を対象にする。対象パッケージの
+// pkg_exportsコンスリストへeq（==によるポインタ比較）基準で重複なく追加する（milestone76）。
+// #74のリーダーの単一コロン修飾子（pkg:sym）はこのリストをそのまま参照する
+LispObject lisp_builtin_export(LispObject args) {
+    LispObject symbols_arg = lisp_car(args);
+    LispObject rest = lisp_cdr(args);
+    LispObject pkg = lisp_is_cons(rest) ? lisp_car(rest) : lisp_symbol_cell(lisp_sym_package)->value;
+    LispClosure *pkg_cell = lisp_closure_cell(pkg);
+
+    LispObject symbols_list = lisp_is_symbol(symbols_arg) ? lisp_cons(symbols_arg, LISP_NIL) : symbols_arg;
+    for (LispObject cur = symbols_list; cur != LISP_NIL; cur = lisp_cdr(cur)) {
+        LispObject sym = lisp_car(cur);
+        lisp_assert_symbol(sym);
+        int already_exported = 0;
+        for (LispObject e = pkg_cell->pkg_exports; e != LISP_NIL; e = lisp_cdr(e)) {
+            if (lisp_car(e) == sym) {
+                already_exported = 1;
+                break;
+            }
+        }
+        if (!already_exported) {
+            pkg_cell->pkg_exports = lisp_cons(sym, pkg_cell->pkg_exports);
+        }
+    }
+    return lisp_sym_t;
+}
+
+// milestone 76: lisp_builtin_export（Lisp呼び出し可能なexport）と#74のリーダー修飾子を
+// 組み合わせた自己テスト。「exportを評価した後にpkg:symを読む」という順序は、lisp_load_eval_buffer
+// がファイル全体を読み切ってから評価する実装のため test/lisp/ 配下のファイル(load経由)では
+// 組めない（milestone72の既知の制約と同根）。C内で直接呼び出し順序を制御することで検証する
+int lisp_reader_export_selftest(void) {
+    LispObject pkg = lisp_make_package("selftest-pkg76", 0);
+    LispObject sym = lisp_intern_in_package(pkg, "exported-sym76");
+    LispClosure *pkg_cell = lisp_closure_cell(pkg);
+    if (pkg_cell->pkg_exports != LISP_NIL) {
+        return 0;
+    }
+
+    LispObject args = lisp_cons(sym, lisp_cons(pkg, LISP_NIL));
+    if (lisp_builtin_export(args) != lisp_sym_t) {
+        return 0;
+    }
+    // exportした後は単一コロンのpkg:symで同一オブジェクトに解決できる
+    if (lisp_read_from_buffer("selftest-pkg76:exported-sym76") != sym) {
+        return 0;
+    }
+
+    // 同じシンボルをもう一度exportしても結果はtのままで、pkg_exportsに重複追加されない
+    if (lisp_builtin_export(args) != lisp_sym_t) {
+        return 0;
+    }
+    UINTN export_count = 0;
+    for (LispObject cur = pkg_cell->pkg_exports; cur != LISP_NIL; cur = lisp_cdr(cur)) {
+        export_count++;
+    }
+    if (export_count != 1) {
+        return 0;
+    }
+
+    // packageを省略した場合は呼び出し時点の*package*(common-lisp-user)が対象になる
+    LispObject default_pkg_sym = lisp_intern("export-default-pkg-selftest76");
+    LispObject default_args = lisp_cons(default_pkg_sym, LISP_NIL);
+    if (lisp_builtin_export(default_args) != lisp_sym_t) {
+        return 0;
+    }
+    if (lisp_read_from_buffer("common-lisp-user:export-default-pkg-selftest76") != default_pkg_sym) {
+        return 0;
+    }
+
+    return 1;
+}
+
 // (rplaca cons-cell new-car): cons-cellのcarをnew-carへ破壊的に書き換え、cons-cell自身を
 // 返す（milestone 27。CommonLispのrplacaと同じ「書き換えたコンスセル自身を返す」仕様で、
 // svsetがvalueを返すのとは異なる）。既存のlisp_set_carがlisp_assert_consを内包しているため
@@ -3426,6 +3500,7 @@ LispObject lisp_builtins_init(void) {
     env = lisp_env_extend(env, lisp_intern("keywordp"), lisp_make_builtin(lisp_builtin_keywordp));
     env = lisp_env_extend(env, lisp_intern("make-package"), lisp_make_builtin(lisp_builtin_make_package));
     env = lisp_env_extend(env, lisp_intern("find-package"), lisp_make_builtin(lisp_builtin_find_package));
+    env = lisp_env_extend(env, lisp_intern("export"), lisp_make_builtin(lisp_builtin_export));
     env = lisp_env_extend(env, lisp_intern("rplaca"), lisp_make_builtin(lisp_builtin_rplaca));
     env = lisp_env_extend(env, lisp_intern("rplacd"), lisp_make_builtin(lisp_builtin_rplacd));
     env = lisp_env_extend(env, lisp_intern("hash-code"), lisp_make_builtin(lisp_builtin_hash_code));
