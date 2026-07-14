@@ -580,10 +580,27 @@
 ; 同じ形でOP_ADDへの直接コンパイルを追加する。加算は可換なのでpop順自体に
 ; 意味はないが、他のプリミティブと同じ「左の式を先にコンパイルする(先にpushする)」
 ; 規則に合わせる
+;
+; 修正 (milestone 58): OP_ADDは2引数分しかpopしないため、当初のcompile-addは
+; 引数を常に2個(第1・第2引数)だけコンパイルし、3個以上の引数を黒く無視していた
+; (例: (+ 3 3 3)がpanic無しに6を返す)。+はlisp_builtin_add(src/lisp.c)側では
+; 可変長引数なので、ビルトイン呼び出し経由(OP_CALL)ならこの問題は起きないが、
+; compile-addは直接OP_ADDへインライン化するため独自にn引数対応が必要だった。
+; milestone57まではcompile-and-runを明示的に呼ぶテストコードでしか(+ a b)の
+; 2引数の形しか使われず露見しなかったが、milestone58でトップレベルformが既定で
+; コンパイル経路を通るようになった結果、通常の3引数以上の+呼び出しで初めて
+; 発覚した。引数無し(結果0)・1個(そのまま)・2個以上(右結合でOP_ADDを繰り返す)の
+; 全ての引数個数を再帰的に処理する
 (defun compile-add (form ctx scope)
-  (compile-concat (compile-expr (car (cdr form)) ctx scope)
-                  (compile-expr (car (cdr (cdr form))) ctx scope)
-                  (list (list *op-add*))))
+  (compile-add-args (cdr form) ctx scope))
+
+(defun compile-add-args (args ctx scope)
+  (cond
+    ((null args) (compile-expr 0 ctx scope))
+    ((null (cdr args)) (compile-expr (car args) ctx scope))
+    (t (compile-concat (compile-expr (car args) ctx scope)
+                        (compile-add-args (cdr args) ctx scope)
+                        (list (list *op-add*))))))
 
 ; --- compile-expr: progn/let*/cond/and/or/when/unless (milestone 54, documents/lisp_vm_integration.md) ---
 ; この7種はいずれもVMに新しい命令を追加せず、既存のif/let(とジャンプ命令)の組み合わせに
@@ -854,3 +871,11 @@
     (let ((bytecode (assemble (compile-concat (compile-expr (macroexpand-all expr) ctx (compile-make-top-scope))
                                                (list (list *op-return*))))))
       (vm-exec (vm-make-closure 0 bytecode (vm-materialize-constants (compile-ctx-constants ctx)) nil)))))
+
+; milestone 58: 統一トップレベル評価ドライバの導入。stdlib.lispはこのファイル自身の
+; 中に、compile-expr（このファイル内で上で定義済み）より前に置かれたdefvar形式の
+; opcode定数などを含む。lisp_eval_toplevel（src/lisp.c）がコンパイル経路を使い始める
+; のはこのファイルの読み込みが最後まで終わった後でなければならないため、このファイルの
+; 本当に最後のフォームとしてここでフラグを立てる。これより後にstdlib.lispへ新しいdefunを
+; 追加してはならない（追加する場合はこのフォームより前に置くこと）
+(mark-compiler-ready)

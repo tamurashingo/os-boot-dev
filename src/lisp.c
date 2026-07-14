@@ -2485,13 +2485,54 @@ LispObject lisp_eval(LispObject expr, LispObject env) {
     lisp_panic(L"cannot evaluate this object");
 }
 
+// milestone 58: 統一トップレベル評価ドライバのコンパイラ準備状態フラグ。既定false
+// （ツリーウォークのみ）で、lisp/stdlib.lisp自身の読み込みが完了するまではfalseのまま
+// 保たれる。stdlib.lispがcompile-expr等の自分自身の定義より前に置かれたdefvar形式の
+// opcode定数などをこのフラグがtrueの状態で読もうとすると「まだ存在しないコンパイラで
+// コンパイラ自身をロードする」鶏と卵問題が起きるため、stdlib.lispの最後のフォームから
+// mark-compiler-readyを呼んでtrueへ切り替える運用とする。当初の計画（documents/
+// lisp_vm_integration.md）ではこのフラグの導入はmilestone64（フェーズ3、
+// lisp/compiler.lisp分割後の2段階起動）を予定していたが、milestone58の時点で
+// 「evalの既定動作をコンパイル+VM実行にする」ことがフラグ無しには成立しない
+// （stdlib.lisp自身の起動を壊す）ことが判明したため、前倒しでここに導入する
+static int lisp_compiler_ready = 0;
+
+// stdlib.lispの最後のフォームから呼び、以降のトップレベル評価を新経路
+// （macroexpand-all→compile-expr→vm-exec）へ切り替える
+LispObject lisp_builtin_mark_compiler_ready(LispObject args) {
+    (void)args;
+    lisp_compiler_ready = 1;
+    return lisp_sym_t;
+}
+
+// テスト用の照会ビルトイン。stdlib.lispの読み込み完了後は常にtを返す
+LispObject lisp_builtin_compiler_ready_p(LispObject args) {
+    (void)args;
+    return lisp_compiler_ready ? lisp_sym_t : LISP_NIL;
+}
+
 // REPLの1行、またはloadの1トップレベル式としてexprをglobal_env上で評価する。
+// lisp_compiler_readyが真で、かつexprの先頭がdefun/defmacroでなければ、
+// macroexpand-all→compile-expr→vm-execの新経路（lisp/stdlib.lisp）へ委譲する。
+// defmacroは恒久的にツリーウォークへフォールバックする（マクロ展開はインタプリタ操作
+// そのものであり、コンパイル時に発生する）。defunはフェーズ2（milestone60、defun自体の
+// コンパイル時コード生成化）完了までの過渡的措置として同様にフォールバックする
+// (milestone58, documents/lisp_vm_integration.md)。
 // return-fromの脱出シグナルが対応するblockに一度も捕捉されずここまで残っている場合、
 // タグが指す実行中のblockが存在しないというユーザー側の誤りなのでpanicする。
 // これをせずに素通しすると、残ったシグナルが次の入力の評価を最初の一歩で
-// 打ち切ってしまい、以降すべての評価が無言で壊れる (milestone 19)
+// 打ち切ってしまい、以降すべての評価が無言で壊れる (milestone 19)。この安全性は
+// 新経路（vm-execの戻り値をそのまま返しつつlisp_return_tagは残るcompile-and-runの
+// 挙動）でも同様に成り立つため、経路に関わらず共通の末尾チェックとして残す
 LispObject lisp_eval_toplevel(LispObject expr) {
-    LispObject result = lisp_eval(expr, global_env);
+    LispObject op = lisp_is_cons(expr) ? lisp_car(expr) : LISP_NIL;
+    LispObject result;
+    if (lisp_compiler_ready && op != lisp_sym_defun && op != lisp_sym_defmacro) {
+        LispObject compile_and_run = lisp_env_lookup(global_env, lisp_intern("compile-and-run"));
+        result = lisp_apply(compile_and_run, lisp_cons(expr, LISP_NIL));
+    } else {
+        result = lisp_eval(expr, global_env);
+    }
     if (lisp_return_tag != LISP_NIL) {
         lisp_panic(L"return-from: no enclosing block for this tag");
     }
@@ -3147,6 +3188,8 @@ LispObject lisp_builtins_init(void) {
     env = lisp_env_extend(env, lisp_intern("vm-exec"), lisp_make_builtin(lisp_builtin_vm_exec));
     env = lisp_env_extend(env, lisp_intern("special-variable-p"), lisp_make_builtin(lisp_builtin_special_variable_p));
     env = lisp_env_extend(env, lisp_intern("establish-special"), lisp_make_builtin(lisp_builtin_establish_special));
+    env = lisp_env_extend(env, lisp_intern("mark-compiler-ready"), lisp_make_builtin(lisp_builtin_mark_compiler_ready));
+    env = lisp_env_extend(env, lisp_intern("compiler-ready-p"), lisp_make_builtin(lisp_builtin_compiler_ready_p));
 
     // *macroexpand-hook*をdefvarと同じ形（is_special=1 + 初期値）で直接セットアップする
     // (milestone 21)。動的変数はenvチェーンに束縛を積まないため、global_envへの
