@@ -4,8 +4,8 @@
 esp_dir/EFI/BOOT/init.lisp を動的に生成してテスト対象ファイルをloadし、
 run-test-<name>関数の結果をwrite-lineでシリアル出力させる。QEMUを
 headlessで起動し、シリアル出力(unix socket)を監視して合否を判定したら
-QEMUを終了させる。LISP_MAX_SYMBOLS(256)の制約上、テストファイルは
-1回のQEMU起動につき1つだけ読み込む。
+QEMUを終了させる。テスト間の状態分離のため、テストファイルは1回の
+QEMU起動につき1つだけ読み込む。
 """
 import os
 import re
@@ -31,6 +31,17 @@ _OVMF_CODE_CANDIDATES = [
     "/usr/share/OVMF/OVMF_CODE_4M.fd",
 ]
 
+# OVMF_CODEと対になるOVMF_VARS(NVRAM変数ストア)。VARS用のpflashを別途渡さないと、
+# OVMFはNVRAM変数(ブート順序等)をESPディレクトリ内に"NvVars"というファイルとして
+# fat:rw:ドライバ経由で書き込む。これがvvfatドライバの次回起動時の再スキャンと
+# 干渉し、2回目以降のQEMU起動でBoot0002(ESP)がLoad Errorになる不具合の原因だった。
+# 各テスト実行ごとに書き込み可能な一時コピーを渡すことでESPディレクトリへの
+# NVRAM書き込みを避け、テスト間の状態干渉を無くす。
+_OVMF_VARS_CANDIDATES = [
+    "/usr/share/OVMF/OVMF_VARS.fd",
+    "/usr/share/OVMF/OVMF_VARS_4M.fd",
+]
+
 
 def _default_ovmf_code():
     for candidate in _OVMF_CODE_CANDIDATES:
@@ -39,7 +50,15 @@ def _default_ovmf_code():
     return _OVMF_CODE_CANDIDATES[0]
 
 
+def _default_ovmf_vars():
+    for candidate in _OVMF_VARS_CANDIDATES:
+        if os.path.isfile(candidate):
+            return candidate
+    return _OVMF_VARS_CANDIDATES[0]
+
+
 OVMF_CODE = os.environ.get("OVMF_CODE") or _default_ovmf_code()
+OVMF_VARS_TEMPLATE = os.environ.get("OVMF_VARS") or _default_ovmf_vars()
 
 # OVMFはConOutをシリアルにも複製するため、画面クリア(ESC[2J)やカーソル移動(ESC[H)などの
 # ANSI/VT100エスケープシーケンスがそのままシリアル出力に混入する。これをprintでそのまま
@@ -75,6 +94,12 @@ def check_prerequisites():
             debug("ディレクトリ自体が存在しません: {}".format(ovmf_dir))
         ok = False
 
+    if os.path.isfile(OVMF_VARS_TEMPLATE):
+        debug("OVMF_VARS: {} ({} bytes)".format(OVMF_VARS_TEMPLATE, os.path.getsize(OVMF_VARS_TEMPLATE)))
+    else:
+        debug("OVMF_VARS が見つかりません: {}".format(OVMF_VARS_TEMPLATE))
+        ok = False
+
     boot_efi = os.path.join(ESP_DIR, "EFI", "BOOT", "BOOTX64.EFI")
     if os.path.isfile(boot_efi):
         debug("BOOTX64.EFI: {} ({} bytes)".format(boot_efi, os.path.getsize(boot_efi)))
@@ -95,9 +120,15 @@ def make_init_lisp(name):
 
 def run_qemu_and_capture(sock_path):
     qemu_log = tempfile.NamedTemporaryFile(prefix="qemu-log-", suffix=".txt", delete=False)
+
+    vars_copy = tempfile.NamedTemporaryFile(prefix="ovmf-vars-", suffix=".fd", delete=False)
+    vars_copy.close()
+    shutil.copyfile(OVMF_VARS_TEMPLATE, vars_copy.name)
+
     cmd = [
         "qemu-system-x86_64",
         "-drive", "if=pflash,format=raw,readonly=on,file=" + OVMF_CODE,
+        "-drive", "if=pflash,format=raw,file=" + vars_copy.name,
         "-drive", "format=raw,file=fat:rw:" + ESP_DIR,
         "-display", "none",
         "-no-reboot",
@@ -191,6 +222,10 @@ def run_qemu_and_capture(sock_path):
             except subprocess.TimeoutExpired:
                 qemu.kill()
                 qemu.wait(timeout=10)
+        try:
+            os.remove(vars_copy.name)
+        except OSError:
+            pass
         try:
             qemu_log.close()
             os.remove(qemu_log.name)
