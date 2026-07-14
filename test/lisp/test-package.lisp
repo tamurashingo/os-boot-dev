@@ -48,9 +48,26 @@
        (eq (export (quote export-test-sym-76d) (find-package "common-lisp-user")) t)
        (eq (export (quote export-test-sym-76a)) t)))
 
+; milestone 77: use-packageは対象パッケージのpkg_usesへ追加しtを返す。単一パッケージ・
+; パッケージのリスト・パッケージ名の文字列・packageを省略した場合(*package*、現時点では
+; common-lisp-user)・同じパッケージを再度useした場合(冪等)のいずれでもエラーなくtが返ることを
+; 確認する。use-packageの本質的な効果(無修飾名がuse-list経由で別パッケージのexportシンボルに
+; 解決されること)の検証は、対象を切り替えるには本来*package*を切り替える(in-package、
+; milestone78で未実装)必要があり、かつ"load"がファイル全体を読み切ってから評価する実装
+; (milestone72/76と同根の制約)であるため、同一ファイル内で「use-packageを実行→その効果に
+; 依存する無修飾名を読む」という順序のテストが書けない。この組み合わせはC内部API直呼びの
+; 自己テスト(lisp_reader_use_package_selftest、lisp.c)と個別の対話REPLセッションで別途行う。
+(defun run-test-package-use ()
+  (and (eq (use-package (make-package "test-pkg77a")) t)
+       (eq (use-package (list (make-package "test-pkg77b") (make-package "test-pkg77c"))) t)
+       (eq (use-package "test-pkg77a") t)
+       (eq (use-package (make-package "test-pkg77d") (find-package "common-lisp-user")) t)
+       (eq (use-package (make-package "test-pkg77a")) t)))
+
 (defun run-test-package ()
   (and (run-test-package-keyword-identity)
        (run-test-package-namespace-separation)
        (run-test-package-star-package-var)
        (run-test-package-make-find)
-       (run-test-package-export)))
+       (run-test-package-export)
+       (run-test-package-use)))

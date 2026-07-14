@@ -911,6 +911,19 @@ LispObject lisp_intern_in_package(LispObject pkg, const char *name) {
         }
     }
 
+    // milestone77: 自パッケージのローカルシンボルに無ければ、useしている各パッケージの
+    // exportシンボルを探す。use-package側で名前衝突を弾いているため、複数のuse対象に
+    // 同名が同時に存在することは無い前提で最初に見つかったものを返す
+    for (LispObject u = pkg_cell->pkg_uses; u != LISP_NIL; u = lisp_cdr(u)) {
+        LispClosure *used_cell = lisp_closure_cell(lisp_car(u));
+        for (LispObject e = used_cell->pkg_exports; e != LISP_NIL; e = lisp_cdr(e)) {
+            LispObject exported = lisp_car(e);
+            if (lisp_streq(lisp_symbol_cell(exported)->name, truncated)) {
+                return exported;
+            }
+        }
+    }
+
     LispSymbol *sym = (LispSymbol *)lisp_alloc_tracked(sizeof(LispSymbol), LISP_TAG_SYMBOL);
     UINTN i = 0;
     while (truncated[i] != '\0') {
@@ -2849,6 +2862,78 @@ LispObject lisp_builtin_export(LispObject args) {
     return lisp_sym_t;
 }
 
+// milestone 77: パッケージオブジェクトそのもの、またはパッケージ名の文字列のいずれも
+// パッケージ指定として受け取れるようにする（use-packageの各引数用）。文字列で存在しない
+// 名前を渡した場合はpanicする
+static LispObject lisp_resolve_package_designator(LispObject obj) {
+    if (lisp_is_package(obj)) {
+        return obj;
+    }
+    if (lisp_is_string(obj)) {
+        LispObject pkg = lisp_find_package(lisp_closure_cell(obj)->str_data);
+        if (pkg == LISP_NIL) {
+            lisp_panic(L"use-package: unknown package name");
+        }
+        return pkg;
+    }
+    lisp_panic(L"use-package: expected a package or package name");
+    return LISP_NIL;
+}
+
+// (use-package packages-to-use &optional package): packages-to-useは単一のパッケージ
+// （またはパッケージ名の文字列）、またはそれらのリスト。packageを省略すると*package*
+// （現在のパッケージ）を対象にする。それぞれのpkg_usesコンスリストへeqで重複なく追加する。
+// 名前衝突（追加しようとしているパッケージのexportシンボルが、対象パッケージの既存ローカル
+// シンボル、または既にuse済みの別パッケージのexportシンボルと同名だが別オブジェクトである
+// 場合）は最小限のガードとしてエラーにする（shadowingは対象外、milestone77）
+LispObject lisp_builtin_use_package(LispObject args) {
+    LispObject used_arg = lisp_car(args);
+    LispObject rest = lisp_cdr(args);
+    LispObject pkg = lisp_is_cons(rest) ? lisp_resolve_package_designator(lisp_car(rest))
+                                         : lisp_symbol_cell(lisp_sym_package)->value;
+    LispClosure *pkg_cell = lisp_closure_cell(pkg);
+
+    LispObject used_list = (lisp_is_package(used_arg) || lisp_is_string(used_arg))
+                                ? lisp_cons(used_arg, LISP_NIL)
+                                : used_arg;
+    for (LispObject cur = used_list; cur != LISP_NIL; cur = lisp_cdr(cur)) {
+        LispObject used_pkg = lisp_resolve_package_designator(lisp_car(cur));
+        LispClosure *used_cell = lisp_closure_cell(used_pkg);
+
+        for (LispObject e = used_cell->pkg_exports; e != LISP_NIL; e = lisp_cdr(e)) {
+            LispObject exported_sym = lisp_car(e);
+            const char *name = lisp_symbol_cell(exported_sym)->name;
+
+            for (LispObject ls = pkg_cell->pkg_symbols; ls != LISP_NIL; ls = lisp_cdr(ls)) {
+                if (lisp_car(ls) != exported_sym && lisp_streq(lisp_symbol_cell(lisp_car(ls))->name, name)) {
+                    lisp_panic(L"use-package: name conflict with an existing symbol");
+                }
+            }
+            for (LispObject up = pkg_cell->pkg_uses; up != LISP_NIL; up = lisp_cdr(up)) {
+                LispClosure *other_cell = lisp_closure_cell(lisp_car(up));
+                for (LispObject oe = other_cell->pkg_exports; oe != LISP_NIL; oe = lisp_cdr(oe)) {
+                    LispObject other_sym = lisp_car(oe);
+                    if (other_sym != exported_sym && lisp_streq(lisp_symbol_cell(other_sym)->name, name)) {
+                        lisp_panic(L"use-package: name conflict between used packages");
+                    }
+                }
+            }
+        }
+
+        int already_used = 0;
+        for (LispObject u = pkg_cell->pkg_uses; u != LISP_NIL; u = lisp_cdr(u)) {
+            if (lisp_car(u) == used_pkg) {
+                already_used = 1;
+                break;
+            }
+        }
+        if (!already_used) {
+            pkg_cell->pkg_uses = lisp_cons(used_pkg, pkg_cell->pkg_uses);
+        }
+    }
+    return lisp_sym_t;
+}
+
 // milestone 76: lisp_builtin_export（Lisp呼び出し可能なexport）と#74のリーダー修飾子を
 // 組み合わせた自己テスト。「exportを評価した後にpkg:symを読む」という順序は、lisp_load_eval_buffer
 // がファイル全体を読み切ってから評価する実装のため test/lisp/ 配下のファイル(load経由)では
@@ -2889,6 +2974,104 @@ int lisp_reader_export_selftest(void) {
         return 0;
     }
     if (lisp_read_from_buffer("common-lisp-user:export-default-pkg-selftest76") != default_pkg_sym) {
+        return 0;
+    }
+
+    return 1;
+}
+
+// milestone 77: lisp_builtin_use_package（Lisp呼び出し可能なuse-package）と、
+// lisp_intern_in_packageのuse-list探索拡張を組み合わせた自己テスト。「use-packageを評価した後に
+// 無修飾名をinternして解決する」という順序はmilestone76と同根の理由でtest/lisp/配下（load経由）
+// では組めないため、C内で直接呼び出し順序を制御して検証する
+int lisp_reader_use_package_selftest(void) {
+    LispObject pkg_a = lisp_make_package("selftest-pkg77a", 0);
+    LispObject shared_sym = lisp_intern_in_package(pkg_a, "shared-sym77");
+    LispObject export_args = lisp_cons(shared_sym, lisp_cons(pkg_a, LISP_NIL));
+    if (lisp_builtin_export(export_args) != lisp_sym_t) {
+        return 0;
+    }
+
+    LispObject pkg_b = lisp_make_package("selftest-pkg77b", 0);
+    LispObject use_args = lisp_cons(pkg_a, lisp_cons(pkg_b, LISP_NIL));
+    if (lisp_builtin_use_package(use_args) != lisp_sym_t) {
+        return 0;
+    }
+
+    // use-packageの効果で、pkg_bで無修飾名"shared-sym77"をinternするとpkg_aの
+    // exportシンボルと同一オブジェクト(eq)に解決される（新規シンボルは作られない）
+    if (lisp_intern_in_package(pkg_b, "shared-sym77") != shared_sym) {
+        return 0;
+    }
+    LispClosure *pkg_b_cell = lisp_closure_cell(pkg_b);
+    if (pkg_b_cell->pkg_symbols != LISP_NIL) {
+        return 0;
+    }
+
+    // 同じuse-packageを再度呼んでも冪等（pkg_usesに重複追加されない）
+    if (lisp_builtin_use_package(use_args) != lisp_sym_t) {
+        return 0;
+    }
+    UINTN use_count = 0;
+    for (LispObject cur = pkg_b_cell->pkg_uses; cur != LISP_NIL; cur = lisp_cdr(cur)) {
+        use_count++;
+    }
+    if (use_count != 1) {
+        return 0;
+    }
+
+    // パッケージ名の文字列でも指定できる（lisp_resolve_package_designator）
+    LispObject pkg_c = lisp_make_package("selftest-pkg77c", 0);
+    UINTN a_name_len = 0;
+    while ("selftest-pkg77a"[a_name_len] != '\0') {
+        a_name_len++;
+    }
+    LispObject pkg_a_name = lisp_make_string("selftest-pkg77a", a_name_len);
+    UINTN c_name_len = 0;
+    while ("selftest-pkg77c"[c_name_len] != '\0') {
+        c_name_len++;
+    }
+    LispObject pkg_c_name = lisp_make_string("selftest-pkg77c", c_name_len);
+    LispObject use_args_by_name = lisp_cons(pkg_a_name, lisp_cons(pkg_c_name, LISP_NIL));
+    if (lisp_builtin_use_package(use_args_by_name) != lisp_sym_t) {
+        return 0;
+    }
+    if (lisp_intern_in_package(pkg_c, "shared-sym77") != shared_sym) {
+        return 0;
+    }
+
+    // packages-to-useはリストでも複数まとめて指定できる
+    LispObject pkg_d = lisp_make_package("selftest-pkg77d", 0);
+    LispObject other_pkg = lisp_make_package("selftest-pkg77e", 0);
+    LispObject other_sym = lisp_intern_in_package(other_pkg, "other-sym77");
+    LispObject other_export_args = lisp_cons(other_sym, lisp_cons(other_pkg, LISP_NIL));
+    if (lisp_builtin_export(other_export_args) != lisp_sym_t) {
+        return 0;
+    }
+    LispObject use_list_arg = lisp_cons(pkg_a, lisp_cons(other_pkg, LISP_NIL));
+    LispObject use_args_list = lisp_cons(use_list_arg, lisp_cons(pkg_d, LISP_NIL));
+    if (lisp_builtin_use_package(use_args_list) != lisp_sym_t) {
+        return 0;
+    }
+    if (lisp_intern_in_package(pkg_d, "shared-sym77") != shared_sym) {
+        return 0;
+    }
+    if (lisp_intern_in_package(pkg_d, "other-sym77") != other_sym) {
+        return 0;
+    }
+
+    // packageを省略した場合は呼び出し時点の*package*(common-lisp-user)が対象になる
+    LispObject pkg_f = lisp_make_package("selftest-pkg77f", 0);
+    LispObject f_sym = lisp_intern_in_package(pkg_f, "f-sym77");
+    LispObject f_export_args = lisp_cons(f_sym, lisp_cons(pkg_f, LISP_NIL));
+    if (lisp_builtin_export(f_export_args) != lisp_sym_t) {
+        return 0;
+    }
+    LispObject use_default_args = lisp_cons(pkg_f, LISP_NIL);
+    if (lisp_builtin_use_package(use_default_args) != lisp_sym_t) {
+        return 0;
+    }
+    if (lisp_intern("f-sym77") != f_sym) {
         return 0;
     }
 
@@ -3501,6 +3684,7 @@ LispObject lisp_builtins_init(void) {
     env = lisp_env_extend(env, lisp_intern("make-package"), lisp_make_builtin(lisp_builtin_make_package));
     env = lisp_env_extend(env, lisp_intern("find-package"), lisp_make_builtin(lisp_builtin_find_package));
     env = lisp_env_extend(env, lisp_intern("export"), lisp_make_builtin(lisp_builtin_export));
+    env = lisp_env_extend(env, lisp_intern("use-package"), lisp_make_builtin(lisp_builtin_use_package));
     env = lisp_env_extend(env, lisp_intern("rplaca"), lisp_make_builtin(lisp_builtin_rplaca));
     env = lisp_env_extend(env, lisp_intern("rplacd"), lisp_make_builtin(lisp_builtin_rplacd));
     env = lisp_env_extend(env, lisp_intern("hash-code"), lisp_make_builtin(lisp_builtin_hash_code));

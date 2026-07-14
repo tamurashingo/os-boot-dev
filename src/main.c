@@ -61,6 +61,16 @@ static void lisp_reader_export_selftest_run(EFI_SYSTEM_TABLE *SystemTable) {
     }
 }
 
+// --- use-packageビルトイン+use-list継承intern解決の自己テスト (milestone 77) ---
+static void lisp_reader_use_package_selftest_run(EFI_SYSTEM_TABLE *SystemTable) {
+    if (lisp_reader_use_package_selftest()) {
+        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"Reader use-package self-test: PASS\r\n");
+    } else {
+        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"Reader use-package self-test: FAIL\r\n");
+        for (;;) {}
+    }
+}
+
 // --- VM最小実行ループ自己テスト (milestone 35) ---
 // OP_CONST 1, OP_CONST 2, OP_ADD, OP_RETURN相当を手動でバイトコード配列として構築し、
 // lisp_vm_execに渡して3が返ることを確認する。定数オブジェクトはlisp_make_fixnum相当の
@@ -506,6 +516,7 @@ EFI_STATUS EFIAPI EfiMain(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable)
             lisp_vm_integrated_selftest_run(SystemTable); // milestone 39: プリミティブ最適化命令+目標1総合自己テスト
             lisp_reader_package_qualifier_selftest_run(SystemTable); // milestone 74: リーダーのpkg:sym/pkg::sym修飾子自己テスト
             lisp_reader_export_selftest_run(SystemTable); // milestone 76: exportビルトイン+リーダー修飾子自己テスト
+            lisp_reader_use_package_selftest_run(SystemTable); // milestone 77: use-packageビルトイン+use-list継承intern解決自己テスト
 
             lisp_load_init_file(); // milestone 47: EFI/BOOT/init.lispがあれば読み込む(無ければ何もしない)
 
