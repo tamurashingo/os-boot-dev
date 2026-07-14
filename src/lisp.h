@@ -137,6 +137,13 @@ int lisp_reader_use_package_selftest(void);
 // 呼び出す必要がある。真なら成功
 int lisp_reader_defpackage_selftest(void);
 
+// milestone 80: EfiMainの起動順序が「lisp_packages_initが*package*をcommon-lisp-userへ
+// seedし終えてからlisp_symbols_initが特殊形式シンボルをinternする」という前提を満たしている
+// こと、およびcompiler.lisp/stdlib.lisp読込後もそれらのシンボルがcommon-lisp-userへ帰属し
+// 続けていることを確認する自己テスト。main.cでのstdlib.lisp自動load後に呼び出す必要がある。
+// 真なら成功
+int lisp_bootstrap_package_context_selftest(void);
+
 // --- VMオペコード (milestone 35) ---
 // 各命令は1byteのopcode+固定長の即値オペランド（今のところ0または2byte、リトルエンディアン）
 // から成る。手動でバイトコード配列を構築する目標1の各マイルストン（35〜39）はこの定義を直接使う

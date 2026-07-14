@@ -3270,6 +3270,43 @@ int lisp_reader_defpackage_selftest(void) {
     return 1;
 }
 
+// milestone 80: EfiMainの起動順序（lisp_heap_init→lisp_packages_init→lisp_symbols_init→
+// lisp_builtins_init→compiler.lisp/stdlib.lispのload、という既存の並び自体はmilestone73で
+// *package*を導入した時点で既に確定済みで、本マイルストーンで変更は不要だった）が実際に
+// 「lisp_packages_initが*package*をcommon-lisp-userへseedし終えてからlisp_symbols_initが
+// 特殊形式シンボルをinternする」という前提を満たしていること、およびcompiler.lisp/stdlib.lisp
+// が引き続きcommon-lisp-userへinternされ、無修飾で再internした同名シンボルと`eq`であることを
+// 確認する自己テスト
+int lisp_bootstrap_package_context_selftest(void) {
+    // *package*の既定値がcommon-lisp-userであること（lisp_packages_initのseedが
+    // lisp_symbols_init以降も保たれていること）
+    if (lisp_symbol_cell(lisp_sym_package)->value != lisp_cl_user_package) {
+        return 0;
+    }
+
+    // lisp_symbols_initでintern済みの特殊形式シンボル（defun）がcommon-lisp-userへ
+    // 帰属していること、および無修飾で再internすると同一オブジェクト(eq)を返すこと
+    if (lisp_sym_defun == LISP_NIL || lisp_symbol_cell(lisp_sym_defun)->package != lisp_cl_user_package) {
+        return 0;
+    }
+    if (lisp_intern("defun") != lisp_sym_defun) {
+        return 0;
+    }
+
+    // compiler.lisp/stdlib.lispロード後にdefunで定義された関数（list）のシンボルも
+    // common-lisp-userへ帰属し、無修飾で再internすると同一オブジェクト(eq)を返すこと。
+    // global_envで実際に束縛されている（unbound variableでpanicしない）ことも確認する
+    LispObject list_sym = lisp_intern("list");
+    if (lisp_symbol_cell(list_sym)->package != lisp_cl_user_package) {
+        return 0;
+    }
+    if (!lisp_is_closure(lisp_env_lookup(global_env, list_sym))) {
+        return 0;
+    }
+
+    return 1;
+}
+
 // (rplaca cons-cell new-car): cons-cellのcarをnew-carへ破壊的に書き換え、cons-cell自身を
 // 返す（milestone 27。CommonLispのrplacaと同じ「書き換えたコンスセル自身を返す」仕様で、
 // svsetがvalueを返すのとは異なる）。既存のlisp_set_carがlisp_assert_consを内包しているため
