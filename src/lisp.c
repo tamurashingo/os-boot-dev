@@ -1027,6 +1027,7 @@ static LispObject lisp_sym_defvar;
 static LispObject lisp_sym_defparameter;
 static LispObject lisp_sym_block;
 static LispObject lisp_sym_return_from;
+static LispObject lisp_sym_do;
 static LispObject lisp_sym_macroexpand_hook;
 static LispObject lisp_sym_compile_and_run;
 
@@ -1053,6 +1054,7 @@ void lisp_symbols_init(void) {
     lisp_sym_defparameter = lisp_intern("defparameter");
     lisp_sym_block = lisp_intern("block");
     lisp_sym_return_from = lisp_intern("return-from");
+    lisp_sym_do = lisp_intern("do");
     lisp_sym_macroexpand_hook = lisp_intern("*macroexpand-hook*");
     // milestone 78 (バグ修正): compile-and-runは他の特殊形式シンボルと同様、*package*が
     // common-lisp-userの間にここで1度だけinternしてキャッシュする。lisp_eval_toplevel内で
@@ -1714,6 +1716,15 @@ LispObject lisp_apply(LispObject fn, LispObject args);
 static LispObject lisp_return_tag = LISP_NIL;
 static LispObject lisp_return_value = LISP_NIL;
 
+// milestone87の調査で発見したload時ヒープ枯渇の修正用ルート。lisp_load_eval_buffer
+// は評価前にbuf全体を読み切ってconsリストへ積む設計（読み取りと評価を1フォームずつ
+// 交互に行うとネストしたloadがbufを上書きして残りのフォームを破壊するため、milestone47
+// で意図的に2段階にした）。この「評価待ちの残りフォームリスト」はCローカル変数にしか
+// 存在せずlisp_gc_mark_rootsから辿れないため、フォーム間でlisp_gcを呼ぶとまだ評価して
+// いない残りのフォームが刈られてしまう。ここに積んでいる間だけ一時的なGCルートとして
+// 扱うことでその場を安全にする
+static LispObject lisp_gc_extra_root = LISP_NIL;
+
 // --- スタックマシン型VM (milestone 34) ---
 
 // VMのデータスタック。固定長でグローバルに確保する（ヒープ確保ではなくバンプアロケータの
@@ -2139,6 +2150,7 @@ static void lisp_gc_mark_roots(void) {
     lisp_gc_mark(global_packages);
     lisp_gc_mark(lisp_return_tag);
     lisp_gc_mark(lisp_return_value);
+    lisp_gc_mark(lisp_gc_extra_root);
     for (UINTN i = 0; i < vm_sp; i++) {
         lisp_gc_mark(vm_stack[i]);
     }
@@ -2707,6 +2719,117 @@ LispObject lisp_eval(LispObject expr, LispObject env) {
             lisp_return_tag = tag;
             lisp_return_value = value;
             return value;
+        }
+
+        if (op == lisp_sym_do) {
+            // milestone 87: (do ((var init step)...) (end-test result...) body...)。
+            // 繰り返し自体をCの再帰(lisp_eval_progn等)ではなくwhile(1)で行うため、
+            // イテレーション数に関わらずCコールスタックの深さは一定に保たれる
+            // (append/reverse等の非末尾再帰がCスタックを食い尽くす問題への対策)
+            LispObject bindings = lisp_car(lisp_cdr(expr));
+            LispObject test_and_result = lisp_car(lisp_cdr(lisp_cdr(expr)));
+            LispObject body = lisp_cdr(lisp_cdr(lisp_cdr(expr)));
+            LispObject end_test = lisp_car(test_and_result);
+            LispObject result_forms = lisp_cdr(test_and_result);
+
+            // フェーズ1: letと同じ並行束縛の意味で、各init-formをdoの外側envで評価する
+            LispObject values = LISP_NIL; // (sym . value)のリスト
+            LispObject cur = bindings;
+            while (lisp_is_cons(cur)) {
+                LispObject binding = lisp_car(cur);
+                LispObject sym = lisp_is_symbol(binding) ? binding : lisp_car(binding);
+                lisp_assert_symbol(sym);
+                LispObject rest1 = lisp_is_cons(binding) ? lisp_cdr(binding) : LISP_NIL;
+                LispObject init_form = lisp_is_cons(rest1) ? lisp_car(rest1) : LISP_NIL;
+                LispObject value = lisp_eval(init_form, env);
+                if (lisp_return_tag != LISP_NIL) {
+                    return value; // milestone19: まだ何も束縛していないのでそのまま伝播
+                }
+                values = lisp_cons(lisp_cons(sym, value), values);
+                cur = lisp_cdr(cur);
+            }
+
+            // フェーズ2: 動的変数はvalueを退避してから書き換え、通常変数はenvに積む(letと同型)
+            LispObject new_env = env;
+            LispObject saved_specials = LISP_NIL; // (sym . 退避した旧値)のリスト
+            cur = values;
+            while (lisp_is_cons(cur)) {
+                LispObject pair = lisp_car(cur);
+                LispObject sym = lisp_car(pair);
+                LispObject value = lisp_cdr(pair);
+                if (lisp_symbol_cell(sym)->is_special) {
+                    saved_specials = lisp_cons(lisp_cons(sym, lisp_symbol_cell(sym)->value), saved_specials);
+                    lisp_symbol_cell(sym)->value = value;
+                } else {
+                    new_env = lisp_env_extend(new_env, sym, value);
+                }
+                cur = lisp_cdr(cur);
+            }
+
+            // フェーズ3: end-testが真になるまでbody→stepを繰り返す。同じ束縛箱(pair)を
+            // lisp_env_setで書き換えるだけなので、letのようにenvを毎回再拡張しない
+            LispObject result = LISP_NIL;
+            int done = 0;
+            while (!done) {
+                LispObject test_value = lisp_eval(end_test, new_env);
+                if (lisp_return_tag != LISP_NIL) {
+                    result = test_value;
+                    break;
+                }
+                if (test_value != LISP_NIL) {
+                    result = lisp_eval_progn(result_forms, new_env);
+                    break;
+                }
+
+                LispObject body_result = lisp_eval_progn(body, new_env);
+                if (lisp_return_tag != LISP_NIL) {
+                    result = body_result;
+                    break;
+                }
+
+                // 並行ステップ: 全step-formを更新前のnew_envで先に評価してから
+                // まとめて書き込む(letと同じく、他のstep-formが更新後の値を見てはならない)
+                LispObject step_values = LISP_NIL; // (sym . new-value)のリスト
+                LispObject bcur = bindings;
+                int step_aborted = 0;
+                while (lisp_is_cons(bcur)) {
+                    LispObject binding = lisp_car(bcur);
+                    if (lisp_is_cons(binding)) {
+                        LispObject rest1 = lisp_cdr(binding);
+                        LispObject rest2 = lisp_is_cons(rest1) ? lisp_cdr(rest1) : LISP_NIL;
+                        if (lisp_is_cons(rest2)) {
+                            LispObject sym = lisp_car(binding);
+                            LispObject step_value = lisp_eval(lisp_car(rest2), new_env);
+                            if (lisp_return_tag != LISP_NIL) {
+                                result = step_value;
+                                done = 1;
+                                step_aborted = 1;
+                                break;
+                            }
+                            step_values = lisp_cons(lisp_cons(sym, step_value), step_values);
+                        }
+                    }
+                    bcur = lisp_cdr(bcur);
+                }
+                if (step_aborted) {
+                    break;
+                }
+                bcur = step_values;
+                while (lisp_is_cons(bcur)) {
+                    LispObject pair = lisp_car(bcur);
+                    lisp_env_set(new_env, lisp_car(pair), lisp_cdr(pair));
+                    bcur = lisp_cdr(bcur);
+                }
+            }
+
+            // doを抜ける際、動的変数はdoに入る前の値へ必ず復元する(letと同型)
+            cur = saved_specials;
+            while (lisp_is_cons(cur)) {
+                LispObject pair = lisp_car(cur);
+                lisp_symbol_cell(lisp_car(pair))->value = lisp_cdr(pair);
+                cur = lisp_cdr(cur);
+            }
+            return result;
         }
 
         if (op == lisp_sym_lambda) {
@@ -3820,10 +3943,26 @@ static LispObject lisp_load_eval_buffer(const char *buf) {
         reversed = lisp_cons(lisp_car(forms), reversed);
         forms = lisp_cdr(forms);
     }
+    // milestone87で発見: main.cのREPLループ同様、トップレベルフォーム間
+    // （直前の評価が完全に戻り切っており、tree-walkのcompile-and-runフレームが
+    // Cスタックに一切residentしていない安全地点）でのみGCを起動する。loadは
+    // 複数フォームを1回のバッファ評価でまとめて処理するため、このチェックが無いと
+    // load経由の実行だけがREPLの自動GC機会を一度も得られず、個々には正当な
+    // ゴミであっても回収されずヒープを枯渇させる（test-compile-expr.lispの
+    // 28関数連続呼び出しで実際に発生した）。評価待ちの残りフォーム(reversed)自体は
+    // Cローカル変数にしか存在しないため、その間だけlisp_gc_extra_rootへ退避して
+    // GCのルートに含める
+    LispObject saved_extra_root = lisp_gc_extra_root;
     while (reversed != LISP_NIL) {
+        lisp_gc_extra_root = reversed;
+        if (lisp_heap_low()) {
+            lisp_gc();
+        }
+        reversed = lisp_gc_extra_root;
         result = lisp_eval_toplevel(lisp_car(reversed));
         reversed = lisp_cdr(reversed);
     }
+    lisp_gc_extra_root = saved_extra_root;
     return result;
 }
 

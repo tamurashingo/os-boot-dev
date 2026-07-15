@@ -31,24 +31,63 @@
 ; 必要がある
 (defun list args args)
 
+; milestone87: append/reverseは元々非tail再帰(Cコールスタックの深さがリスト長に比例)
+; で書かれており、これ自身がコンパイラ・マクロ展開器の内部実装として多用されるため、
+; 28個の節を持つandの集約テストのように十分な長さ・入れ子でcompile-expr自身を
+; 呼び出すと、この2関数の再帰深さがCスタックを食い尽くしてunbound variable等の
+; 破損した状態でpanicする実クラッシュが再現した。milestone87で導入したdo特殊形式
+; (Cの再帰を一切使わないwhile(1)ループ)で書き直し、リスト長に関わらずCスタックの
+; 深さをO(1)に保つ。このファイル自身はlisp_compiler_readyがまだfalseな間に読み込ま
+; れる(ツリーウォークで評価される)ため、ここではwhileマクロ(lisp/stdlib.lisp、
+; まだ読み込まれていない)ではなくdoを直接使う。
+;
+; reverseはappendに依存しない単純な畳み込みなので、先にreverseを定義してから、
+; appendはreverseの結果をbへ1要素ずつconsしていく形にする(相互依存を避ける)。
 ; CLのappendは可変長だが、このスコープでは2引数のみサポートする(明示的な範囲の限定)
+(defun reverse (lst)
+  (do ((src lst (cdr src))
+       (result nil (cons (car src) result)))
+      ((null src) result)))
+
+; milestone87追記: 最初の実装はreverseを2回通す(a全体を逆順化してからさらに
+; consで積み直す)形で書いたが、これはconsセル生成数が元の再帰実装(|a|個)の2倍
+; (|a|×2個)になり、test-compile-expr.lisp(29個のdefun、うち1つは28節のand)の
+; ロード中にヒープを圧迫し「Lisp panic: expected a cons cell but got something else」
+; という別のクラッシュ(スタックではなくヒープ枯渇由来)を実測で引き起こした。
+; rplacdで新規consセルを1個ずつ末尾に連結していく方式(head/tailポインタ手法)に
+; 書き直し、生成するconsセル数を元の再帰実装と同じ|a|個に戻した(Cスタックの深さは
+; 引き続きO(1)のまま)
 (defun append (a b)
   (if (null a)
       b
-      (cons (car a) (append (cdr a) b))))
-
-(defun reverse (lst)
-  (if (null lst)
-      nil
-      (append (reverse (cdr lst)) (cons (car lst) nil))))
+      (let ((head (cons (car a) nil)))
+        (do ((src (cdr a) (cdr src))
+             (tail head))
+            ((null src) (rplacd tail b) head)
+          (let ((cell (cons (car src) nil)))
+            (rplacd tail cell)
+            (setq tail cell))))))
 
 ; fnはローカル変数（仮引数）だが、lisp_evalの関数呼び出し分岐は呼び出し式の演算子位置を
 ; 常に汎用evalで評価するため、ローカル変数が指すクロージャをそのまま(fn ...)の形で
 ; 呼び出せる。新しいfuncall/applyプリミティブは不要（milestone29の調査で確認済み）
+;
+; milestone87: append/reverseと同じ理由でdo化する。macroexpand-all-forms自身がandの
+; 28節のように長い節リストに対して直接mapcarを呼ぶため(例:
+; (cons op (mapcar macroexpand-all (cdr form)))、'and節)、append/reverseだけを
+; do化してもmapcarが非tail再帰のままだとCスタックの深さが節数に比例してしまい、
+; 実測でも修正しきれなかった。appendと同じ理由(2倍のconsセル生成によるヒープ圧迫を
+; 避ける)で、reverse2回通しではなくrplacdによるhead/tail連結方式にしてある
 (defun mapcar (fn lst)
   (if (null lst)
       nil
-      (cons (fn (car lst)) (mapcar fn (cdr lst)))))
+      (let ((head (cons (fn (car lst)) nil)))
+        (do ((src (cdr lst) (cdr src))
+             (tail head))
+            ((null src) head)
+          (let ((cell (cons (fn (car src)) nil)))
+            (rplacd tail cell)
+            (setq tail cell))))))
 
 ; --- コンパイラフロントエンド: マクロ展開 (milestone 40, documents/lisp_vm.md 目標2着手) ---
 ; macroexpand-all は既存の macroexpand-1 (milestone 21) を式全体に再帰的に適用し、
@@ -65,6 +104,26 @@
 
 (defun macroexpand-all-cond-clause (clause)
   (mapcar macroexpand-all clause))
+
+; milestone87: doのbinding-specは(var init step)/(var init)/(var)/varのいずれかを
+; 取り得る(let同様の並行束縛+step-formによる並行再束縛)。varの位置は評価されない
+; ため保持し、init/step(存在する要素のみ)だけをmacroexpand-allする。形そのものの
+; 正規化(2要素・3要素への揃え直し)はcompile-do側の責務とし、ここではmacroexpand-1が
+; init/step内のマクロ呼び出しを展開できるようにするだけに留める
+(defun macroexpand-all-do-binding (binding)
+  (if (atom binding)
+      binding
+      (cons (car binding) (mapcar macroexpand-all (cdr binding)))))
+
+; (do bindings (end-test . result-forms) . body)。end-test/result-formsはいずれも
+; 評価される位置なので、まとめて1つのリストとしてmapcar macroexpand-allで展開できる
+; (順序を保ったまま各要素を差し替えるだけなので、end-testとresult-formsを個別に
+; 分けて扱う必要は無い)
+(defun macroexpand-all-do (form)
+  (cons (car form)
+        (cons (mapcar macroexpand-all-do-binding (car (cdr form)))
+              (cons (mapcar macroexpand-all (car (cdr (cdr form))))
+                    (mapcar macroexpand-all (cdr (cdr (cdr form))))))))
 
 ; formはこの時点でトップレベルのマクロ呼び出しではないと分かっているconsである。
 ; いずれの特殊形式にも該当しない場合は関数呼び出しとみなし、演算子位置も含め
@@ -104,6 +163,7 @@
       ((eq op 'defun)
        (list op (car (cdr form)) (car (cdr (cdr form)))
              (macroexpand-all (car (cdr (cdr (cdr form)))))))
+      ((eq op 'do) (macroexpand-all-do form))
       (t (mapcar macroexpand-all form)))))
 
 ; macroexpand-1(lisp_macroexpand_1)は呼び出し式の演算子を無条件にlisp_evalで評価して
@@ -118,7 +178,8 @@
       (eq op 'let) (eq op 'let*) (eq op 'setq) (eq op 'cond)
       (eq op 'and) (eq op 'or) (eq op 'when) (eq op 'unless)
       (eq op 'block) (eq op 'return-from) (eq op 'lambda)
-      (eq op 'defvar) (eq op 'defparameter) (eq op 'defun) (eq op 'defmacro)))
+      (eq op 'defvar) (eq op 'defparameter) (eq op 'defun) (eq op 'defmacro)
+      (eq op 'do)))
 
 (defun macroexpand-all (form)
   (if (atom form)
@@ -531,9 +592,20 @@
           (scope-next-slot-box scope)
           (scope-enclosing scope)))))
 
+; milestone87: 修正前は(car (cdr (cdr form)))で先頭のbody-formしか取らず、2個目以降の
+; body-formはコンパイルすら行われず完全に消えていた(単に値が捨てられるのではなく
+; バイトコードに一切現れない)。do/whileの本体をletで包み「ループ+その後で結果を返す」
+; という2-form以上のbodyを書く典型的な命令型パターンが軒並み壊れるバグだった
+; (test-while.lispで実測発見)。compile-let-star(841行目)が元からbodyを
+; (cons 'progn body)で包んでいたのと同じ方式にし、compile-progn-body(既存の
+; OP_POPによる非末尾値の破棄ロジック)へ委譲する
+;
+; 既知の制限(milestone78で発見、根本修正はmilestone83/84として未着手): letがtail
+; 位置以外(関数呼び出しの引数のような非tail位置の兄弟式)で使われた場合、
+; OP_MAKE_LOCALが確保したスロットがスタック上に残り続け、後続の計算を壊すことがある
 (defun compile-let (form ctx scope)
   (let ((bindings (car (cdr form)))
-        (body (car (cdr (cdr form)))))
+        (body (cons 'progn (cdr (cdr form)))))
     (let ((processed (compile-let-process-bindings bindings ctx scope)))
       (let ((bindings-ir (car processed))
             (locals-additions (car (cdr processed)))
@@ -937,6 +1009,118 @@
                                                      (list 'lambda params body))
                   ctx scope)))
 
+; --- compile-expr: do (milestone 87, documents/lisp_package_system.md) ---
+; このLisp処理系にはどの経路にも末尾呼び出し最適化が無く(documents/lisp_vm.mdの
+; 非ゴール)、Cコールスタックの深さがそのままイテレーション回数に比例してしまう
+; ため、doは新規opcodeを追加せずifと同じジャンプ/ラベルの組み方(cond-code→
+; jump-if-false else-label→then-code→jump end-label→label else-label→else-code→
+; label end-label)を流用し、「else側」(end-testがfalseだった続行パス)の末尾で
+; ループ先頭のラベルへ戻るジャンプを1つ追加するだけでC呼び出しを一切増やさない
+; ループを組む。イテレーション回数に関わらずCスタックはO(1)のまま(milestone87の
+; 目的そのもの)。
+;
+; bindingのスロットはlet同様OP_MAKE_LOCALで1度だけボックス化し、以後は解放も
+; 再確保もしない(let/letの既存の単純化をそのまま継承)。初期化フェーズは
+; let(の並行束縛semantics)と全く同じ処理で済むため、compile-let-process-bindings
+; をそのまま再利用する(is_specialの退避/確定/復元もletと同型)。ただしletの
+; binding-specは常に(var init)の2要素だが、CLのdo binding-specはvar単体/(var)/
+; (var init)/(var init step)のいずれも許すため、compile-let-process-bindingsへ渡す
+; 前に(var init nil-step)の3要素へ正規化しておく(init省略時はnil)
+(defun compile-do-normalize-binding (binding)
+  (cond
+    ((atom binding) (list binding nil nil))
+    ((null (cdr binding)) (list (car binding) nil nil))
+    ((null (cdr (cdr binding))) (list (car binding) (car (cdr binding)) nil))
+    (t binding)))
+
+(defun compile-do-normalize-bindings (bindings)
+  (if (null bindings)
+      nil
+      (cons (compile-do-normalize-binding (car bindings))
+            (compile-do-normalize-bindings (cdr bindings)))))
+
+(defun compile-do-binding-var (binding) (car binding))
+(defun compile-do-binding-step (binding) (car (cdr (cdr binding))))
+(defun compile-do-has-step-p (binding) (not (null (compile-do-binding-step binding))))
+
+; 各イテレーションのstep-formは、letの並行束縛と同じく「どのstep-formも他の
+; step-formが書き込んだ後の新しい値を見てはならない」。OP_STORE_LOCAL/OP_GLOBAL_SET
+; はどちらも値をpushし直さない(値をpopするだけ)ため、「step-formを持つ全bindingの
+; 値を先に(旧い値のまま)push-し尽くし、その後pushした順と逆順でstoreする」ことで
+; 並行評価を実現する(store命令1つがちょうど1つの値をpopするので、逆順にすれば
+; 各storeは自分に対応する値を正しく受け取る)。step-formを持たないbindingは
+; push/storeのどちらも生成しない(スロットの値がそのまま次のイテレーションへ
+; 持ち越される)
+(defun compile-do-step-push (bindings ctx scope)
+  (cond
+    ((null bindings) nil)
+    ((compile-do-has-step-p (car bindings))
+     (compile-concat (compile-expr (compile-do-binding-step (car bindings)) ctx scope)
+                     (compile-do-step-push (cdr bindings) ctx scope)))
+    (t (compile-do-step-push (cdr bindings) ctx scope))))
+
+(defun compile-do-store-one (binding ctx scope)
+  (let ((sym (compile-do-binding-var binding)))
+    (if (special-variable-p sym)
+        (list (list *op-global-set* (compile-register-const ctx sym)))
+        (list (list *op-store-local* (cdr (compile-env-find sym (scope-locals scope))))))))
+
+(defun compile-do-step-store (bindings-reversed ctx scope)
+  (cond
+    ((null bindings-reversed) nil)
+    ((compile-do-has-step-p (car bindings-reversed))
+     (compile-concat (compile-do-store-one (car bindings-reversed) ctx scope)
+                     (compile-do-step-store (cdr bindings-reversed) ctx scope)))
+    (t (compile-do-step-store (cdr bindings-reversed) ctx scope))))
+
+(defun compile-do-step-code (bindings ctx scope)
+  (compile-concat (compile-do-step-push bindings ctx scope)
+                  (compile-do-step-store (reverse bindings) ctx scope)))
+
+; body-formはいずれも非tail位置の副作用目的の式(結果はresult-formsのみが返す)なので、
+; progn-bodyと違い最後のformの値も含め全て評価直後にOP_POPで捨てる(1個評価→1個破棄
+; が1組ずつ隣接するので、bodyが何個あってもこの往復1組あたりのスタック効果は0になり、
+; ループ1周のスタック深さがloop-startへ戻るたびに常に同じ値へ揃う)
+(defun compile-do-body-forms (forms ctx scope)
+  (if (null forms)
+      nil
+      (compile-concat (compile-expr (car forms) ctx scope)
+                      (list (list *op-pop*))
+                      (compile-do-body-forms (cdr forms) ctx scope))))
+
+; end-test/result-formsは(end-test . result-forms)という1つのリスト。result-formsは
+; progn-bodyと同じ「最後の値だけ残す」semantics(CLのdoのresult-formsは複数書けて
+; 最後の値がdo全体の値になる、result-forms省略時はnil)なのでcompile-progn-bodyを
+; そのまま再利用する
+(defun compile-do (form ctx scope)
+  (let ((bindings (compile-do-normalize-bindings (car (cdr form))))
+        (end-test (car (car (cdr (cdr form)))))
+        (result-forms (cdr (car (cdr (cdr form)))))
+        (body (cdr (cdr (cdr form)))))
+    (let ((processed (compile-let-process-bindings bindings ctx scope)))
+      (let ((bindings-ir (car processed))
+            (locals-additions (car (cdr processed)))
+            (commits (car (cdr (cdr processed))))
+            (restores (car (cdr (cdr (cdr processed))))))
+        (let ((new-scope (compile-let-add-locals locals-additions scope))
+              (loop-start (gensym))
+              (body-label (gensym))
+              (loop-end (gensym)))
+          (compile-concat
+            bindings-ir
+            (compile-let-restore-code commits ctx)
+            (list (list 'label loop-start))
+            (compile-expr end-test ctx new-scope)
+            (list (list *op-jump-if-false* (list 'ref body-label)))
+            (compile-progn-body result-forms ctx new-scope)
+            (list (list *op-jump* (list 'ref loop-end)))
+            (list (list 'label body-label))
+            (compile-do-body-forms body ctx new-scope)
+            (compile-do-step-code bindings ctx new-scope)
+            (list (list *op-jump* (list 'ref loop-start)))
+            (list (list 'label loop-end))
+            (compile-let-restore-code restores ctx)))))))
+
 ; atomは(既にレキシカル束縛の有無を確認する)compile-variable-refに委ねる。
 ; cons/car/cdr/eq/+はインライン化された専用命令へ、それ以外の形式(carがsymbol
 ; でもlambda式でも構わない)はすべて汎用の関数呼び出しcompile-callへコンパイル
@@ -968,6 +1152,7 @@
     ((eq (car form) 'car) (compile-car form ctx scope))
     ((eq (car form) 'cdr) (compile-cdr form ctx scope))
     ((eq (car form) 'eq) (compile-eq form ctx scope))
+    ((eq (car form) 'do) (compile-do form ctx scope))
     (t (compile-call form ctx scope))))
 
 ; --- 統合検証: compile-and-run (milestone 46, documents/lisp_vm.md 目標2完了) ---

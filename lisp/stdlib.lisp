@@ -18,6 +18,14 @@
 (defun 1+ (x) (+ x 1))
 (defun 1- (x) (- x 1))
 
+; milestone87: doの上に構築するwhileマクロ。(a b . rest)というドット対の仮引数
+; リストはリーダーが対応していない(defpackage-formと同じ制約、milestone29)ため、
+; 仮引数リスト全体を単一symbolにする書き方でtest・bodyを受け取り、(car args)を
+; end-test、(cdr args)をbodyとして展開する。do自身がCの再帰を使わないwhile(1)
+; ループなので、whileも(bindingsが無いdoとして)Cスタックを消費しない
+(defmacro while args
+  (cons 'do (cons nil (cons (list (list 'not (car args))) (cdr args)))))
+
 ; C側の算術の核として組み込んだ<だけを使い、比較演算子群の残りをすべてLispで導出する。
 ; CLと異なり2引数のみサポートする(明示的な範囲の限定)
 (defun > (a b) (< b a))

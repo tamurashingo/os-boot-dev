@@ -30,12 +30,21 @@
       (setq *macroexpand-hook* *saved-macroexpand-hook*)
       (eq result 'overridden))))
 
+; milestone87で発見: (test-double-macro 5)をこの関数の本体に直接書くと、その呼び出しは
+; この関数自身がload時にコンパイルされる瞬間(=setqでフックを差し替えるより前)に
+; macroexpand-allで展開済みになってしまい、実行時のフック差し替えが手遅れになる
+; (コンパイル方式が「一度だけ事前展開」であるため)。以前はcompile-letのバグ(let の
+; 2個目以降のbody-formが一切コンパイルされない別の不具合、milestone87で発見・修正)
+; が偶然この関数の戻り値をsetqの戻り値(truthyなクロージャ)にすり替えていたため、
+; このテスト自体のこの欠陥は隠れて常にvacuousにPASSしていた。実行時にフックを反映
+; させるにはcompile-and-run(引数のS式をその場でmacroexpand-all→compile→実行する)
+; を使い、マクロ呼び出しをquoteでデータとして渡す必要がある
 (defun run-test-macroexpand-1-hook-affects-eval ()
   ; *macroexpand-hook*の差し替えが、macroexpand-1経由だけでなく通常のマクロ呼び出しの
   ; 評価そのものにも反映されることを確認する
   (progn
     (setq *macroexpand-hook* (lambda (macro form env) (cons 'quote (cons 42 nil))))
-    (let ((result (test-double-macro 5)))
+    (let ((result (compile-and-run '(test-double-macro 5))))
       (setq *macroexpand-hook* *saved-macroexpand-hook*)
       (eq result 42))))
 
