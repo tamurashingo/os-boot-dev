@@ -65,8 +65,21 @@ typedef struct {
 } EFI_MEMORY_DESCRIPTOR;
 
 
+#define EfiLoaderData 2
 #define EfiConventionalMemory 7
 #define EfiBootServicesData 4
+
+typedef UINT64 EFI_PHYSICAL_ADDRESS;
+
+// milestone 88: EfiMain起動直後に自前の大きいCスタック領域を確保するために必要
+#define AllocateAnyPages 0
+
+typedef EFI_STATUS (EFIAPI *EFI_ALLOCATE_PAGES)(
+    UINTN Type,
+    UINT32 MemoryType,
+    UINTN Pages,
+    EFI_PHYSICAL_ADDRESS *Memory
+);
 
 typedef EFI_STATUS (EFIAPI *EFI_GET_MEMORY_MAP)(
     UINTN *MemoryMapSize,
@@ -129,7 +142,7 @@ typedef struct _EFI_BOOT_SERVICES {
     void *RaiseTPL;
     void *RestoreTPL;
 
-    void *AllocatePages;
+    EFI_ALLOCATE_PAGES AllocatePages;
     void *FreePages;
     EFI_GET_MEMORY_MAP GetMemoryMap;
     void *AllocatePool;

@@ -457,8 +457,8 @@ static void lisp_setjmp_selftest(EFI_SYSTEM_TABLE *SystemTable) {
     }
 }
 
-// --- エントリポイント ---
-EFI_STATUS EFIAPI EfiMain(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
+// --- 本処理(自前スタックへ切り替えた後に実行される) ---
+static EFI_STATUS EFIAPI EfiMainImpl(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
     g_system_table = SystemTable;
     g_image_handle = ImageHandle;
 
@@ -600,4 +600,47 @@ EFI_STATUS EFIAPI EfiMain(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable)
     }
 
     return 0;
+}
+
+// --- 自前スタックへの切り替え (milestone 88) ---
+// OVMFのビルド(2M/4Mフラッシュ)によってDXE Coreが用意するUEFIアプリケーション起動時の
+// Cスタックのサイズ・配置が異なり(PEヘッダのSizeOfStackReserveはこのファームウェアの
+// イメージローダーに無視されることを実験で確認済み)、コンパイラ自身の再帰
+// (compile-if/compile-and等のAST降下)がその差だけでスタックオーバーフローしうることが
+// 判明した(test-compile-exprがGitHub ActionsのOVMF_CODE_4M.fdでのみクラッシュしていた)。
+// ヒープと同様にファームウェア依存を無くすため、起動直後にBootServices経由で大きな
+// メモリ領域を確保し、そこへRSPを切り替えてから本処理(EfiMainImpl)を呼び出す。
+#define LISP_BOOT_STACK_PAGES 4096 // 4096 * 4KB = 16MB
+
+EFI_STATUS EFIAPI EfiMain(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
+    EFI_PHYSICAL_ADDRESS new_stack_base = 0;
+    EFI_STATUS alloc_status = SystemTable->BootServices->AllocatePages(
+        AllocateAnyPages, EfiLoaderData, LISP_BOOT_STACK_PAGES, &new_stack_base);
+
+    if (alloc_status != 0) {
+        // 確保に失敗した場合はファームウェア既定のスタックのまま続行する
+        return EfiMainImpl(ImageHandle, SystemTable);
+    }
+
+    // call命令が積むリターンアドレス(8バイト)を差し引いてもcallee内で16バイト境界を
+    // 保てるよう、切り替え先の先頭(スタックの高位側の終端)を16バイト境界に揃える
+    UINT64 new_stack_top = (new_stack_base + (UINT64)LISP_BOOT_STACK_PAGES * 4096) & ~(UINT64)0xF;
+    EFI_STATUS result;
+    UINT64 saved_rsp;
+
+    // rcx/rdxの入力制約により、asm本文が実行される時点でImageHandle/SystemTableは
+    // 既にMS x64 ABI呼び出し規約どおりrcx/rdxへ積まれている。asm内で行うのはrspの
+    // 一時的な切り替え・呼び出し・復元のみで、C側にrspの変化を一切見せない
+    // (呼び出し後に元の値へ戻すため、rspをclobber宣言する必要もない)
+    asm volatile(
+        "mov %%rsp, %[saved]\n"
+        "mov %[newtop], %%rsp\n"
+        "call *%[fn]\n"
+        "mov %[saved], %%rsp\n"
+        : [saved] "=&r"(saved_rsp), "=a"(result)
+        : [newtop] "r"(new_stack_top), [fn] "r"(EfiMainImpl), "c"(ImageHandle), "d"(SystemTable)
+        : "r8", "r9", "r10", "r11", "memory"
+    );
+
+    return result;
 }
