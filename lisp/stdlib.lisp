@@ -27,12 +27,42 @@
   (cons 'do (cons nil (cons (list (list 'not test)) body))))
 
 ; C側の算術の核として組み込んだ<だけを使い、比較演算子群の残りをすべてLispで導出する。
-; CLと異なり2引数のみサポートする(明示的な範囲の限定)
-(defun > (a b) (< b a))
-(defun = (a b) (and (not (< a b)) (not (< b a))))
-(defun <= (a b) (not (< b a)))
-(defun >= (a b) (not (< a b)))
-(defun /= (a b) (not (= a b)))
+; <自体はmilestone29から可変長引数(隣接ペアの単調増加判定)に対応済みだったが、
+; ここから導出する>/=/<=/>=/=も従来は「CLと異なり2引数のみサポートする」という明示的な
+; 制限を掛けていた。milestone90で&restキーワード(milestone89)を使い、CLと同じ可変長引数
+; 対応に書き換えた
+
+; 隣接ペアがすべてpredを満たせばt(推移律が効く=/<=/>=はこれで十分)
+(defun every-adjacent-pair (pred args)
+  (if (or (null args) (null (cdr args)))
+      t
+      (and (funcall pred (car args) (car (cdr args)))
+           (every-adjacent-pair pred (cdr args)))))
+
+; (a b c ...)が単調減少(a>b>c>...)かどうかは、逆順にした列に<の単調増加判定を
+; かけるのと同値
+(defun > (&rest args) (apply < (reverse args)))
+
+(defun <= (&rest args) (every-adjacent-pair (lambda (a b) (not (< b a))) args))
+(defun >= (&rest args) (every-adjacent-pair (lambda (a b) (not (< a b))) args))
+(defun = (&rest args) (every-adjacent-pair (lambda (a b) (and (not (< a b)) (not (< b a)))) args))
+
+; /=は「どの2つも等しくない」という意味で、=と違い推移律が効かない((/= 1 2 1)は
+; 1番目と3番目が等しいのでnilだが、隣接ペアだけでは1≠2かつ2≠1で誤ってtになってしまう)。
+; そのため全ペアの相異性を見る専用のヘルパーが必要
+(defun distinct-from-rest (x lst)
+  (if (null lst)
+      t
+      (and (not (= x (car lst)))
+           (distinct-from-rest x (cdr lst)))))
+
+(defun all-distinct (lst)
+  (if (null lst)
+      t
+      (and (distinct-from-rest (car lst) (cdr lst))
+           (all-distinct (cdr lst)))))
+
+(defun /= (&rest args) (all-distinct args))
 
 (defun zerop (n) (= n 0))
 (defun plusp (n) (< 0 n))
