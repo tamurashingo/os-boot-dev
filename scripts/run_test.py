@@ -127,6 +127,15 @@ def run_qemu_and_capture(sock_path):
 
     cmd = [
         "qemu-system-x86_64",
+        # ゲストRAMサイズを明示しないと、QEMU/OVMFのバージョンやビルドによって
+        # EfiConventionalMemoryの最大連続ブロック(=Lispヒープサイズ)が変動する。
+        # 実測ではデフォルト(128MiB)だと最大連続ブロックは約42MBしかなく、
+        # ヒープを多く使うtest-compile-exprのようなテストがOVMFビルド差だけで
+        # heap exhaustedになりうる(GitHub Actions上のOVMF_CODE_4M.fdはローカルの
+        # OVMF_CODE.fdと異なるビルドで、メモリレイアウトも異なるため)。
+        # -m 256Mを明示することで最大連続ブロックが約170MBまで増え、
+        # 環境差に対する余裕を確保する。
+        "-m", "256M",
         "-drive", "if=pflash,format=raw,readonly=on,file=" + OVMF_CODE,
         "-drive", "if=pflash,format=raw,file=" + vars_copy.name,
         "-drive", "format=raw,file=fat:rw:" + ESP_DIR,
