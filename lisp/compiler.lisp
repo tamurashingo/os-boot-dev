@@ -669,6 +669,23 @@
                     else-code
                     (list (list 'label end-label)))))
 
+; milestone89: &optional/&rest/&key/&aux/&allow-other-keysのいずれか
+(defun lambda-list-keyword-p (sym)
+  (or (eq sym '&optional)
+      (eq sym '&rest)
+      (eq sym '&key)
+      (eq sym '&aux)
+      (eq sym '&allow-other-keys)))
+
+; milestone89: paramsに上記5keywordのいずれかが1つでも含まれるか。
+; bare-symbol rest-arg形式(milestone29)ではparamsがconsではないため自然にnilになる
+(defun lambda-list-contains-keyword-p (params)
+  (if (atom params)
+      nil
+      (if (lambda-list-keyword-p (car params))
+          t
+          (lambda-list-contains-keyword-p (cdr params)))))
+
 ; lambdaの各仮引数に、OP_CALLの呼び出し規約(引数はフレーム先頭からnargs個の
 ; スロットにその場でボックス化される、documents/lisp_vm.md milestone37)と一致する
 ; 順序でスロット0, 1, 2...を割り当てる
@@ -706,27 +723,36 @@
 ; panic)まで発覚しなかった)。そのため本体コードの末尾に明示的にOP_RETURNを1つ
 ; 追加し、milestone35以降の手動バイトコード同様「最後は必ずOP_RETURNで終わる」
 ; 規約に合わせる
+; milestone89: paramsが&optional/&rest/&key/&aux/&allow-other-keysのいずれかを含む
+; lambdaは、ここでそのまま(未対応のまま)コンパイルすると&optional等の語がそのまま
+; 1個目の仮引数名として扱われる危険な黒魔術(サイレントな誤動作)になる。トップレベル
+; のdefunはlisp_eval_toplevel(src/lisp.c、lisp_defun_params_needs_interpreter)が
+; 個別にツリーウォークへフォールバックさせるためここには来ないが、すでにコンパイル
+; されている関数の内側に直接書かれたネストしたlambda式はこの分岐を通るため、
+; 明示的にpanicする(documents/lisp_lambda_list_keywords.mdのスコープ外として明記済み)
 (defun compile-lambda (form ctx scope)
   (let ((params (car (cdr form)))
         (body (car (cdr (cdr form)))))
-    (let ((inner-ctx (compile-make-ctx)))
-      (let ((inner-scope (compile-make-scope (compile-lambda-param-locals params 0)
-                                              (compile-make-captures)
-                                              (compile-make-next-slot-box (compile-env-length params))
-                                              scope)))
-        (let ((body-code (assemble (compile-concat (compile-expr body inner-ctx inner-scope)
-                                                    (list (list *op-return*))))))
-          ; milestone83/84: scope-next-slot-boxはparams分のindexから始まり、letが束縛
-          ; されるたびに単調増加するだけ(再利用・減少しない)なので、本体コンパイル完了後の
-          ; 最終値がそのままこの関数フレームが必要とするローカルスロット総数(max-locals)になる
-          (let ((max-locals (car (scope-next-slot-box inner-scope))))
-            (let ((package (list 'closure-template
-                                  (compile-env-length params)
-                                  max-locals
-                                  body-code
-                                  (compile-ctx-constants inner-ctx)
-                                  (compile-ctx-constants (captures-desc-ctx (scope-captures inner-scope))))))
-              (list (list *op-make-closure* (compile-register-const ctx package))))))))))
+    (if (lambda-list-contains-keyword-p params)
+        (%panic-compiled-lambda-list-keyword)
+        (let ((inner-ctx (compile-make-ctx)))
+          (let ((inner-scope (compile-make-scope (compile-lambda-param-locals params 0)
+                                                  (compile-make-captures)
+                                                  (compile-make-next-slot-box (compile-env-length params))
+                                                  scope)))
+            (let ((body-code (assemble (compile-concat (compile-expr body inner-ctx inner-scope)
+                                                        (list (list *op-return*))))))
+              ; milestone83/84: scope-next-slot-boxはparams分のindexから始まり、letが束縛
+              ; されるたびに単調増加するだけ(再利用・減少しない)なので、本体コンパイル完了後の
+              ; 最終値がそのままこの関数フレームが必要とするローカルスロット総数(max-locals)になる
+              (let ((max-locals (car (scope-next-slot-box inner-scope))))
+                (let ((package (list 'closure-template
+                                      (compile-env-length params)
+                                      max-locals
+                                      body-code
+                                      (compile-ctx-constants inner-ctx)
+                                      (compile-ctx-constants (captures-desc-ctx (scope-captures inner-scope))))))
+                  (list (list *op-make-closure* (compile-register-const ctx package)))))))))))
 
 ; --- compile-expr: 関数呼び出し・プリミティブ呼び出し (milestone 45, documents/lisp_vm.md 目標2) ---
 ; OP_CALL <nargs>(src/lisp.c)の呼び出し規約は「先にnargs個の生の引数値をスタックに積み、

@@ -1030,6 +1030,11 @@ static LispObject lisp_sym_return_from;
 static LispObject lisp_sym_do;
 static LispObject lisp_sym_macroexpand_hook;
 static LispObject lisp_sym_compile_and_run;
+static LispObject lisp_sym_lambda_optional;
+static LispObject lisp_sym_lambda_rest;
+static LispObject lisp_sym_lambda_key;
+static LispObject lisp_sym_lambda_aux;
+static LispObject lisp_sym_lambda_allow_other_keys;
 
 void lisp_symbols_init(void) {
     lisp_sym_t = lisp_intern("t");
@@ -1063,6 +1068,14 @@ void lisp_symbols_init(void) {
     // 解決に失敗してunbound variableパニックになる(defmacro/rest-arg defun以外の
     // 全トップレベル評価が壊れる重大バグだった)
     lisp_sym_compile_and_run = lisp_intern("compile-and-run");
+    // milestone 89: CommonLispラムダリストキーワード。&で始まるがreaderの区切り文字には
+    // 含まれない（lisp_reader_is_delim参照）ため、他の特殊形式シンボルと同様に単なる
+    // symbolとしてintern・キャッシュするだけでよい
+    lisp_sym_lambda_optional = lisp_intern("&optional");
+    lisp_sym_lambda_rest = lisp_intern("&rest");
+    lisp_sym_lambda_key = lisp_intern("&key");
+    lisp_sym_lambda_aux = lisp_intern("&aux");
+    lisp_sym_lambda_allow_other_keys = lisp_intern("&allow-other-keys");
 }
 
 
@@ -2287,31 +2300,258 @@ void lisp_env_set(LispObject env, LispObject sym, LispObject value) {
     lisp_panic(L"unbound variable");
 }
 
-// paramsとargsを1対1で対応付けてenvに順に束縛していく（個数不一致はpanic）
+LispObject lisp_eval(LispObject expr, LispObject env);
+
+// milestone 89: &optional/&rest/&key/&aux/&allow-other-keysのいずれか
+static int lisp_is_lambda_list_keyword(LispObject sym) {
+    return sym == lisp_sym_lambda_optional || sym == lisp_sym_lambda_rest ||
+           sym == lisp_sym_lambda_key || sym == lisp_sym_lambda_aux ||
+           sym == lisp_sym_lambda_allow_other_keys;
+}
+
+// var単体 / (var) / (var default-form) / (var default-form supplied-p-var) の
+// いずれかのspecを分解する（&optional/&keyで共通の形）。default-formが省略されたかは
+// has_default_out、supplied-p-varが省略されたかはhas_supplied_outに返す
+static void lisp_lambda_parse_var_spec(LispObject spec, LispObject *var_out,
+                                        LispObject *default_form_out, int *has_default_out,
+                                        LispObject *supplied_var_out, int *has_supplied_out) {
+    *default_form_out = LISP_NIL;
+    *has_default_out = 0;
+    *supplied_var_out = LISP_NIL;
+    *has_supplied_out = 0;
+    if (lisp_is_symbol(spec)) {
+        *var_out = spec;
+        return;
+    }
+    if (!lisp_is_cons(spec) || !lisp_is_symbol(lisp_car(spec))) {
+        lisp_panic(L"malformed lambda list: expected variable spec");
+    }
+    *var_out = lisp_car(spec);
+    LispObject rest1 = lisp_cdr(spec);
+    if (lisp_is_cons(rest1)) {
+        *default_form_out = lisp_car(rest1);
+        *has_default_out = 1;
+        LispObject rest2 = lisp_cdr(rest1);
+        if (lisp_is_cons(rest2) && lisp_is_symbol(lisp_car(rest2))) {
+            *supplied_var_out = lisp_car(rest2);
+            *has_supplied_out = 1;
+        }
+    }
+}
+
+// &optional以降のspec列をargsが尽きるまで/次のキーワードに達するまで束縛する。
+// argsは呼び出し側の残り実引数を指すポインタで、消費した分だけ前進させて返す。
+// paramsは処理し終えた残り(次のキーワードまたはNIL)をout_paramsへ返す
+static LispObject lisp_env_bind_optional(LispObject params, LispObject *args_ptr,
+                                          LispObject env, LispObject *out_params) {
+    LispObject args = *args_ptr;
+    while (lisp_is_cons(params) && !lisp_is_lambda_list_keyword(lisp_car(params))) {
+        LispObject var, default_form, supplied_var;
+        int has_default, has_supplied;
+        lisp_lambda_parse_var_spec(lisp_car(params), &var, &default_form, &has_default,
+                                    &supplied_var, &has_supplied);
+        if (lisp_is_cons(args)) {
+            env = lisp_env_extend(env, var, lisp_car(args));
+            if (has_supplied) {
+                env = lisp_env_extend(env, supplied_var, lisp_sym_t);
+            }
+            args = lisp_cdr(args);
+        } else {
+            LispObject value = has_default ? lisp_eval(default_form, env) : LISP_NIL;
+            env = lisp_env_extend(env, var, value);
+            if (has_supplied) {
+                env = lisp_env_extend(env, supplied_var, LISP_NIL);
+            }
+        }
+        params = lisp_cdr(params);
+    }
+    *args_ptr = args;
+    *out_params = params;
+    return env;
+}
+
+// &restの直後は単一のvar symbolでなければならない。argsは消費せず、残っている
+// 実引数リストをそのままvarへ束縛する（&keyが同じ残り実引数をさらに解釈できるように）
+static LispObject lisp_env_bind_rest(LispObject params, LispObject args, LispObject env,
+                                      LispObject *out_params) {
+    if (!lisp_is_cons(params) || !lisp_is_symbol(lisp_car(params)) ||
+        lisp_is_lambda_list_keyword(lisp_car(params))) {
+        lisp_panic(L"malformed lambda list: expected a single variable after &rest");
+    }
+    env = lisp_env_extend(env, lisp_car(params), args);
+    *out_params = lisp_cdr(params);
+    return env;
+}
+
+// &key以降のspec列。argsは&restと同じ残り実引数（未消費）を、":var"キーワードと
+// 値の対として解釈する。未知キーワードは&allow-other-keysが無ければpanicする
+static LispObject lisp_env_bind_key(LispObject params, LispObject args, LispObject env,
+                                     LispObject *out_params) {
+    LispObject specs_end = params;
+    while (lisp_is_cons(specs_end) && !lisp_is_lambda_list_keyword(lisp_car(specs_end))) {
+        specs_end = lisp_cdr(specs_end);
+    }
+    LispObject after_specs = specs_end;
+    int allow_other_keys = 0;
+    if (lisp_is_cons(after_specs) && lisp_car(after_specs) == lisp_sym_lambda_allow_other_keys) {
+        allow_other_keys = 1;
+        after_specs = lisp_cdr(after_specs);
+    }
+
+    UINTN pair_count = 0;
+    for (LispObject cur = args; lisp_is_cons(cur); cur = lisp_cdr(cur)) {
+        pair_count++;
+    }
+    if (pair_count % 2 != 0) {
+        lisp_panic(L"malformed &key arguments: odd number of keyword/value items");
+    }
+
+    if (!allow_other_keys) {
+        for (LispObject cur = args; lisp_is_cons(cur); cur = lisp_cdr(lisp_cdr(cur))) {
+            LispObject keyword = lisp_car(cur);
+            int found = 0;
+            for (LispObject s = params; s != specs_end; s = lisp_cdr(s)) {
+                LispObject spec = lisp_car(s);
+                LispObject var = lisp_is_symbol(spec) ? spec : lisp_car(spec);
+                if (lisp_intern_keyword(lisp_symbol_cell(var)->name) == keyword) {
+                    found = 1;
+                    break;
+                }
+            }
+            if (!found) {
+                lisp_panic(L"unknown keyword argument");
+            }
+        }
+    }
+
+    for (LispObject s = params; s != specs_end; s = lisp_cdr(s)) {
+        LispObject var, default_form, supplied_var;
+        int has_default, has_supplied;
+        lisp_lambda_parse_var_spec(lisp_car(s), &var, &default_form, &has_default,
+                                    &supplied_var, &has_supplied);
+        LispObject keyword = lisp_intern_keyword(lisp_symbol_cell(var)->name);
+        LispObject found_value = LISP_NIL;
+        int found = 0;
+        for (LispObject cur = args; lisp_is_cons(cur); cur = lisp_cdr(lisp_cdr(cur))) {
+            if (lisp_car(cur) == keyword) {
+                found_value = lisp_car(lisp_cdr(cur));
+                found = 1;
+                break;
+            }
+        }
+        if (found) {
+            env = lisp_env_extend(env, var, found_value);
+            if (has_supplied) {
+                env = lisp_env_extend(env, supplied_var, lisp_sym_t);
+            }
+        } else {
+            LispObject value = has_default ? lisp_eval(default_form, env) : LISP_NIL;
+            env = lisp_env_extend(env, var, value);
+            if (has_supplied) {
+                env = lisp_env_extend(env, supplied_var, LISP_NIL);
+            }
+        }
+    }
+
+    *out_params = after_specs;
+    return env;
+}
+
+// &aux以降は(let*同様に)前のaux変数を後のinit-formから参照できる逐次初期化として
+// 束縛する。実引数は関係しない（残っていても消費しない）
+static LispObject lisp_env_bind_aux(LispObject params, LispObject env) {
+    while (lisp_is_cons(params)) {
+        LispObject spec = lisp_car(params);
+        LispObject var, init_form;
+        if (lisp_is_symbol(spec)) {
+            var = spec;
+            init_form = LISP_NIL;
+        } else if (lisp_is_cons(spec) && lisp_is_symbol(lisp_car(spec))) {
+            var = lisp_car(spec);
+            LispObject rest = lisp_cdr(spec);
+            init_form = lisp_is_cons(rest) ? lisp_car(rest) : LISP_NIL;
+        } else {
+            lisp_panic(L"malformed &aux spec in lambda list");
+        }
+        env = lisp_env_extend(env, var, lisp_eval(init_form, env));
+        params = lisp_cdr(params);
+    }
+    return env;
+}
+
+// paramsとargsを対応付けてenvに束縛していく。milestone89までは1対1の位置束縛
+// （個数不一致はpanic）とmilestone29の「仮引数全体が単一のbare symbol」の可変長引数
+// のみだったが、ここからCommonLisp相当の&optional/&rest/&key/&aux/&allow-other-keys
+// を解釈する。出現順序は required* [&optional...] [&rest var] [&key... [&allow-other-keys]]
+// [&aux...] に固定し、順序違反やキーワードの重複はpanicする
 LispObject lisp_env_bind_params(LispObject params, LispObject args, LispObject env) {
     while (lisp_is_cons(params)) {
+        LispObject head = lisp_car(params);
+        if (lisp_is_lambda_list_keyword(head)) {
+            break;
+        }
+        if (!lisp_is_symbol(head)) {
+            lisp_panic(L"malformed lambda list: expected parameter name");
+        }
         if (!lisp_is_cons(args)) {
             lisp_panic(L"too few arguments");
         }
-        env = lisp_env_extend(env, lisp_car(params), lisp_car(args));
+        env = lisp_env_extend(env, head, lisp_car(args));
         params = lisp_cdr(params);
         args = lisp_cdr(args);
     }
     // milestone 29: 仮引数リストがsymbol一つだけ（(lambda args ...)/(defun f args ...)）
     // の場合、残りの実引数をリストのままそのsymbolへ束縛する（可変長引数）。
     // (a b . rest)のドット対記法はリーダーが対応していないため、この「仮引数全体が
-    // 単一のsymbol」という形だけをサポートする
+    // 単一のsymbol」という形だけをサポートする。新キーワードとは併用しない
     if (params != LISP_NIL && lisp_is_symbol(params)) {
         env = lisp_env_extend(env, params, args);
         return env;
     }
-    if (args != LISP_NIL) {
+
+    int seen_optional = 0, seen_rest = 0, seen_key = 0, seen_aux = 0;
+    int has_rest = 0, has_key = 0;
+    while (lisp_is_cons(params)) {
+        LispObject head = lisp_car(params);
+        if (head == lisp_sym_lambda_optional) {
+            if (seen_optional || seen_rest || seen_key || seen_aux) {
+                lisp_panic(L"malformed lambda list: unexpected &optional");
+            }
+            seen_optional = 1;
+            env = lisp_env_bind_optional(lisp_cdr(params), &args, env, &params);
+        } else if (head == lisp_sym_lambda_rest) {
+            if (seen_rest || seen_key || seen_aux) {
+                lisp_panic(L"malformed lambda list: unexpected &rest");
+            }
+            seen_rest = 1;
+            has_rest = 1;
+            env = lisp_env_bind_rest(lisp_cdr(params), args, env, &params);
+        } else if (head == lisp_sym_lambda_key) {
+            if (seen_key || seen_aux) {
+                lisp_panic(L"malformed lambda list: unexpected &key");
+            }
+            seen_key = 1;
+            has_key = 1;
+            env = lisp_env_bind_key(lisp_cdr(params), args, env, &params);
+        } else if (head == lisp_sym_lambda_aux) {
+            if (seen_aux) {
+                lisp_panic(L"malformed lambda list: unexpected &aux");
+            }
+            seen_aux = 1;
+            env = lisp_env_bind_aux(lisp_cdr(params), env);
+            params = LISP_NIL;
+        } else if (head == lisp_sym_lambda_allow_other_keys) {
+            lisp_panic(L"malformed lambda list: &allow-other-keys without &key");
+        } else {
+            lisp_panic(L"malformed lambda list: expected lambda-list keyword");
+        }
+    }
+
+    if (!has_rest && !has_key && args != LISP_NIL) {
         lisp_panic(L"too many arguments");
     }
     return env;
 }
-
-LispObject lisp_eval(LispObject expr, LispObject env);
 
 // リストの各要素をenvで評価し、結果のリストを返す（関数呼び出しの引数評価に使う）
 LispObject lisp_eval_list(LispObject list, LispObject env) {
@@ -2958,15 +3198,40 @@ LispObject lisp_builtin_establish_global_function(LispObject args) {
     return sym;
 }
 
-// milestone 60: defunのparamsが「仮引数リスト全体が1つのbare symbol」というrest-arg形式
-// （milestone29、lisp_env_bind_paramsが解釈する可変長引数の書き方）かどうかを判定する。
-// コンパイル済みクロージャの呼び出し規約（OP_CALL/lisp_applyのclosure->nargs厳密一致
-// チェック、milestone37）はrest-argを一切サポートしない（documents/lisp_vm_integration.md
-// のスコープ外として明記済み）ため、このケースのdefunだけはlisp_eval_toplevelが
-// 既存のツリーウォークへフォールバックする判定に使う
-static int lisp_defun_params_is_restarg(LispObject expr) {
+// milestone 89: すでにコンパイルされている関数の内側に直接書かれた
+// (lambda (&optional x) ...)のようなネストしたlambda式は、compile-lambda
+// (lisp/compiler.lisp)がツリーウォークへ逃げずにそのままコンパイルしてしまうため、
+// &optionalという語がそのまま1個目の仮引数名として扱われる危険な黒魔術（サイレントな
+// 誤動作）になる。これを防ぐため、compile-lambdaがparamsに新キーワードシンボルを
+// 検出した際にLisp側から呼ぶ専用panicビルトイン（引数は取らない）
+LispObject lisp_builtin_panic_compiled_lambda_list_keyword(LispObject args) {
+    (void)args;
+    lisp_panic(L"lambda-list keywords (&optional/&rest/&key/&aux/&allow-other-keys) "
+               L"cannot be used in a lambda nested inside already-compiled code");
+    return LISP_NIL; // 到達しない
+}
+
+// milestone 60（milestone89で一般化）: defunのparamsがコンパイル済みクロージャの
+// 呼び出し規約（OP_CALL/lisp_applyのclosure->nargs厳密一致チェック、milestone37）では
+// 表現できない書き方かどうかを判定する。該当するのは
+// (a) 「仮引数リスト全体が1つのbare symbol」というrest-arg形式（milestone29、
+//     lisp_env_bind_paramsが解釈する可変長引数の書き方）
+// (b) &optional/&rest/&key/&aux/&allow-other-keys（milestone89）をどれか1つでも含む場合
+// のいずれか。どちらもdocuments/lisp_vm_integration.md・lisp_lambda_list_keywords.mdの
+// スコープ外として明記済みで、この形のdefunだけはlisp_eval_toplevelが既存の
+// ツリーウォークへフォールバックする判定に使う
+static int lisp_defun_params_needs_interpreter(LispObject expr) {
     LispObject params = lisp_car(lisp_cdr(lisp_cdr(expr)));
-    return params != LISP_NIL && lisp_is_symbol(params);
+    if (params != LISP_NIL && lisp_is_symbol(params)) {
+        return 1;
+    }
+    while (lisp_is_cons(params)) {
+        if (lisp_is_lambda_list_keyword(lisp_car(params))) {
+            return 1;
+        }
+        params = lisp_cdr(params);
+    }
+    return 0;
 }
 
 // REPLの1行、またはloadの1トップレベル式としてexprをglobal_env上で評価する。
@@ -2974,9 +3239,11 @@ static int lisp_defun_params_is_restarg(LispObject expr) {
 // macroexpand-all→compile-expr→vm-execの新経路（lisp/stdlib.lisp）へ委譲する。
 // defmacroは恒久的にツリーウォークへフォールバックする（マクロ展開はインタプリタ操作
 // そのものであり、コンパイル時に発生する）。defunはmilestone60でコンパイル対応した
-// （compile-defun、lisp/stdlib.lisp）が、rest-arg形式のparams（milestone29、
-// lisp_defun_params_is_restarg参照）だけはコンパイル済みクロージャの呼び出し規約が
-// サポートしないため、この形のdefunのみ個別にツリーウォークへフォールバックする。
+// （compile-defun、lisp/stdlib.lisp）が、rest-arg形式のparams（milestone29）や
+// &optional/&rest/&key/&aux/&allow-other-keys（milestone89、
+// lisp_defun_params_needs_interpreter参照）を含むparamsだけはコンパイル済みクロージャの
+// 呼び出し規約がサポートしないため、この形のdefunのみ個別にツリーウォークへ
+// フォールバックする。
 // return-fromの脱出シグナルが対応するblockに一度も捕捉されずここまで残っている場合、
 // タグが指す実行中のblockが存在しないというユーザー側の誤りなのでpanicする。
 // これをせずに素通しすると、残ったシグナルが次の入力の評価を最初の一歩で
@@ -2986,8 +3253,8 @@ static int lisp_defun_params_is_restarg(LispObject expr) {
 LispObject lisp_eval_toplevel(LispObject expr) {
     LispObject op = lisp_is_cons(expr) ? lisp_car(expr) : LISP_NIL;
     LispObject result;
-    int defun_restarg = (op == lisp_sym_defun) && lisp_defun_params_is_restarg(expr);
-    if (lisp_compiler_ready && op != lisp_sym_defmacro && !defun_restarg) {
+    int defun_needs_interpreter = (op == lisp_sym_defun) && lisp_defun_params_needs_interpreter(expr);
+    if (lisp_compiler_ready && op != lisp_sym_defmacro && !defun_needs_interpreter) {
         LispObject compile_and_run = lisp_env_lookup(global_env, lisp_sym_compile_and_run);
         result = lisp_apply(compile_and_run, lisp_cons(expr, LISP_NIL));
     } else {
@@ -4200,6 +4467,7 @@ LispObject lisp_builtins_init(void) {
     env = lisp_env_extend(env, lisp_intern("mark-compiler-ready"), lisp_make_builtin(lisp_builtin_mark_compiler_ready));
     env = lisp_env_extend(env, lisp_intern("compiler-ready-p"), lisp_make_builtin(lisp_builtin_compiler_ready_p));
     env = lisp_env_extend(env, lisp_intern("establish-global-function"), lisp_make_builtin(lisp_builtin_establish_global_function));
+    env = lisp_env_extend(env, lisp_intern("%panic-compiled-lambda-list-keyword"), lisp_make_builtin(lisp_builtin_panic_compiled_lambda_list_keyword));
 
     // *macroexpand-hook*をdefvarと同じ形（is_special=1 + 初期値）で直接セットアップする
     // (milestone 21)。動的変数はenvチェーンに束縛を積まないため、global_envへの

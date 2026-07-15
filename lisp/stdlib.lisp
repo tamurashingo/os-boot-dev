@@ -18,13 +18,13 @@
 (defun 1+ (x) (+ x 1))
 (defun 1- (x) (- x 1))
 
-; milestone87: doの上に構築するwhileマクロ。(a b . rest)というドット対の仮引数
-; リストはリーダーが対応していない(defpackage-formと同じ制約、milestone29)ため、
-; 仮引数リスト全体を単一symbolにする書き方でtest・bodyを受け取り、(car args)を
-; end-test、(cdr args)をbodyとして展開する。do自身がCの再帰を使わないwhile(1)
-; ループなので、whileも(bindingsが無いdoとして)Cスタックを消費しない
-(defmacro while args
-  (cons 'do (cons nil (cons (list (list 'not (car args))) (cdr args)))))
+; milestone87: doの上に構築するwhileマクロ。milestone89で&restラムダリストキーワードが
+; 導入されたため、以前のように仮引数リスト全体を単一symbolにしてcar/cdrで手動destructuring
+; していた書き方(milestone29のbare-symbol rest-arg)をtest/bodyの明示的な仮引数に置き換えた。
+; do自身がCの再帰を使わないwhile(1)ループなので、whileも(bindingsが無いdoとして)Cスタックを
+; 消費しない
+(defmacro while (test &rest body)
+  (cons 'do (cons nil (cons (list (list 'not test)) body))))
 
 ; C側の算術の核として組み込んだ<だけを使い、比較演算子群の残りをすべてLispで導出する。
 ; CLと異なり2引数のみサポートする(明示的な範囲の限定)
@@ -90,12 +90,11 @@
 (defun defpackage-use-form (name pkg-name)
   (list 'use-package (list 'find-package pkg-name) (list 'find-package name)))
 
-; 仮引数リスト全体を単一symbolにする書き方(milestone29のrest-arg機構、listやmapcar自身と
-; 同じ形)で、パッケージ名(文字列)と可変長の句((:export ...)/(:use ...))を受け取る
-(defmacro defpackage defpackage-form
-  (let* ((name (car defpackage-form))
-         (clauses (cdr defpackage-form))
-         (export-forms (mapcar (lambda (n) (defpackage-export-form name n))
+; milestone89: &restラムダリストキーワードにより、以前のように仮引数リスト全体を単一symbol
+; にしてcar/cdrで手動destructuringしていた書き方(milestone29のrest-arg機構)を、パッケージ名
+; nameと可変長の句((:export ...)/(:use ...))を受け取るclausesの明示的な仮引数に置き換えた
+(defmacro defpackage (name &rest clauses)
+  (let* ((export-forms (mapcar (lambda (n) (defpackage-export-form name n))
                                 (defpackage-clause-names clauses :export)))
          (use-forms (mapcar (lambda (n) (defpackage-use-form name n))
                              (defpackage-clause-names clauses :use))))
