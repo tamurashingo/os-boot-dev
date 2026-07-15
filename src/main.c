@@ -108,7 +108,7 @@ static void lisp_global_ref_package_identity_selftest_run(EFI_SYSTEM_TABLE *Syst
 static void lisp_vm_arith_selftest_run(EFI_SYSTEM_TABLE *SystemTable) {
     unsigned char code[] = { OP_CONST, 0, 0, OP_CONST, 1, 0, OP_ADD, OP_RETURN };
     LispObject constants[2] = { lisp_read_from_buffer("1"), lisp_read_from_buffer("2") };
-    LispObject fn = lisp_make_compiled(code, sizeof(code), constants, 2, 0);
+    LispObject fn = lisp_make_compiled(code, sizeof(code), constants, 2, 0, 0);
     LispObject result = lisp_vm_exec(fn);
 
     if (result == lisp_read_from_buffer("3")) {
@@ -123,26 +123,28 @@ static void lisp_vm_arith_selftest_run(EFI_SYSTEM_TABLE *SystemTable) {
 // Lisp相当: (let ((x 10)) (if <test> (setq x 20) (setq x 30)) x)
 // を手動バイトコードで構築し、testがnil/非nilそれぞれの場合に正しい分岐を通り、
 // ローカル変数のボックス経由での読み書きも正しく行われることを確認する。
-//   [0]  OP_CONST 0        ; 10をpush
-//   [3]  OP_MAKE_LOCAL      ; local0 = box(10)
-//   [4]  OP_CONST 1         ; testをpush
-//   [7]  OP_JUMP_IF_FALSE 19 ; nilならelseへ
-//   [10] OP_CONST 2         ; 20をpush (then)
-//   [13] OP_STORE_LOCAL 0   ; local0 <- 20
-//   [16] OP_JUMP 25          ; elseを飛び越す
-//   [19] OP_CONST 3         ; 30をpush (else)
-//   [22] OP_STORE_LOCAL 0   ; local0 <- 30
-//   [25] OP_LOAD_LOCAL 0    ; local0を読む
-//   [28] OP_RETURN
+// milestone83/84でOP_MAKE_LOCALが2byteのFP相対indexオペランドを取るようになったため、
+// これより後にあるジャンプ先オフセットは全て+2ずれている。
+//   [0]  OP_CONST 0            ; 10をpush
+//   [3]  OP_MAKE_LOCAL 0       ; local0 = box(10)
+//   [6]  OP_CONST 1            ; testをpush
+//   [9]  OP_JUMP_IF_FALSE 21   ; nilならelseへ
+//   [12] OP_CONST 2            ; 20をpush (then)
+//   [15] OP_STORE_LOCAL 0      ; local0 <- 20
+//   [18] OP_JUMP 27            ; elseを飛び越す
+//   [21] OP_CONST 3            ; 30をpush (else)
+//   [24] OP_STORE_LOCAL 0      ; local0 <- 30
+//   [27] OP_LOAD_LOCAL 0       ; local0を読む
+//   [30] OP_RETURN
 static void lisp_vm_control_flow_selftest_run(EFI_SYSTEM_TABLE *SystemTable) {
     unsigned char code[] = {
         OP_CONST, 0, 0,
-        OP_MAKE_LOCAL,
+        OP_MAKE_LOCAL, 0, 0,
         OP_CONST, 1, 0,
-        OP_JUMP_IF_FALSE, 19, 0,
+        OP_JUMP_IF_FALSE, 21, 0,
         OP_CONST, 2, 0,
         OP_STORE_LOCAL, 0, 0,
-        OP_JUMP, 25, 0,
+        OP_JUMP, 27, 0,
         OP_CONST, 3, 0,
         OP_STORE_LOCAL, 0, 0,
         OP_LOAD_LOCAL, 0, 0,
@@ -155,11 +157,11 @@ static void lisp_vm_control_flow_selftest_run(EFI_SYSTEM_TABLE *SystemTable) {
     LispObject nil = lisp_read_from_buffer("()");
 
     LispObject constants_false[4] = { ten, nil, twenty, thirty };
-    LispObject fn_false = lisp_make_compiled(code, sizeof(code), constants_false, 4, 0);
+    LispObject fn_false = lisp_make_compiled(code, sizeof(code), constants_false, 4, 0, 1);
     LispObject result_false = lisp_vm_exec(fn_false);
 
     LispObject constants_true[4] = { ten, lisp_read_from_buffer("1"), twenty, thirty };
-    LispObject fn_true = lisp_make_compiled(code, sizeof(code), constants_true, 4, 0);
+    LispObject fn_true = lisp_make_compiled(code, sizeof(code), constants_true, 4, 0, 1);
     LispObject result_true = lisp_vm_exec(fn_true);
 
     if (result_false == thirty && result_true == twenty) {
@@ -209,7 +211,7 @@ static void lisp_vm_call_selftest_run(EFI_SYSTEM_TABLE *SystemTable) {
     LispObject nil = lisp_read_from_buffer("()");
     LispObject zero = lisp_read_from_buffer("0");
     LispObject f_constants[2] = { nil, zero };
-    LispObject f = lisp_make_compiled(f_code, sizeof(f_code), f_constants, 2, 2);
+    LispObject f = lisp_make_compiled(f_code, sizeof(f_code), f_constants, 2, 2, 2);
 
     // driver: f(f, 5) を呼び出す。driverの定数配列はfの構築が終わった後に組むので、
     // f自身が自分の値を知らなくてもここでは自己参照の鶏と卵問題は生じない
@@ -222,7 +224,7 @@ static void lisp_vm_call_selftest_run(EFI_SYSTEM_TABLE *SystemTable) {
     };
     LispObject five = lisp_read_from_buffer("5");
     LispObject driver_constants[2] = { f, five };
-    LispObject driver = lisp_make_compiled(driver_code, sizeof(driver_code), driver_constants, 2, 0);
+    LispObject driver = lisp_make_compiled(driver_code, sizeof(driver_code), driver_constants, 2, 0, 0);
 
     LispObject result = lisp_vm_exec(driver);
 
@@ -265,7 +267,7 @@ static void lisp_vm_closure_selftest_run(EFI_SYSTEM_TABLE *SystemTable) {
     };
     LispObject one = lisp_read_from_buffer("1");
     LispObject inc_constants[1] = { one };
-    LispObject inc = lisp_make_compiled(inc_code, sizeof(inc_code), inc_constants, 1, 0);
+    LispObject inc = lisp_make_compiled(inc_code, sizeof(inc_code), inc_constants, 1, 0, 0);
     UINTN desc_kinds[1] = { 0 };
     UINTN desc_indices[1] = { 0 };
     lisp_compiled_set_upvalue_descs(inc, lisp_make_upvalue_descs(desc_kinds, desc_indices, 1));
@@ -276,7 +278,7 @@ static void lisp_vm_closure_selftest_run(EFI_SYSTEM_TABLE *SystemTable) {
     };
     LispObject make_counter_constants[1] = { inc };
     LispObject make_counter = lisp_make_compiled(make_counter_code, sizeof(make_counter_code),
-                                                  make_counter_constants, 1, 1);
+                                                  make_counter_constants, 1, 1, 1);
 
     // driver: c1=make-counter(10), c2=make-counter(100)を作り、c1を2回・c2を1回呼んで
     // 11+12+101=124を返す
@@ -284,11 +286,11 @@ static void lisp_vm_closure_selftest_run(EFI_SYSTEM_TABLE *SystemTable) {
         OP_CONST, 0, 0,
         OP_CONST, 2, 0,
         OP_CALL, 1, 0,
-        OP_MAKE_LOCAL,
+        OP_MAKE_LOCAL, 0, 0,
         OP_CONST, 1, 0,
         OP_CONST, 2, 0,
         OP_CALL, 1, 0,
-        OP_MAKE_LOCAL,
+        OP_MAKE_LOCAL, 1, 0,
         OP_LOAD_LOCAL, 0, 0,
         OP_CALL, 0, 0,
         OP_LOAD_LOCAL, 0, 0,
@@ -302,7 +304,7 @@ static void lisp_vm_closure_selftest_run(EFI_SYSTEM_TABLE *SystemTable) {
     LispObject ten = lisp_read_from_buffer("10");
     LispObject hundred = lisp_read_from_buffer("100");
     LispObject driver_constants[3] = { ten, hundred, make_counter };
-    LispObject driver = lisp_make_compiled(driver_code, sizeof(driver_code), driver_constants, 3, 0);
+    LispObject driver = lisp_make_compiled(driver_code, sizeof(driver_code), driver_constants, 3, 0, 2);
 
     LispObject result = lisp_vm_exec(driver);
     LispObject expected = lisp_read_from_buffer("124");
@@ -358,7 +360,7 @@ static void lisp_vm_integrated_selftest_run(EFI_SYSTEM_TABLE *SystemTable) {
     };
     LispObject one = lisp_read_from_buffer("1");
     LispObject inc_constants[1] = { one };
-    LispObject inc = lisp_make_compiled(inc_code, sizeof(inc_code), inc_constants, 1, 0);
+    LispObject inc = lisp_make_compiled(inc_code, sizeof(inc_code), inc_constants, 1, 0, 0);
     UINTN desc_kinds[1] = { 0 };
     UINTN desc_indices[1] = { 0 };
     lisp_compiled_set_upvalue_descs(inc, lisp_make_upvalue_descs(desc_kinds, desc_indices, 1));
@@ -369,7 +371,7 @@ static void lisp_vm_integrated_selftest_run(EFI_SYSTEM_TABLE *SystemTable) {
     };
     LispObject make_counter_constants[1] = { inc };
     LispObject make_counter = lisp_make_compiled(make_counter_code, sizeof(make_counter_code),
-                                                  make_counter_constants, 1, 1);
+                                                  make_counter_constants, 1, 1, 1);
 
     unsigned char f_code[] = {
         OP_LOAD_LOCAL, 1, 0,
@@ -382,7 +384,7 @@ static void lisp_vm_integrated_selftest_run(EFI_SYSTEM_TABLE *SystemTable) {
         OP_LOAD_LOCAL, 2, 0,
         OP_CALL, 0, 0,
         OP_CONS,
-        OP_MAKE_LOCAL,
+        OP_MAKE_LOCAL, 3, 0,
         OP_LOAD_LOCAL, 3, 0,
         OP_CAR,
         OP_LOAD_LOCAL, 3, 0,
@@ -401,7 +403,7 @@ static void lisp_vm_integrated_selftest_run(EFI_SYSTEM_TABLE *SystemTable) {
     LispObject zero = lisp_read_from_buffer("0");
     LispObject neg_one = lisp_read_from_buffer("-1");
     LispObject f_constants[2] = { zero, neg_one };
-    LispObject f = lisp_make_compiled(f_code, sizeof(f_code), f_constants, 2, 3);
+    LispObject f = lisp_make_compiled(f_code, sizeof(f_code), f_constants, 2, 3, 4);
 
     // driver: counter=make-counter(0)をf呼び出しのちょうどarg3の位置に積んでから
     // f(f, 3, counter)を呼び出す
@@ -417,7 +419,7 @@ static void lisp_vm_integrated_selftest_run(EFI_SYSTEM_TABLE *SystemTable) {
     };
     LispObject three = lisp_read_from_buffer("3");
     LispObject driver_constants[4] = { f, three, zero, make_counter };
-    LispObject driver = lisp_make_compiled(driver_code, sizeof(driver_code), driver_constants, 4, 0);
+    LispObject driver = lisp_make_compiled(driver_code, sizeof(driver_code), driver_constants, 4, 0, 0);
 
     LispObject result = lisp_vm_exec(driver);
     LispObject expected = lisp_read_from_buffer("12");

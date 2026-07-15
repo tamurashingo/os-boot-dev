@@ -31,7 +31,9 @@
 マイルストーン番号は既存の1〜67に続く**68から**開始する（68〜82の非公式使用が無いことをgrepで
 確認済み）。フェーズF（83〜84）はmilestone78で発見した非tail位置スタックリークの、フェーズG
 （85〜86）はmilestone81着手時に発見した特殊形式トークンの可視性問題の、それぞれ切り出しにより
-追加した。
+追加した。フェーズH（87）は本ロードマップのフェーズ構成（A〜G）とは無関係な内容（コンパイラ自身の
+自己ブートストラップ関数のCスタック深度対策）だが、ユーザーの判断によりマイルストーン番号の
+グローバルな連番管理を優先し、本ドキュメントへ追記する形とした。
 
 ### 設計にあたり確定している方針
 
@@ -114,8 +116,8 @@
 
 | # | マイルストーン | 状態 | 主な内容 |
 |---|---|---|---|
-| 83 | `let`/`let*`/`or`/`cond`(test-onlyクローズ)の非tail位置スタックリーク修正 | 未着手 | milestone78の`progn`修正（`OP_POP`導入）で解決したのと同じ根本原因——`OP_MAKE_LOCAL`がボックス化した値をスタック上に永続的に残し、対応する解放命令が無いこと——により、`let`/`let*`/`or`/`cond`のtest-onlyクローズ（いずれも実際に参照される束縛を`OP_MAKE_LOCAL`経由で作る）自体も、関数呼び出しの引数のような非tail位置で2個以上の兄弟式として使われると、スタック上のゴミが後続の計算を壊し`Lisp panic: expected a cons cell but got something else`等で異常終了することを確認済み（例: `(cons (let ((x 1)) x) (let ((y 2)) y))`）。`progn`の捨てる束縛と異なり、これらは束縛の値がbody中で実際に参照されるため、単純に`OP_POP`を挟むだけでは修正できない——束縛が保持していた値をボックスの外に取り出し、ボックス自体をスタックから取り除く（深い位置の値を捨てて浅い位置の値だけ残す）新規機構が必要になる。設計・実装は未着手。 |
-| 84 | milestone83修正の回帰検証と既存コードベースの棚卸し | 未着手 | milestone83の修正後、`make test`全件・`compiler.lisp`/`stdlib.lisp`自身（tree-walkedおよびVMコンパイル経由の両方）に同種のパターン（`let`/`let*`/`or`/`cond`を非tail位置の兄弟引数として使う箇所）が既存コード中に無いか`grep`等で棚卸しし、暗黙に依存していた既存コードが無いことを確認する。 |
+| 83 | ローカル変数領域とオペランドスタックの分離による非tail位置スタックリークの根本修正 | 完了 | milestone78の`progn`修正（`OP_POP`導入）では解決できなかった同根の問題——`OP_MAKE_LOCAL`がボックス化した値をスタック上に永続的に残し、対応する解放命令が無いこと——により、`let`/`let*`/`or`/`cond`のtest-onlyクローズ自体も非tail位置で2個以上の兄弟式として使われると異常終了することを確認済み（例: `(cons 1 (let ((y 2)) y))`）。当初検討した「ボックスから値だけ取り出してボックス自体をスタックから除去する」方式ではなく、ユーザー提案の設計——関数呼び出し時にそのフレームが使う全ローカル変数スロット（仮引数+`let`で束縛される全ローカル）分の固定領域を`vm_stack`上に一括で確保し、その上に一時値用のオペランドスタックを積む——を採用した。具体的には: (1) コンパイラの`scope-next-slot-box`（単調増加、再利用しない）の最終値を`max-locals`としてクロージャに記録する新規フィールドを追加し、`closure-template`のリスト構造・`vm-make-closure`ビルトインの引数を`(nargs max-locals ...)`へ拡張した。(2) 呼び出し元が`lisp_vm_run`を呼ぶ前に`vm_stack[fp..fp+max_locals)`をまるごと`LISP_NIL`で確保する新規ヘルパー`lisp_vm_reserve_frame`を追加し、`OP_CALL`・`OP_BLOCK`・`lisp_vm_exec`（トップレベル）・`lisp_apply`のコンパイル済みクロージャ呼び出しブリッジという4箇所すべての呼び出し経路に組み込んだ。(3) `OP_MAKE_LOCAL`をFP相対のスロットindexを2byteオペランドとして取る命令へ変更し、スタック最上位の初期化値を1つpopしてその場で`cons(値, nil)`にボックス化し、確保済みの固定スロット`vm_stack[fp+index]`へ直接書き込む（pushし直さない）ようにした。この結果、ローカル変数用の領域は呼び出し時に一括確保された不変の領域となり、兄弟式の一時値が残っていても`let`のボックス化がスタックの深さに影響を与えなくなるため、根本的にリークが発生しなくなった。 |
+| 84 | milestone83修正の回帰検証と既存コードベースの棚卸し | 完了 | `src/lisp.c`/`src/lisp.h`/`src/main.c`（VM自己テスト5件のハンドコンパイル済みバイトコード配列・`lisp_make_compiled`呼び出し）・`lisp/compiler.lisp`（`compile-let-push-and-box`/`compile-lambda`/`vm-materialize-template`/`compile-and-run`）・`test/lisp/test-compile-expr.lisp`（`OP_MAKE_LOCAL`のオペランド幅変化・`closure-template`構造変化に伴うハードコード済み期待値を全面的に再計算）・`test/lisp/test-compile-and-run.lisp`（`vm-make-closure`呼び出し3箇所）を`max-locals`対応に合わせて修正した。`make build`・`make test`（新規`test-locals-region.lisp`を含む全20ファイル）で回帰が無いことを確認した。加えて、`make test`単体では検出できない異常終了系シナリオを個別に確認する既定の方針に従い、本マイルストーン用に新設した`make test-locals-region`（`(cons 1 (let ((y 2)) y))`という非tail位置の兄弟式としての`let`、3つ以上の兄弟位置での複数`let`、外側の`let`本体内での非tail位置`let`の3パターン）を個別にQEMUで実行し、PASSすることを確認した。ループ本体で繰り返し評価される`let`がスタックへボックスを積み増さないことの確認（milestone87で発見したネストしたwhile内での`let`繰り返しによるスタック蓄積の再現テスト）は、`do`/`while`が導入されるmilestone87側の`test-while.lisp`で扱うため本マイルストーンのスコープには含めない。`compiler.lisp`/`stdlib.lisp`自身のコード中に同種のパターン（`let`/`let*`/`or`/`cond`を非tail位置の兄弟引数として使う箇所）が無いかも確認し、既存コードが暗黙にこの制約に依存している箇所は見つからなかった。 |
 
 ### フェーズG: 特殊形式トークンの可視性修正（milestone81で発見）
 
@@ -123,6 +125,12 @@
 |---|---|---|---|
 | 85 | 特殊形式・ビルトイントークンの`common-lisp-user`からのexport対応 | 未着手 | milestone81の着手時に発見した制約——`*package*`を`common-lisp-user`以外へ切り替えると、`:use "common-lisp-user"`していても`defun`/`if`/`let`/`quote`/`lambda`/`defmacro`/`progn`/`setq`/`cond`/`and`/`or`/`when`/`unless`/`block`/`return-from`等の特殊形式トークン、および`car`/`cons`/`+`等のビルトインまで無修飾では解決できなくなる（`unbound variable`でpanicする、または特殊形式として認識されず関数呼び出しとして評価されて失敗する）——を解消する。`lisp_symbols_init`でintern済みの特殊形式シンボル群と`lisp_builtins_init`で`global_env`へ束縛する全ビルトインシンボルを、`common-lisp-user`の`pkg_exports`へ登録する（初期化時に`lisp_builtin_export`相当の処理をC内部から直接呼ぶ、または`pkg_exports`へ直接cons追加する）。既存の`:use "common-lisp-user"`をしているパッケージの動作は、追加のexportにより無修飾解決できる範囲が広がるだけで後方互換になることを確認する。`in-package`自身が無修飾で呼べないため二重コロン修飾（`common-lisp-user::in-package`）でしか復帰できない、というmilestone79で発見した制約もこれで解消され、通常の`in-package`呼び出しで復帰できるようになることを確認する。 |
 | 86 | milestone85修正の回帰検証 | 未着手 | milestone85の修正後、`make test`全件（特に修飾子リーダー・修飾子プリンタ・`use-package`関連の既存自己テスト）に回帰が無いことを確認する。加えて、`*package*`を新規パッケージ（`:use "common-lisp-user"`のみ）へ切り替えた対話REPLセッションで、`defun`によるユーザー定義関数の作成、`in-package`による無修飾での`common-lisp-user`への復帰、`(quote 症状のあったビルトイン呼び出し)`が全て無修飾で成功することを目視確認する。milestone81の自己テストがC内部操作（`lisp_sym_package`の直接書き換え）に限定していた制約が本マイルストーンの完了により解消されるため、必要であれば同等のシナリオをLisp評価のみで再テストするかどうかを検討する。 |
+
+### フェーズH: コンパイラ自己ブートストラップ関数のCスタック深度対策（フェーズA〜Gとは無関係、ユーザーの判断でmilestone番号を継続）
+
+| # | マイルストーン | 状態 | 主な内容 |
+|---|---|---|---|
+| 87 | `do`/`while`の導入とコンパイラ自己ブートストラップ関数のCスタック深度対策 | 完了 | `test/lisp/test-compile-expr.lisp`（28節の`and`を持つマクロ展開網羅テスト）を`make test`で実行するとCスタックオーバーフローでクラッシュする問題を修正した。原因は`macroexpand-all-forms`/`append`/`mapcar`が節数に比例した深さの非末尾再帰をCコールスタック上に積むこと——ユーザーコードの再帰ではなく、コンパイラ自身の自己ブートストラップ処理（milestone65でmacroexpand-all/compile-exprの前提として`lisp/compiler.lisp`へ移設した6関数のうちの3つ）が原因である点が特徴。まず`lisp_eval`（`src/lisp.c`/`src/lisp.h`）へ`do`特殊形式（並行step-form・省略可能なresult-forms、`while(1)`ループでCスタックを消費しない設計）を追加し、`macroexpand-all-special-form-p`へ特殊形式として登録、`lisp/compiler.lisp`の`compile-expr`に`do`のコンパイルを実装した。次に`lisp/stdlib.lisp`へ`(while test . body)`を`(do nil ((not test)) . body)`へ展開する`while`マクロを追加した。`lisp/compiler.lisp`の`append`/`mapcar`を`do`化して非末尾再帰を除去したが、初回実装（アキュムレータへ逆順に積んでから`reverse`を再度通す方式）はconsセル生成数を元の再帰実装の2倍（`|a|×2`個）にしてしまい、`test-compile-expr.lisp`ロード中にヒープを圧迫し「`Lisp panic: expected a cons cell but got something else`」という別のクラッシュ（スタックではなくヒープ枯渇由来）を新たに引き起こした。`rplacd`による head/tail連結方式（生成するconsセル数を元の再帰実装と同じ`|a|`個に戻す）へ書き直して解決した。この調査の過程で、ヒープ枯渇のもう一つの独立した原因を`lisp_load_eval_buffer`（`src/lisp.c`）に発見した——`load`はファイル中の全トップレベルフォームを1回のバッファ評価内で連続して評価するため、`main.c`のREPLループが入力の合間に得ているGC起動の機会を一度も得られず、個々には正当なゴミであっても`test-compile-expr.lisp`の28関数連続ロード中に回収されずヒープを枯渇させていた。評価待ちの残りフォームリストを保持する新規のGCルート変数`lisp_gc_extra_root`（`src/lisp.c`/`src/lisp.h`）を追加し、`lisp_load_eval_buffer`が1フォーム評価するたびに`lisp_heap_low()`を確認して必要なら`lisp_gc()`を起動するよう修正した（評価待ちフォームはCローカル変数にしか存在しないため、その間だけ`lisp_gc_extra_root`へ退避してGCから保護する）。この過程で、`lisp/compiler.lisp`の`compile-let`が`(car (cdr (cdr form)))`で`let`の先頭のbody-formしか取らず、2個目以降のbody-formを一切コンパイルしない（値が捨てられるのではなくバイトコードに存在しない）という既存の重大バグを発見した——`(let (...) (while ...) result)`のような、ループ本体を`let`で包み最後に結果を返すという典型的な命令型パターンが軒並み壊れていた。`compile-let-star`の既存の正しい脱糖方式（bodyを`(cons 'progn body)`で包み`compile-progn-body`へ委譲）へ揃えて修正した。この修正により、`test/lisp/test-macroexpand-1.lisp`の`run-test-macroexpand-1-hook-affects-eval`が真に失敗するようになった（従来は`compile-let`のバグが2個目のbody-form（本来の`eq`検査）を握り消し、1個目の`setq`の戻り値というtruthyな値で常にvacuousにPASSしていたことが判明した）。原因はマクロ呼び出しを`defun`本体に直接書くと、その`defun`自身が`load`時にコンパイルされる瞬間（＝`*macroexpand-hook*`の差し替えより前）に`macroexpand-all`で展開済みになってしまい、実行時のフック差し替えが手遅れになるという、事前展開コンパイル方式とテストの意図との不整合であり、`compile-and-run`（引数のS式を呼び出し時に`macroexpand-all`→compile→実行する）へマクロ呼び出しを`quote`したS式として渡す形へ書き直し、フック差し替え後の展開を真に検証するテストへ修正した。本マイルストーンは、`lisp_vm.md`/`lisp_vm_integration.md`が明記していた非ゴール「末尾呼び出し最適化・スタック深度対策」を、**コンパイラ自身の自己ブートストラップ関数**（`append`/`mapcar`/`macroexpand-all-forms`等、ユーザーコードではなくコンパイラ内部処理）に限定する形で部分的に覆すものである（ユーザーコード一般のスタック深度対策は引き続き対象外のまま）。検証は新設`test/lisp/test-while.lisp`（6項目: 基本的な合計・戻り値が`nil`であること・0回反復・`return-from`での脱出・ネスト・50000回反復でもCスタックを消費しないこと）と、修正した`test/lisp/test-macroexpand-1.lisp`を`make test`で確認し、全20フィクスチャが回帰無くPASSすることを確認した。加えて、本マイルストーンの直接の動機であった`test-compile-expr.lisp`自体を個別に`make test-compile-expr`で実行し、Cスタックオーバーフローが再発しないことをQEMU実行で確認した。 |
 
 ### 既知のリスク: `LISP_LOAD_BUFFER_MAX`の再発パターン
 
@@ -157,4 +165,6 @@
 `make-package`/`export`/`use-package`/`defpackage`/`in-package`/修飾子リーダー/修飾子プリンタを
 一通り経由する統合シナリオへ拡張した上で、既存自己テスト群全件の回帰確認を行う。フェーズF（83〜84）
 ・フェーズG（85〜86）は、フェーズA〜Eの実装中に発見した既存バグの根本修正として独立に完了させる
-ため、これらの完了までを本ロードマップ全体の完了条件とする。
+ため、これらの完了までを本ロードマップ全体の完了条件とする。フェーズH（87）はフェーズA〜Gと無関係な
+内容（コンパイラ自身の自己ブートストラップ関数のCスタック深度対策）だが、ユーザーの判断により本
+ロードマップの完了条件へ同様に含める。

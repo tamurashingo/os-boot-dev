@@ -60,6 +60,11 @@ typedef struct LispClosure {
     LispObject *constants;   // OP_CONSTが参照する定数配列（LispObjectのベクタ、vec_dataと同じ形）
     UINTN constants_len;      // constantsの要素数
     UINTN nargs;              // 呼び出し時に期待される引数の個数（milestone37で使用）
+    UINTN max_locals;        // milestone83/84: このフレームがOP_MAKE_LOCALで使う可能性のある
+                               // ローカルスロットの総数（仮引数nargs個を含む）。呼び出し直後に
+                               // vm_stack[fp..fp+max_locals)を丸ごと確保することで、ローカル
+                               // 変数領域とその後の一時値用データスタック領域を分離する
+                               // （非compiled/非VM用途のclosureでは常に0）
     LispObject upvalue_descs; // milestone38: テンプレート側。捕捉元の記述子ベクタ（各要素は
                                // (kind . index)のcons。kind=0ならOP_MAKE_CLOSURE実行時の
                                // 呼び出し元フレームのローカルboxをFP+index経由で捕捉、
@@ -334,6 +339,7 @@ LispObject lisp_make_closure(LispObject params, LispObject body, LispObject env)
     closure->constants = 0;
     closure->constants_len = 0;
     closure->nargs = 0;
+    closure->max_locals = 0;
     closure->upvalue_descs = LISP_NIL;
     closure->upvalues = LISP_NIL;
     closure->pkg_name = 0;
@@ -365,6 +371,7 @@ LispObject lisp_make_builtin(LispBuiltinFn fn) {
     closure->constants = 0;
     closure->constants_len = 0;
     closure->nargs = 0;
+    closure->max_locals = 0;
     closure->upvalue_descs = LISP_NIL;
     closure->upvalues = LISP_NIL;
     closure->pkg_name = 0;
@@ -398,6 +405,7 @@ LispObject lisp_make_macro(LispObject params, LispObject body, LispObject env) {
     closure->constants = 0;
     closure->constants_len = 0;
     closure->nargs = 0;
+    closure->max_locals = 0;
     closure->upvalue_descs = LISP_NIL;
     closure->upvalues = LISP_NIL;
     closure->pkg_name = 0;
@@ -438,6 +446,7 @@ LispObject lisp_make_string(const char *chars, UINTN len) {
     closure->constants = 0;
     closure->constants_len = 0;
     closure->nargs = 0;
+    closure->max_locals = 0;
     closure->upvalue_descs = LISP_NIL;
     closure->upvalues = LISP_NIL;
     closure->pkg_name = 0;
@@ -472,6 +481,7 @@ LispObject lisp_make_float(double value) {
     closure->constants = 0;
     closure->constants_len = 0;
     closure->nargs = 0;
+    closure->max_locals = 0;
     closure->upvalue_descs = LISP_NIL;
     closure->upvalues = LISP_NIL;
     closure->pkg_name = 0;
@@ -511,6 +521,7 @@ LispObject lisp_make_bignum(const UINT32 *digits, UINTN len, int negative) {
     closure->constants = 0;
     closure->constants_len = 0;
     closure->nargs = 0;
+    closure->max_locals = 0;
     closure->upvalue_descs = LISP_NIL;
     closure->upvalues = LISP_NIL;
     closure->pkg_name = 0;
@@ -551,6 +562,7 @@ LispObject lisp_make_vector(UINTN len, LispObject fill) {
     closure->constants = 0;
     closure->constants_len = 0;
     closure->nargs = 0;
+    closure->max_locals = 0;
     closure->upvalue_descs = LISP_NIL;
     closure->upvalues = LISP_NIL;
     closure->pkg_name = 0;
@@ -563,9 +575,12 @@ LispObject lisp_make_vector(UINTN len, LispObject fill) {
 
 // VMコンパイル済み関数オブジェクトを作る（milestone 34/35）。LISP_TAG_CLOSUREのescape hatchを
 // milestone15/22/26と同様に再利用する。bytecode/constantsはどちらもstr_data/vec_dataと同じく
-// 呼び出し元のバッファをヒープへコピーして持つ（呼び出し元の一時バッファを保持し続ける必要はない）
+// 呼び出し元のバッファをヒープへコピーして持つ（呼び出し元の一時バッファを保持し続ける必要はない）。
+// max_locals（milestone83/84）はnargs以上でなければならない（仮引数がスロット0..nargs-1を占め、
+// let等が続くスロットを積み増していくため）
 LispObject lisp_make_compiled(const unsigned char *bytecode, UINTN bytecode_len,
-                               const LispObject *constants, UINTN constants_len, UINTN nargs) {
+                               const LispObject *constants, UINTN constants_len, UINTN nargs,
+                               UINTN max_locals) {
     LispClosure *closure = (LispClosure *)lisp_alloc_tracked(sizeof(LispClosure), LISP_TAG_CLOSURE);
     closure->params = LISP_NIL;
     closure->body = LISP_NIL;
@@ -594,6 +609,7 @@ LispObject lisp_make_compiled(const unsigned char *bytecode, UINTN bytecode_len,
     closure->constants = const_buf;
     closure->constants_len = constants_len;
     closure->nargs = nargs;
+    closure->max_locals = max_locals;
     closure->upvalue_descs = LISP_NIL;
     closure->upvalues = LISP_NIL;
     closure->pkg_name = 0;
@@ -834,6 +850,7 @@ static LispObject lisp_make_package_object(const char *name, int is_keyword_pack
     closure->constants = 0;
     closure->constants_len = 0;
     closure->nargs = 0;
+    closure->max_locals = 0;
     closure->upvalue_descs = LISP_NIL;
     closure->upvalues = LISP_NIL;
     UINTN len = 0;
@@ -1733,6 +1750,23 @@ void lisp_vm_reset_stack(void) {
     vm_sp = 0;
 }
 
+// milestone83/84: フレーム先頭fpからmax_locals個のスロットを、呼び出し先のbytecodeを実行する
+// 前にまとめて確保する（ローカル変数領域とその後の一時値用データスタック領域の分離）。呼び出し元は
+// 既にvm_stack[fp..fp+nargs)をボックス化済みのはずなので、この関数はfp+nargsからfp+max_localsまでの
+// 残りのスロット（まだletが実行されていないローカル変数用）だけをNILで埋めてvm_spを進める。
+// GCのルート走査（vm_stack[0..vm_sp)）がここを辿るため、OP_MAKE_LOCALで実際に書き込まれるまでの間も
+// 安全な値（NIL）で埋めておく必要がある
+static inline void lisp_vm_reserve_frame(UINTN fp, UINTN max_locals) {
+    UINTN target = fp + max_locals;
+    if (target > VM_STACK_SIZE) {
+        lisp_panic_fatal(L"VM stack overflow");
+    }
+    for (UINTN i = vm_sp; i < target; i++) {
+        vm_stack[i] = LISP_NIL;
+    }
+    vm_sp = target;
+}
+
 // clのbytecodeをフレーム先頭fpで実行する（milestone35/36/37共通の実行ループ本体）。
 // fp==vm_sp（呼び出し時点のスタック最上位）で呼ばれれば引数無しの実行（lisp_vm_execからの
 // 直接呼び出し）、fp<vm_spで呼ばれればOP_CALLが既に呼び出し元のフレームからnargs個の生の
@@ -1786,8 +1820,17 @@ static LispObject lisp_vm_run(LispClosure *cl, UINTN fp) {
                 break;
             }
             case OP_MAKE_LOCAL: {
+                // milestone83/84: 次の2byteをFP相対indexとして解釈し、popした値をボックス化して
+                // 呼び出し時に確保済みの固定スロットvm_stack[fp+idx]へ直接書き込む（スタックに
+                // 積み直さない）。これによりOP_MAKE_LOCALの実行は正味でスタックを1つ縮める
+                // （値をpopするだけで、対応するpushが無い）ため、letが非tail位置の兄弟式として
+                // 使われても、ループの本体として繰り返し実行されても、ローカル変数領域の外側
+                // （一時値用データスタック領域）を汚したり、実行を繰り返すごとにスタックが
+                // 積み重なったりすることがない
+                unsigned int idx = pc[0] | (pc[1] << 8);
+                pc += 2;
                 LispObject value = lisp_vm_pop();
-                lisp_vm_push(lisp_cons(value, LISP_NIL));
+                vm_stack[fp + idx] = lisp_cons(value, LISP_NIL);
                 break;
             }
             case OP_POP: {
@@ -1810,6 +1853,7 @@ static LispObject lisp_vm_run(LispClosure *cl, UINTN fp) {
                     for (UINTN i = 0; i < nargs; i++) {
                         vm_stack[new_fp + i] = lisp_cons(vm_stack[new_fp + i], LISP_NIL);
                     }
+                    lisp_vm_reserve_frame(new_fp, callee->max_locals);
                     LispObject result = lisp_vm_run(callee, new_fp);
                     vm_sp = new_fp;
                     // milestone 55: ネストしたlisp_vm_run呼び出しの中でreturn-fromが発生し
@@ -1863,6 +1907,9 @@ static LispObject lisp_vm_run(LispClosure *cl, UINTN fp) {
                         upvalues_cell->vec_data[i] = vm_stack[fp + index];
                     } else {
                         LispClosure *own_upvalues_cell = lisp_closure_cell(cl->upvalues);
+                        if ((UINTN)index >= own_upvalues_cell->vec_len) {
+                            lisp_panic_fatal(L"VM OOB: OP_MAKE_CLOSURE kind1");
+                        }
                         upvalues_cell->vec_data[i] = own_upvalues_cell->vec_data[index];
                     }
                 }
@@ -1886,6 +1933,7 @@ static LispObject lisp_vm_run(LispClosure *cl, UINTN fp) {
                 instance->constants = template_cl->constants;
                 instance->constants_len = template_cl->constants_len;
                 instance->nargs = template_cl->nargs;
+                instance->max_locals = template_cl->max_locals;
                 instance->upvalue_descs = template_cl->upvalue_descs;
                 instance->upvalues = upvalues;
                 instance->pkg_name = 0;
@@ -1970,6 +2018,7 @@ static LispObject lisp_vm_run(LispClosure *cl, UINTN fp) {
                 LispObject closure_obj = lisp_vm_pop();
                 LispClosure *body_cl = lisp_closure_cell(closure_obj);
                 UINTN new_fp = vm_sp;
+                lisp_vm_reserve_frame(new_fp, body_cl->max_locals);
                 LispObject result = lisp_vm_run(body_cl, new_fp);
                 vm_sp = new_fp;
                 if (lisp_return_tag != LISP_NIL) {
@@ -1997,8 +2046,10 @@ LispObject lisp_vm_exec(LispObject fn) {
     if (!lisp_is_compiled(fn)) {
         lisp_panic(L"attempt to execute a non-compiled function on the VM");
     }
+    LispClosure *cl = lisp_closure_cell(fn);
     UINTN base_sp = vm_sp;
-    LispObject result = lisp_vm_run(lisp_closure_cell(fn), base_sp);
+    lisp_vm_reserve_frame(base_sp, cl->max_locals);
+    LispObject result = lisp_vm_run(cl, base_sp);
     vm_sp = base_sp;
     return result;
 }
@@ -2301,6 +2352,7 @@ LispObject lisp_apply(LispObject fn, LispObject args) {
         for (UINTN i = 0; i < nargs; i++) {
             vm_stack[fp + i] = lisp_cons(vm_stack[fp + i], LISP_NIL);
         }
+        lisp_vm_reserve_frame(fp, closure->max_locals);
         LispObject result = lisp_vm_run(closure, fp);
         vm_sp = fp;
         return result;
@@ -3637,16 +3689,24 @@ static void lisp_panic_vm_bridge_limit_exceeded(CHAR16 *what, UINTN limit) {
     lisp_panic(msg);
 }
 
-// (vm-make-closure nargs bytecode-list constants-list upvalue-descs-list) -> 実行可能な
+// (vm-make-closure nargs max-locals bytecode-list constants-list upvalue-descs-list) -> 実行可能な
 // コンパイル済み関数オブジェクト。upvalue-descs-listの各要素は(kind . index)のcons
+// max-locals（milestone83/84）はnargs以上でなければならない（仮引数がスロット0..nargs-1を占め、
+// let等が続くスロットを積み増していくため）
 LispObject lisp_builtin_vm_make_closure(LispObject args) {
     LispObject nargs_obj = lisp_car(args);
-    LispObject bytecode_list = lisp_car(lisp_cdr(args));
-    LispObject constants_list = lisp_car(lisp_cdr(lisp_cdr(args)));
-    LispObject upvalue_descs_list = lisp_car(lisp_cdr(lisp_cdr(lisp_cdr(args))));
+    LispObject max_locals_obj = lisp_car(lisp_cdr(args));
+    LispObject bytecode_list = lisp_car(lisp_cdr(lisp_cdr(args)));
+    LispObject constants_list = lisp_car(lisp_cdr(lisp_cdr(lisp_cdr(args))));
+    LispObject upvalue_descs_list = lisp_car(lisp_cdr(lisp_cdr(lisp_cdr(lisp_cdr(args)))));
 
     lisp_assert_fixnum(nargs_obj);
     UINTN nargs = (UINTN)lisp_fixnum_value(nargs_obj);
+    lisp_assert_fixnum(max_locals_obj);
+    UINTN max_locals = (UINTN)lisp_fixnum_value(max_locals_obj);
+    if (max_locals < nargs) {
+        lisp_panic(L"vm-make-closure: max-locals must be >= nargs");
+    }
 
     unsigned char bytecode[VM_BRIDGE_MAX_BYTECODE];
     UINTN bytecode_len = 0;
@@ -3681,7 +3741,7 @@ LispObject lisp_builtin_vm_make_closure(LispObject args) {
         cur = lisp_cdr(cur);
     }
 
-    LispObject fn = lisp_make_compiled(bytecode, bytecode_len, constants, constants_len, nargs);
+    LispObject fn = lisp_make_compiled(bytecode, bytecode_len, constants, constants_len, nargs, max_locals);
 
     UINTN kinds[VM_BRIDGE_MAX_UPVALUES];
     UINTN indices[VM_BRIDGE_MAX_UPVALUES];

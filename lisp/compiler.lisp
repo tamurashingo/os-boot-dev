@@ -480,11 +480,13 @@
       (compile-concat (compile-let-restore-one (car restores) ctx)
                       (compile-let-restore-code (cdr restores) ctx))))
 
-; push-irが値を1つpushするコードである前提で、直後にOP_MAKE_LOCALを連結し新しい
-; slotを割り当てる。(cons ir-with-make-local slot)を返す
+; push-irが値を1つpushするコードである前提で、直後にOP_MAKE_LOCAL slotを連結し新しい
+; slotを割り当てる。milestone83/84でOP_MAKE_LOCALはFP相対indexオペランドを取り、
+; 呼び出し時に確保済みの固定スロットへ直接書き込むようになった(スタックへpushし直さない)。
+; (cons ir-with-make-local slot)を返す
 (defun compile-let-push-and-box (push-ir scope)
   (let ((slot (compile-alloc-slot (scope-next-slot-box scope))))
-    (cons (compile-concat push-ir (list (list *op-make-local*))) slot)))
+    (cons (compile-concat push-ir (list (list *op-make-local* slot))) slot)))
 
 ; bindingsを先頭から順に処理し、(ir locals-additions commits restores)の
 ; 4要素リストを返す。ir中のOP_MAKE_LOCALは全てpush直後に隣接しており、
@@ -642,12 +644,17 @@
                                               scope)))
         (let ((body-code (assemble (compile-concat (compile-expr body inner-ctx inner-scope)
                                                     (list (list *op-return*))))))
-          (let ((package (list 'closure-template
-                                (compile-env-length params)
-                                body-code
-                                (compile-ctx-constants inner-ctx)
-                                (compile-ctx-constants (captures-desc-ctx (scope-captures inner-scope))))))
-            (list (list *op-make-closure* (compile-register-const ctx package)))))))))
+          ; milestone83/84: scope-next-slot-boxはparams分のindexから始まり、letが束縛
+          ; されるたびに単調増加するだけ(再利用・減少しない)なので、本体コンパイル完了後の
+          ; 最終値がそのままこの関数フレームが必要とするローカルスロット総数(max-locals)になる
+          (let ((max-locals (car (scope-next-slot-box inner-scope))))
+            (let ((package (list 'closure-template
+                                  (compile-env-length params)
+                                  max-locals
+                                  body-code
+                                  (compile-ctx-constants inner-ctx)
+                                  (compile-ctx-constants (captures-desc-ctx (scope-captures inner-scope))))))
+              (list (list *op-make-closure* (compile-register-const ctx package))))))))))
 
 ; --- compile-expr: 関数呼び出し・プリミティブ呼び出し (milestone 45, documents/lisp_vm.md 目標2) ---
 ; OP_CALL <nargs>(src/lisp.c)の呼び出し規約は「先にnargs個の生の引数値をスタックに積み、
@@ -990,14 +997,15 @@
       (vm-materialize-template c)
       c))
 
-; (closure-template nargs bytecode constants upvalue-descs)の構造から、constantsを
-; 先に(再帰的に)実体化してからvm-make-closureへ渡し、実際のLispClosureを1つ作る
+; (closure-template nargs max-locals bytecode constants upvalue-descs)の構造から、
+; constantsを先に(再帰的に)実体化してからvm-make-closureへ渡し、実際のLispClosureを1つ作る
 (defun vm-materialize-template (template)
   (let ((nargs (car (cdr template)))
-        (bytecode (car (cdr (cdr template))))
-        (constants (car (cdr (cdr (cdr template)))))
-        (upvalue-descs (car (cdr (cdr (cdr (cdr template)))))))
-    (vm-make-closure nargs bytecode (vm-materialize-constants constants) upvalue-descs)))
+        (max-locals (car (cdr (cdr template))))
+        (bytecode (car (cdr (cdr (cdr template)))))
+        (constants (car (cdr (cdr (cdr (cdr template))))))
+        (upvalue-descs (car (cdr (cdr (cdr (cdr (cdr template))))))))
+    (vm-make-closure nargs max-locals bytecode (vm-materialize-constants constants) upvalue-descs)))
 
 ; exprをcompile-expr+assembleでトップレベル(nargs=0、upvalue無し)のbytecode/constants
 ; へコンパイルし、定数プールを実体化してvm-make-closureで実際のLispClosureを組み立て、
@@ -1008,10 +1016,12 @@
 ; compile-exprはマクロを一切知らないため、渡す前にmacroexpand-allでマクロを全て
 ; 展開しておく必要がある(milestone 50: これが抜けていた配線漏れの修正)
 (defun compile-and-run (expr)
-  (let ((ctx (compile-make-ctx)))
-    (let ((bytecode (assemble (compile-concat (compile-expr (macroexpand-all expr) ctx (compile-make-top-scope))
+  (let ((ctx (compile-make-ctx))
+        (scope (compile-make-top-scope)))
+    (let ((bytecode (assemble (compile-concat (compile-expr (macroexpand-all expr) ctx scope)
                                                (list (list *op-return*))))))
-      (vm-exec (vm-make-closure 0 bytecode (vm-materialize-constants (compile-ctx-constants ctx)) nil)))))
+      (vm-exec (vm-make-closure 0 (car (scope-next-slot-box scope)) bytecode
+                                 (vm-materialize-constants (compile-ctx-constants ctx)) nil)))))
 
 ; milestone 58: 統一トップレベル評価ドライバの導入。stdlib.lisp/compiler.lispは
 ; （milestone63でファイルを分割した後も）compile-expr（このファイル内で上で定義済み）

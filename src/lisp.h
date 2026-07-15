@@ -169,7 +169,11 @@ int lisp_global_ref_package_identity_selftest(void);
 #define OP_LOAD_LOCAL     5   // 次の2byteをFP相対indexとして解釈し、car(vm_stack[FP+index])をpushする
 #define OP_STORE_LOCAL    6   // スタック最上位をpopし、次の2byteのFP相対indexが指すボックスへ
                                // rplaca相当で書き込む（vm_stack上のスロット自体は書き換えない）
-#define OP_MAKE_LOCAL     7   // スタック最上位をpopし、その場でcons(値, NIL)としてボックス化しpushし直す
+#define OP_MAKE_LOCAL     7   // milestone83/84: 次の2byteをFP相対indexとして解釈する。スタック最上位を
+                               // popし、その場でcons(値, NIL)としてボックス化して、呼び出し時に確保済みの
+                               // 固定スロットvm_stack[FP+index]へ直接書き込む（pushし直さない。呼び出し
+                               // 元がvm_stack[FP..FP+max_locals)を丸ごと確保しておく前提のため、ローカル
+                               // 変数領域とその後の一時値用データスタック領域が分離される）
 
 // --- VM関数呼び出しオペコード (milestone 37) ---
 // 呼び出し規約: 呼び出し元はargを1個目から順にpushし、最後に呼び出す関数（コンパイル済み
@@ -248,9 +252,13 @@ int lisp_global_ref_package_identity_selftest(void);
 // bytecode(bytecode_len byte)とconstants(constants_len個のLispObject)を保持するVM
 // コンパイル済み関数オブジェクトを作る（LispClosureのescape hatch方式、milestone15/22/26と
 // 同じ前例）。どちらも呼び出し元のバッファをヒープへコピーするので、呼び出し後は
-// 呼び出し元のバッファを保持し続ける必要はない。nargsは今のところ記録のみ（milestone37で使用）
+// 呼び出し元のバッファを保持し続ける必要はない。nargsは今のところ記録のみ（milestone37で使用）。
+// max_locals（milestone83/84）はnargs以上でなければならない（仮引数がスロット0..nargs-1を占め、
+// let等が続くスロットを積み増していくため）。呼び出し元はlisp_vm_run前にvm_stack[fp..fp+max_locals)
+// を丸ごと確保する（lisp_vm_reserve_frame参照）
 LispObject lisp_make_compiled(const unsigned char *bytecode, UINTN bytecode_len,
-                               const LispObject *constants, UINTN constants_len, UINTN nargs);
+                               const LispObject *constants, UINTN constants_len, UINTN nargs,
+                               UINTN max_locals);
 
 // fn（lisp_make_compiledで作ったコンパイル済み関数）のbytecodeをvm_stack上で実行し、
 // OP_RETURNで返された値を返す
