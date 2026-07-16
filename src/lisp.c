@@ -78,6 +78,8 @@ typedef struct LispClosure {
     LispObject pkg_exports; // exportされたシンボルのconsリスト（milestone76まで常にNIL）
     LispObject pkg_uses;    // use-packageしている他パッケージのconsリスト（milestone77まで常にNIL）
     int pkg_is_keyword;     // 真なら自己評価し印字時に":"を前置する特別なパッケージ
+    LispObject pkg_nicknames; // milestone91: 別名文字列のconsリスト
+    LispObject pkg_shadowing_symbols; // milestone92: shadow/shadowing-importで登録されたローカルシンボルのconsリスト（eq基準）
 } LispClosure;
 
 static inline LispObject lisp_make_fixnum(long long value) {
@@ -347,6 +349,8 @@ LispObject lisp_make_closure(LispObject params, LispObject body, LispObject env)
     closure->pkg_exports = LISP_NIL;
     closure->pkg_uses = LISP_NIL;
     closure->pkg_is_keyword = 0;
+    closure->pkg_nicknames = LISP_NIL;
+    closure->pkg_shadowing_symbols = LISP_NIL;
     return ((LispObject)closure) | LISP_TAG_CLOSURE;
 }
 
@@ -379,6 +383,8 @@ LispObject lisp_make_builtin(LispBuiltinFn fn) {
     closure->pkg_exports = LISP_NIL;
     closure->pkg_uses = LISP_NIL;
     closure->pkg_is_keyword = 0;
+    closure->pkg_nicknames = LISP_NIL;
+    closure->pkg_shadowing_symbols = LISP_NIL;
     return ((LispObject)closure) | LISP_TAG_CLOSURE;
 }
 
@@ -413,6 +419,8 @@ LispObject lisp_make_macro(LispObject params, LispObject body, LispObject env) {
     closure->pkg_exports = LISP_NIL;
     closure->pkg_uses = LISP_NIL;
     closure->pkg_is_keyword = 0;
+    closure->pkg_nicknames = LISP_NIL;
+    closure->pkg_shadowing_symbols = LISP_NIL;
     return ((LispObject)closure) | LISP_TAG_CLOSURE;
 }
 
@@ -454,6 +462,8 @@ LispObject lisp_make_string(const char *chars, UINTN len) {
     closure->pkg_exports = LISP_NIL;
     closure->pkg_uses = LISP_NIL;
     closure->pkg_is_keyword = 0;
+    closure->pkg_nicknames = LISP_NIL;
+    closure->pkg_shadowing_symbols = LISP_NIL;
     return ((LispObject)closure) | LISP_TAG_CLOSURE;
 }
 
@@ -489,6 +499,8 @@ LispObject lisp_make_float(double value) {
     closure->pkg_exports = LISP_NIL;
     closure->pkg_uses = LISP_NIL;
     closure->pkg_is_keyword = 0;
+    closure->pkg_nicknames = LISP_NIL;
+    closure->pkg_shadowing_symbols = LISP_NIL;
     return ((LispObject)closure) | LISP_TAG_CLOSURE;
 }
 
@@ -529,6 +541,8 @@ LispObject lisp_make_bignum(const UINT32 *digits, UINTN len, int negative) {
     closure->pkg_exports = LISP_NIL;
     closure->pkg_uses = LISP_NIL;
     closure->pkg_is_keyword = 0;
+    closure->pkg_nicknames = LISP_NIL;
+    closure->pkg_shadowing_symbols = LISP_NIL;
     return ((LispObject)closure) | LISP_TAG_CLOSURE;
 }
 
@@ -570,6 +584,8 @@ LispObject lisp_make_vector(UINTN len, LispObject fill) {
     closure->pkg_exports = LISP_NIL;
     closure->pkg_uses = LISP_NIL;
     closure->pkg_is_keyword = 0;
+    closure->pkg_nicknames = LISP_NIL;
+    closure->pkg_shadowing_symbols = LISP_NIL;
     return ((LispObject)closure) | LISP_TAG_CLOSURE;
 }
 
@@ -617,6 +633,8 @@ LispObject lisp_make_compiled(const unsigned char *bytecode, UINTN bytecode_len,
     closure->pkg_exports = LISP_NIL;
     closure->pkg_uses = LISP_NIL;
     closure->pkg_is_keyword = 0;
+    closure->pkg_nicknames = LISP_NIL;
+    closure->pkg_shadowing_symbols = LISP_NIL;
     return ((LispObject)closure) | LISP_TAG_CLOSURE;
 }
 
@@ -823,6 +841,37 @@ static int lisp_streq(const char *a, const char *b) {
     return *a == *b;
 }
 
+static UINTN lisp_cstrlen(const char *s) {
+    UINTN len = 0;
+    while (s[len] != '\0') {
+        len++;
+    }
+    return len;
+}
+
+// milestone91: string designator(CL用語)の下地。stringはstr_data、symbol(keywordを含む)は
+// そのname文字列をそのまま「文字列指定子」として扱う（この処理系にはchar型が無いためCLの
+// character designatorは対象外）
+static const char *lisp_string_designator_name(LispObject obj) {
+    if (lisp_is_string(obj)) {
+        return lisp_closure_cell(obj)->str_data;
+    }
+    if (lisp_is_symbol(obj)) {
+        return lisp_symbol_cell(obj)->name;
+    }
+    lisp_panic(L"expected a string or symbol designator");
+    return 0;
+}
+
+// milestone91: package designator(package本体/文字列/symbol・keyword)を名前の文字列へ
+// 正規化する。lisp_find_package等の既存のconst char*ベースAPIをそのまま使うための下地
+static const char *lisp_package_designator_name(LispObject obj) {
+    if (lisp_is_package(obj)) {
+        return lisp_closure_cell(obj)->pkg_name;
+    }
+    return lisp_string_designator_name(obj);
+}
+
 // milestone 68: パッケージ自体をLISP_TAG_CLOSUREのescape hatchを共有する第一級のGC管理
 // オブジェクトにする（文字列/float/bignum/vector/コンパイル済み関数と同じパターン）。
 // symbols/exports/usesは固定長配列ではなく最初からconsリストとして持つ（milestone71として
@@ -867,6 +916,8 @@ static LispObject lisp_make_package_object(const char *name, int is_keyword_pack
     closure->pkg_exports = LISP_NIL;
     closure->pkg_uses = LISP_NIL;
     closure->pkg_is_keyword = is_keyword_package;
+    closure->pkg_nicknames = LISP_NIL;
+    closure->pkg_shadowing_symbols = LISP_NIL;
     return ((LispObject)closure) | LISP_TAG_CLOSURE;
 }
 
@@ -886,8 +937,15 @@ static LispObject lisp_sym_package;
 static LispObject lisp_find_package(const char *name) {
     for (LispObject cur = global_packages; cur != LISP_NIL; cur = lisp_cdr(cur)) {
         LispObject pkg = lisp_car(cur);
-        if (lisp_streq(lisp_closure_cell(pkg)->pkg_name, name)) {
+        LispClosure *pkg_cell = lisp_closure_cell(pkg);
+        if (lisp_streq(pkg_cell->pkg_name, name)) {
             return pkg;
+        }
+        // milestone91: package-nicknamesもname同様に照合対象にする
+        for (LispObject n = pkg_cell->pkg_nicknames; n != LISP_NIL; n = lisp_cdr(n)) {
+            if (lisp_streq(lisp_closure_cell(lisp_car(n))->str_data, name)) {
+                return pkg;
+            }
         }
     }
     return LISP_NIL;
@@ -910,22 +968,70 @@ static LispObject lisp_make_package(const char *name, int is_keyword_package) {
 // 切り詰めてから扱うことで、name自体を切り詰めずにlisp_streqへ渡すと「格納済みの切り詰め済み名」
 // と「今回渡された切り詰め前のnama」が食い違って毎回別シンボルを生成してしまう
 // （呼ぶたびにeqが成立せずunbound variableになる）バグを避ける
-LispObject lisp_intern_in_package(LispObject pkg, const char *name) {
-    char truncated[LISP_SYMBOL_NAME_MAX];
-    UINTN len = 0;
-    while (name[len] != '\0' && len < LISP_SYMBOL_NAME_MAX - 1) {
-        truncated[len] = name[len];
-        len++;
-    }
-    truncated[len] = '\0';
-
-    LispClosure *pkg_cell = lisp_closure_cell(pkg);
+// milestone92: lisp_intern_in_packageのphase a（自パッケージのローカル探索）を切り出した
+// もの。shadow等、use先を経由せずローカルのみを見たい呼び出し元向け
+static LispObject lisp_find_local_symbol(LispClosure *pkg_cell, const char *truncated_name) {
     for (LispObject cur = pkg_cell->pkg_symbols; cur != LISP_NIL; cur = lisp_cdr(cur)) {
         LispObject existing = lisp_car(cur);
         LispSymbol *sym = lisp_symbol_cell(existing);
-        if (lisp_streq(sym->name, truncated)) {
+        if (lisp_streq(sym->name, truncated_name)) {
             return existing;
         }
+    }
+    return LISP_NIL;
+}
+
+// milestone92: lisp_intern_in_packageのphase c（新規シンボル作成）を切り出したもの。
+// 既存の有無を確認せず常にpkgへ新規シンボルを作成・登録する（既存チェックは呼び出し元の責任）
+static LispObject lisp_create_local_symbol(LispObject pkg, const char *truncated_name) {
+    LispClosure *pkg_cell = lisp_closure_cell(pkg);
+    LispSymbol *sym = (LispSymbol *)lisp_alloc_tracked(sizeof(LispSymbol), LISP_TAG_SYMBOL);
+    UINTN i = 0;
+    while (truncated_name[i] != '\0') {
+        sym->name[i] = truncated_name[i];
+        i++;
+    }
+    sym->name[i] = '\0';
+    sym->is_special = 0;
+    sym->value = LISP_NIL;
+    sym->package = pkg;
+
+    LispObject obj = ((LispObject)sym) | LISP_TAG_SYMBOL;
+    pkg_cell->pkg_symbols = lisp_cons(obj, pkg_cell->pkg_symbols);
+    return obj;
+}
+
+// nameをLISP_SYMBOL_NAME_MAX-1文字に切り詰めたバッファへ書き込む（比較・格納の両方で
+// 先に切り詰めてから扱うことで、格納済みの切り詰め済み名と切り詰め前の名前が食い違って
+// 毎回別シンボルを生成してしまうバグを避ける、milestone71由来の既存の制約）
+static void lisp_truncate_symbol_name(const char *name, char *out) {
+    UINTN len = 0;
+    while (name[len] != '\0' && len < LISP_SYMBOL_NAME_MAX - 1) {
+        out[len] = name[len];
+        len++;
+    }
+    out[len] = '\0';
+}
+
+// milestone92: pkg_shadowing_symbolsにeqで含まれるかを見るだけの薄いヘルパー。
+// use-packageの衝突チェック緩和・shadow/shadowing-importの重複追加防止の両方から使う
+static int lisp_symbol_is_shadowing(LispClosure *pkg_cell, LispObject sym) {
+    for (LispObject s = pkg_cell->pkg_shadowing_symbols; s != LISP_NIL; s = lisp_cdr(s)) {
+        if (lisp_car(s) == sym) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+LispObject lisp_intern_in_package(LispObject pkg, const char *name) {
+    char truncated[LISP_SYMBOL_NAME_MAX];
+    lisp_truncate_symbol_name(name, truncated);
+
+    LispClosure *pkg_cell = lisp_closure_cell(pkg);
+    LispObject local = lisp_find_local_symbol(pkg_cell, truncated);
+    if (local != LISP_NIL) {
+        return local;
     }
 
     // milestone77: 自パッケージのローカルシンボルに無ければ、useしている各パッケージの
@@ -941,20 +1047,7 @@ LispObject lisp_intern_in_package(LispObject pkg, const char *name) {
         }
     }
 
-    LispSymbol *sym = (LispSymbol *)lisp_alloc_tracked(sizeof(LispSymbol), LISP_TAG_SYMBOL);
-    UINTN i = 0;
-    while (truncated[i] != '\0') {
-        sym->name[i] = truncated[i];
-        i++;
-    }
-    sym->name[i] = '\0';
-    sym->is_special = 0;
-    sym->value = LISP_NIL;
-    sym->package = pkg;
-
-    LispObject obj = ((LispObject)sym) | LISP_TAG_SYMBOL;
-    pkg_cell->pkg_symbols = lisp_cons(obj, pkg_cell->pkg_symbols);
-    return obj;
+    return lisp_create_local_symbol(pkg, truncated);
 }
 
 void lisp_packages_init(void) {
@@ -1295,7 +1388,12 @@ static int lisp_symbol_is_exported(LispObject sym_obj) {
 // lisp_intern_in_package（milestone77）の探索順序「自パッケージのローカルシンボル→
 // useしている各パッケージのexportシンボル」と対称な判定にする（printerがreaderの
 // 逆変換になるようにするため）。uninterned(gensym)symbolはそもそもどのパッケージにも
-// 属さないため、この判定を経由せず呼び出し側で無条件に無修飾表示する
+// 属さないため、この判定を経由せず呼び出し側で無条件に無修飾表示する。
+// milestone92: importで他パッケージ所属のシンボルをcur_pkgのpkg_symbolsへ追加しても、
+// sym->package（home package）はimport元のままなので上のsym->package==cur_pkg比較・
+// use先export探索だけでは可視と判定できない。cur_pkgのpkg_symbolsにeqで含まれるかの
+// フォールバックを追加し、importしたシンボルも無修飾で印字されるようにする（既存の
+// home-package一致による高速パスは変更しないため、import未使用時の動作に回帰は無い）
 static int lisp_symbol_visible_in_current_package(LispObject sym_obj) {
     LispObject cur_pkg = lisp_symbol_cell(lisp_sym_package)->value;
     LispSymbol *sym = lisp_symbol_cell(sym_obj);
@@ -1305,6 +1403,11 @@ static int lisp_symbol_visible_in_current_package(LispObject sym_obj) {
     LispClosure *cur_cell = lisp_closure_cell(cur_pkg);
     for (LispObject u = cur_cell->pkg_uses; u != LISP_NIL; u = lisp_cdr(u)) {
         if (lisp_symbol_exported_from(sym_obj, lisp_closure_cell(lisp_car(u)))) {
+            return 1;
+        }
+    }
+    for (LispObject s = cur_cell->pkg_symbols; s != LISP_NIL; s = lisp_cdr(s)) {
+        if (lisp_car(s) == sym_obj) {
             return 1;
         }
     }
@@ -1965,6 +2068,8 @@ static LispObject lisp_vm_run(LispClosure *cl, UINTN fp) {
                 instance->pkg_exports = LISP_NIL;
                 instance->pkg_uses = LISP_NIL;
                 instance->pkg_is_keyword = 0;
+                instance->pkg_nicknames = LISP_NIL;
+                instance->pkg_shadowing_symbols = LISP_NIL;
                 lisp_vm_push(((LispObject)instance) | LISP_TAG_CLOSURE);
                 break;
             }
@@ -2142,6 +2247,8 @@ static void lisp_gc_mark(LispObject obj) {
             lisp_gc_mark(cl->pkg_symbols);
             lisp_gc_mark(cl->pkg_exports);
             lisp_gc_mark(cl->pkg_uses);
+            lisp_gc_mark(cl->pkg_nicknames);
+            lisp_gc_mark(cl->pkg_shadowing_symbols);
         }
         obj = cl->env;
     }
@@ -3324,30 +3431,68 @@ LispObject lisp_builtin_keywordp(LispObject args) {
     return lisp_symbol_package_is_keyword(cell) ? lisp_sym_t : LISP_NIL;
 }
 
-// (make-package name): 名前がまだ存在しなければ新規のパッケージオブジェクトを作って
-// global_packagesへ登録し、既に存在すれば既存オブジェクトをそのまま返す（milestone69の
-// lisp_make_packageの冪等性そのまま）。milestone75でLispから初めて呼び出せるようになった
+// (make-package name &optional nicknames): 名前がまだ存在しなければ新規のパッケージ
+// オブジェクトを作ってglobal_packagesへ登録し、既に存在すれば既存オブジェクトをそのまま
+// 返す（milestone69のlisp_make_packageの冪等性そのまま）。milestone75でLispから初めて
+// 呼び出せるようになった。milestone91でnameがpackage designator（文字列/symbol・keyword）
+// を受け付けるよう拡張し、第2引数nicknames（designatorのリスト）を追加した
 LispObject lisp_builtin_make_package(LispObject args) {
     LispObject name_obj = lisp_car(args);
-    lisp_assert_string(name_obj);
-    return lisp_make_package(lisp_closure_cell(name_obj)->str_data, 0);
+    LispObject pkg = lisp_make_package(lisp_string_designator_name(name_obj), 0);
+    LispObject rest = lisp_cdr(args);
+    if (lisp_is_cons(rest)) {
+        LispClosure *pkg_cell = lisp_closure_cell(pkg);
+        for (LispObject cur = lisp_car(rest); cur != LISP_NIL; cur = lisp_cdr(cur)) {
+            const char *nickname = lisp_string_designator_name(lisp_car(cur));
+            int already = 0;
+            for (LispObject n = pkg_cell->pkg_nicknames; n != LISP_NIL; n = lisp_cdr(n)) {
+                if (lisp_streq(lisp_closure_cell(lisp_car(n))->str_data, nickname)) {
+                    already = 1;
+                    break;
+                }
+            }
+            if (!already) {
+                pkg_cell->pkg_nicknames = lisp_cons(lisp_make_string(nickname, lisp_cstrlen(nickname)),
+                                                     pkg_cell->pkg_nicknames);
+            }
+        }
+    }
+    return pkg;
 }
 
-// (find-package name): 名前に一致するパッケージオブジェクトを返す。見つからなければnilを返す
+// (find-package name): nameはpackage designator（文字列/symbol・keyword、milestone91で拡張）。
+// 一致するパッケージオブジェクトを返す。見つからなければnilを返す
 LispObject lisp_builtin_find_package(LispObject args) {
     LispObject name_obj = lisp_car(args);
-    lisp_assert_string(name_obj);
-    return lisp_find_package(lisp_closure_cell(name_obj)->str_data);
+    return lisp_find_package(lisp_string_designator_name(name_obj));
+}
+
+// milestone 77: パッケージオブジェクトそのもの、またはパッケージ名の文字列/symbol・keyword
+// （milestone91でsymbol/keywordへ拡張）のいずれもパッケージ指定として受け取れるようにする。
+// 存在しない名前を渡した場合はpanicする
+static LispObject lisp_resolve_package_designator(LispObject obj) {
+    if (lisp_is_package(obj)) {
+        return obj;
+    }
+    LispObject pkg = lisp_find_package(lisp_package_designator_name(obj));
+    if (pkg == LISP_NIL) {
+        lisp_panic(L"unknown package name");
+    }
+    return pkg;
 }
 
 // (export symbols &optional package): symbolsは単一のsymbolまたはsymbolのリスト。
 // packageを省略すると*package*（現在のパッケージ）を対象にする。対象パッケージの
 // pkg_exportsコンスリストへeq（==によるポインタ比較）基準で重複なく追加する（milestone76）。
-// #74のリーダーの単一コロン修飾子（pkg:sym）はこのリストをそのまま参照する
+// #74のリーダーの単一コロン修飾子（pkg:sym）はこのリストをそのまま参照する。
+// milestone91でpackage引数にdesignator解決を通すようにした（従来は素通しで、パッケージ名の
+// 文字列/symbolを渡すと`lisp_closure_cell`がパッケージでないオブジェクトを誤ってパッケージ
+// として扱ってしまう抜けがあった）
 LispObject lisp_builtin_export(LispObject args) {
     LispObject symbols_arg = lisp_car(args);
     LispObject rest = lisp_cdr(args);
-    LispObject pkg = lisp_is_cons(rest) ? lisp_car(rest) : lisp_symbol_cell(lisp_sym_package)->value;
+    LispObject pkg = lisp_is_cons(rest) ? lisp_resolve_package_designator(lisp_car(rest))
+                                         : lisp_symbol_cell(lisp_sym_package)->value;
     LispClosure *pkg_cell = lisp_closure_cell(pkg);
 
     LispObject symbols_list = lisp_is_symbol(symbols_arg) ? lisp_cons(symbols_arg, LISP_NIL) : symbols_arg;
@@ -3368,30 +3513,13 @@ LispObject lisp_builtin_export(LispObject args) {
     return lisp_sym_t;
 }
 
-// milestone 77: パッケージオブジェクトそのもの、またはパッケージ名の文字列のいずれも
-// パッケージ指定として受け取れるようにする（use-packageの各引数用）。文字列で存在しない
-// 名前を渡した場合はpanicする
-static LispObject lisp_resolve_package_designator(LispObject obj) {
-    if (lisp_is_package(obj)) {
-        return obj;
-    }
-    if (lisp_is_string(obj)) {
-        LispObject pkg = lisp_find_package(lisp_closure_cell(obj)->str_data);
-        if (pkg == LISP_NIL) {
-            lisp_panic(L"use-package: unknown package name");
-        }
-        return pkg;
-    }
-    lisp_panic(L"use-package: expected a package or package name");
-    return LISP_NIL;
-}
-
 // (use-package packages-to-use &optional package): packages-to-useは単一のパッケージ
-// （またはパッケージ名の文字列）、またはそれらのリスト。packageを省略すると*package*
-// （現在のパッケージ）を対象にする。それぞれのpkg_usesコンスリストへeqで重複なく追加する。
-// 名前衝突（追加しようとしているパッケージのexportシンボルが、対象パッケージの既存ローカル
-// シンボル、または既にuse済みの別パッケージのexportシンボルと同名だが別オブジェクトである
-// 場合）は最小限のガードとしてエラーにする（shadowingは対象外、milestone77）
+// （またはパッケージ名の文字列/symbol・keyword、milestone91で拡張）、またはそれらのリスト。
+// packageを省略すると*package*（現在のパッケージ）を対象にする。それぞれのpkg_usesコンス
+// リストへeqで重複なく追加する。名前衝突（追加しようとしているパッケージのexportシンボルが、
+// 対象パッケージの既存ローカルシンボル、または既にuse済みの別パッケージのexportシンボルと
+// 同名だが別オブジェクトである場合）は最小限のガードとしてエラーにする（milestone77。
+// shadowingで解決済みの場合の例外はmilestone92で追加）
 LispObject lisp_builtin_use_package(LispObject args) {
     LispObject used_arg = lisp_car(args);
     LispObject rest = lisp_cdr(args);
@@ -3399,7 +3527,7 @@ LispObject lisp_builtin_use_package(LispObject args) {
                                          : lisp_symbol_cell(lisp_sym_package)->value;
     LispClosure *pkg_cell = lisp_closure_cell(pkg);
 
-    LispObject used_list = (lisp_is_package(used_arg) || lisp_is_string(used_arg))
+    LispObject used_list = (lisp_is_package(used_arg) || lisp_is_string(used_arg) || lisp_is_symbol(used_arg))
                                 ? lisp_cons(used_arg, LISP_NIL)
                                 : used_arg;
     for (LispObject cur = used_list; cur != LISP_NIL; cur = lisp_cdr(cur)) {
@@ -3411,7 +3539,8 @@ LispObject lisp_builtin_use_package(LispObject args) {
             const char *name = lisp_symbol_cell(exported_sym)->name;
 
             for (LispObject ls = pkg_cell->pkg_symbols; ls != LISP_NIL; ls = lisp_cdr(ls)) {
-                if (lisp_car(ls) != exported_sym && lisp_streq(lisp_symbol_cell(lisp_car(ls))->name, name)) {
+                if (lisp_car(ls) != exported_sym && lisp_streq(lisp_symbol_cell(lisp_car(ls))->name, name)
+                    && !lisp_symbol_is_shadowing(pkg_cell, lisp_car(ls))) {
                     lisp_panic(L"use-package: name conflict with an existing symbol");
                 }
             }
@@ -3420,7 +3549,10 @@ LispObject lisp_builtin_use_package(LispObject args) {
                 for (LispObject oe = other_cell->pkg_exports; oe != LISP_NIL; oe = lisp_cdr(oe)) {
                     LispObject other_sym = lisp_car(oe);
                     if (other_sym != exported_sym && lisp_streq(lisp_symbol_cell(other_sym)->name, name)) {
-                        lisp_panic(L"use-package: name conflict between used packages");
+                        LispObject shadow_local = lisp_find_local_symbol(pkg_cell, name);
+                        if (shadow_local == LISP_NIL || !lisp_symbol_is_shadowing(pkg_cell, shadow_local)) {
+                            lisp_panic(L"use-package: name conflict between used packages");
+                        }
                     }
                 }
             }
@@ -3455,17 +3587,321 @@ LispObject lisp_builtin_intern(LispObject args) {
     return lisp_intern_in_package(pkg, lisp_closure_cell(name_obj)->str_data);
 }
 
-// (in-package name): nameはパッケージ名の文字列。find-packageで見つからなければpanicし、
-// 見つかれば*package*（動的変数）のシンボルセルのvalueを直接書き換えて対象パッケージへ
-// 切り替える（milestone78）
+// (in-package name): nameはpackage designator（文字列/symbol・keyword、milestone91で拡張）。
+// find-packageで見つからなければpanicし、見つかれば*package*（動的変数）のシンボルセルの
+// valueを直接書き換えて対象パッケージへ切り替える（milestone78）
 LispObject lisp_builtin_in_package(LispObject args) {
     LispObject name_obj = lisp_car(args);
-    lisp_assert_string(name_obj);
-    LispObject pkg = lisp_find_package(lisp_closure_cell(name_obj)->str_data);
+    LispObject pkg = lisp_find_package(lisp_string_designator_name(name_obj));
     if (pkg == LISP_NIL) {
         lisp_panic(L"in-package: unknown package name");
     }
     lisp_symbol_cell(lisp_sym_package)->value = pkg;
+    return pkg;
+}
+
+// milestone91: 読み取り系のパッケージ操作ビルトイン群。いずれもpackage designator
+// （package本体/文字列/symbol・keyword）を受け付け、省略時は*package*を対象にする
+
+// (package-name package): pkg_nameをLisp文字列として返す
+LispObject lisp_builtin_package_name(LispObject args) {
+    LispObject pkg = lisp_resolve_package_designator(lisp_car(args));
+    const char *name = lisp_closure_cell(pkg)->pkg_name;
+    return lisp_make_string(name, lisp_cstrlen(name));
+}
+
+// (package-nicknames package): pkg_nicknames（文字列のconsリスト）をそのまま返す
+LispObject lisp_builtin_package_nicknames(LispObject args) {
+    LispObject pkg = lisp_resolve_package_designator(lisp_car(args));
+    return lisp_closure_cell(pkg)->pkg_nicknames;
+}
+
+// (package-use-list package): pkg_uses（use対象パッケージのconsリスト）をそのまま返す
+LispObject lisp_builtin_package_use_list(LispObject args) {
+    LispObject pkg = lisp_resolve_package_designator(lisp_car(args));
+    return lisp_closure_cell(pkg)->pkg_uses;
+}
+
+// (list-all-packages): global_packages（登録済み全パッケージのconsリスト）をそのまま返す
+LispObject lisp_builtin_list_all_packages(LispObject args) {
+    (void)args;
+    return global_packages;
+}
+
+// (%package-symbols package): pkg_symbols（対象パッケージへローカルに帰属する全シンボルの
+// consリスト）をそのまま返す内部用ビルトイン。dolistベースのdo-symbols/do-all-symbolsの
+// 下地として使う
+LispObject lisp_builtin_package_symbols(LispObject args) {
+    LispObject pkg = lisp_resolve_package_designator(lisp_car(args));
+    return lisp_closure_cell(pkg)->pkg_symbols;
+}
+
+// (%package-exported-symbols package): pkg_exportsをそのまま返す内部用ビルトイン。
+// do-external-symbolsの下地として使う
+LispObject lisp_builtin_package_exported_symbols(LispObject args) {
+    LispObject pkg = lisp_resolve_package_designator(lisp_car(args));
+    return lisp_closure_cell(pkg)->pkg_exports;
+}
+
+// (find-symbol name &optional package): nameは文字列限定（symbol designator対応は
+// スコープ外）。対象パッケージのローカルシンボル→use先のexportシンボルの順で探索し、
+// 見つかれば(cons symbol status)（statusは:internal/:external/:inherited）、
+// 見つからなければnilを返す。複数値は存在しないためconsで代用する（CLからの明示的な逸脱）
+LispObject lisp_builtin_find_symbol(LispObject args) {
+    LispObject name_obj = lisp_car(args);
+    lisp_assert_string(name_obj);
+    LispObject rest = lisp_cdr(args);
+    LispObject pkg = lisp_is_cons(rest) ? lisp_resolve_package_designator(lisp_car(rest))
+                                         : lisp_symbol_cell(lisp_sym_package)->value;
+    LispClosure *pkg_cell = lisp_closure_cell(pkg);
+
+    char truncated[LISP_SYMBOL_NAME_MAX];
+    lisp_truncate_symbol_name(lisp_closure_cell(name_obj)->str_data, truncated);
+
+    LispObject local = lisp_find_local_symbol(pkg_cell, truncated);
+    if (local != LISP_NIL) {
+        int exported = 0;
+        for (LispObject e = pkg_cell->pkg_exports; e != LISP_NIL; e = lisp_cdr(e)) {
+            if (lisp_car(e) == local) {
+                exported = 1;
+                break;
+            }
+        }
+        return lisp_cons(local, exported ? lisp_intern_keyword("external") : lisp_intern_keyword("internal"));
+    }
+
+    for (LispObject u = pkg_cell->pkg_uses; u != LISP_NIL; u = lisp_cdr(u)) {
+        LispClosure *used_cell = lisp_closure_cell(lisp_car(u));
+        for (LispObject e = used_cell->pkg_exports; e != LISP_NIL; e = lisp_cdr(e)) {
+            LispObject exported_sym = lisp_car(e);
+            if (lisp_streq(lisp_symbol_cell(exported_sym)->name, truncated)) {
+                return lisp_cons(exported_sym, lisp_intern_keyword("inherited"));
+            }
+        }
+    }
+
+    return LISP_NIL;
+}
+
+// (find-all-symbols name): nameは文字列限定。登録済み全パッケージのpkg_symbolsを走査し、
+// 名前が一致するシンボル（1パッケージにつき同名ローカルシンボルは最大1つなので重複なし）を
+// リストで返す
+LispObject lisp_builtin_find_all_symbols(LispObject args) {
+    LispObject name_obj = lisp_car(args);
+    lisp_assert_string(name_obj);
+
+    char truncated[LISP_SYMBOL_NAME_MAX];
+    lisp_truncate_symbol_name(lisp_closure_cell(name_obj)->str_data, truncated);
+
+    LispObject result = LISP_NIL;
+    for (LispObject cur = global_packages; cur != LISP_NIL; cur = lisp_cdr(cur)) {
+        LispClosure *pkg_cell = lisp_closure_cell(lisp_car(cur));
+        LispObject found = lisp_find_local_symbol(pkg_cell, truncated);
+        if (found != LISP_NIL) {
+            result = lisp_cons(found, result);
+        }
+    }
+    return result;
+}
+
+// (shadow names &optional package): namesは文字列designatorまたはそのリスト。各名前を
+// ローカル探索(lisp_find_local_symbol)→無ければその場で新規作成(lisp_create_local_symbol、
+// use先のexport探索は経由しない)で解決し、pkg_shadowing_symbolsへeq重複なく追加する
+LispObject lisp_builtin_shadow(LispObject args) {
+    LispObject names_arg = lisp_car(args);
+    LispObject rest = lisp_cdr(args);
+    LispObject pkg = lisp_is_cons(rest) ? lisp_resolve_package_designator(lisp_car(rest))
+                                         : lisp_symbol_cell(lisp_sym_package)->value;
+    LispClosure *pkg_cell = lisp_closure_cell(pkg);
+
+    LispObject names_list = (lisp_is_string(names_arg) || lisp_is_symbol(names_arg))
+                                 ? lisp_cons(names_arg, LISP_NIL)
+                                 : names_arg;
+    for (LispObject cur = names_list; cur != LISP_NIL; cur = lisp_cdr(cur)) {
+        char truncated[LISP_SYMBOL_NAME_MAX];
+        lisp_truncate_symbol_name(lisp_string_designator_name(lisp_car(cur)), truncated);
+
+        LispObject sym = lisp_find_local_symbol(pkg_cell, truncated);
+        if (sym == LISP_NIL) {
+            sym = lisp_create_local_symbol(pkg, truncated);
+        }
+        if (!lisp_symbol_is_shadowing(pkg_cell, sym)) {
+            pkg_cell->pkg_shadowing_symbols = lisp_cons(sym, pkg_cell->pkg_shadowing_symbols);
+        }
+    }
+    return lisp_sym_t;
+}
+
+// (unexport symbols &optional package): symbolsは単一symbolまたはそのリスト（exportと同じ
+// 単一/リスト判定）。pkg_exportsからeqで除去する
+LispObject lisp_builtin_unexport(LispObject args) {
+    LispObject symbols_arg = lisp_car(args);
+    LispObject rest = lisp_cdr(args);
+    LispObject pkg = lisp_is_cons(rest) ? lisp_resolve_package_designator(lisp_car(rest))
+                                         : lisp_symbol_cell(lisp_sym_package)->value;
+    LispClosure *pkg_cell = lisp_closure_cell(pkg);
+
+    LispObject symbols_list = lisp_is_symbol(symbols_arg) ? lisp_cons(symbols_arg, LISP_NIL) : symbols_arg;
+    for (LispObject cur = symbols_list; cur != LISP_NIL; cur = lisp_cdr(cur)) {
+        LispObject sym = lisp_car(cur);
+        LispObject result = LISP_NIL;
+        for (LispObject e = pkg_cell->pkg_exports; e != LISP_NIL; e = lisp_cdr(e)) {
+            if (lisp_car(e) != sym) {
+                result = lisp_cons(lisp_car(e), result);
+            }
+        }
+        pkg_cell->pkg_exports = result;
+    }
+    return lisp_sym_t;
+}
+
+// (unuse-package packages &optional package): packagesは単一のパッケージdesignatorまたは
+// そのリスト（use-packageと同じ単一/リスト判定）。pkg_usesからeqで除去する
+LispObject lisp_builtin_unuse_package(LispObject args) {
+    LispObject used_arg = lisp_car(args);
+    LispObject rest = lisp_cdr(args);
+    LispObject pkg = lisp_is_cons(rest) ? lisp_resolve_package_designator(lisp_car(rest))
+                                         : lisp_symbol_cell(lisp_sym_package)->value;
+    LispClosure *pkg_cell = lisp_closure_cell(pkg);
+
+    LispObject used_list = (lisp_is_package(used_arg) || lisp_is_string(used_arg) || lisp_is_symbol(used_arg))
+                                ? lisp_cons(used_arg, LISP_NIL)
+                                : used_arg;
+    for (LispObject cur = used_list; cur != LISP_NIL; cur = lisp_cdr(cur)) {
+        LispObject used_pkg = lisp_resolve_package_designator(lisp_car(cur));
+        LispObject result = LISP_NIL;
+        for (LispObject u = pkg_cell->pkg_uses; u != LISP_NIL; u = lisp_cdr(u)) {
+            if (lisp_car(u) != used_pkg) {
+                result = lisp_cons(lisp_car(u), result);
+            }
+        }
+        pkg_cell->pkg_uses = result;
+    }
+    return lisp_sym_t;
+}
+
+// (import symbols &optional package): symbolsは単一symbolまたはそのリスト。対象のpkg_symbols
+// に同名だがeqでないシンボルが既にあれば名前衝突としてpanicする。同名同一シンボルなら無処理、
+// 無ければそのままpkg_symbolsへ追加する（home package、つまりsym->packageは変更しない）
+LispObject lisp_builtin_import(LispObject args) {
+    LispObject symbols_arg = lisp_car(args);
+    LispObject rest = lisp_cdr(args);
+    LispObject pkg = lisp_is_cons(rest) ? lisp_resolve_package_designator(lisp_car(rest))
+                                         : lisp_symbol_cell(lisp_sym_package)->value;
+    LispClosure *pkg_cell = lisp_closure_cell(pkg);
+
+    LispObject symbols_list = lisp_is_symbol(symbols_arg) ? lisp_cons(symbols_arg, LISP_NIL) : symbols_arg;
+    for (LispObject cur = symbols_list; cur != LISP_NIL; cur = lisp_cdr(cur)) {
+        LispObject sym = lisp_car(cur);
+        lisp_assert_symbol(sym);
+        const char *name = lisp_symbol_cell(sym)->name;
+
+        LispObject existing = lisp_find_local_symbol(pkg_cell, name);
+        if (existing != LISP_NIL && existing != sym) {
+            lisp_panic(L"import: name conflict with an existing symbol");
+        }
+        if (existing == LISP_NIL) {
+            pkg_cell->pkg_symbols = lisp_cons(sym, pkg_cell->pkg_symbols);
+        }
+    }
+    return lisp_sym_t;
+}
+
+// (shadowing-import symbols &optional package): symbolsは単一symbolまたはそのリスト。対象の
+// pkg_symbolsに同名の既存シンボルがあれば（eqを問わず）除去してから追加し、pkg_shadowing_symbols
+// にもeq重複なく追加する
+LispObject lisp_builtin_shadowing_import(LispObject args) {
+    LispObject symbols_arg = lisp_car(args);
+    LispObject rest = lisp_cdr(args);
+    LispObject pkg = lisp_is_cons(rest) ? lisp_resolve_package_designator(lisp_car(rest))
+                                         : lisp_symbol_cell(lisp_sym_package)->value;
+    LispClosure *pkg_cell = lisp_closure_cell(pkg);
+
+    LispObject symbols_list = lisp_is_symbol(symbols_arg) ? lisp_cons(symbols_arg, LISP_NIL) : symbols_arg;
+    for (LispObject cur = symbols_list; cur != LISP_NIL; cur = lisp_cdr(cur)) {
+        LispObject sym = lisp_car(cur);
+        lisp_assert_symbol(sym);
+        const char *name = lisp_symbol_cell(sym)->name;
+
+        LispObject result = LISP_NIL;
+        for (LispObject ls = pkg_cell->pkg_symbols; ls != LISP_NIL; ls = lisp_cdr(ls)) {
+            if (!lisp_streq(lisp_symbol_cell(lisp_car(ls))->name, name)) {
+                result = lisp_cons(lisp_car(ls), result);
+            }
+        }
+        pkg_cell->pkg_symbols = lisp_cons(sym, result);
+
+        if (!lisp_symbol_is_shadowing(pkg_cell, sym)) {
+            pkg_cell->pkg_shadowing_symbols = lisp_cons(sym, pkg_cell->pkg_shadowing_symbols);
+        }
+    }
+    return lisp_sym_t;
+}
+
+// (delete-package designator): global_packagesからeqで除去し、他の全パッケージのpkg_usesから
+// もこのパッケージを除去する。対象が現在の*package*自身ならpanicする（CLと同様、カレント
+// パッケージは削除できない）
+LispObject lisp_builtin_delete_package(LispObject args) {
+    LispObject pkg = lisp_resolve_package_designator(lisp_car(args));
+    if (pkg == lisp_symbol_cell(lisp_sym_package)->value) {
+        lisp_panic(L"delete-package: cannot delete the current package");
+    }
+
+    LispObject result = LISP_NIL;
+    for (LispObject cur = global_packages; cur != LISP_NIL; cur = lisp_cdr(cur)) {
+        if (lisp_car(cur) != pkg) {
+            result = lisp_cons(lisp_car(cur), result);
+        }
+    }
+    global_packages = result;
+
+    for (LispObject cur = global_packages; cur != LISP_NIL; cur = lisp_cdr(cur)) {
+        LispClosure *other_cell = lisp_closure_cell(lisp_car(cur));
+        LispObject uses_result = LISP_NIL;
+        for (LispObject u = other_cell->pkg_uses; u != LISP_NIL; u = lisp_cdr(u)) {
+            if (lisp_car(u) != pkg) {
+                uses_result = lisp_cons(lisp_car(u), uses_result);
+            }
+        }
+        other_cell->pkg_uses = uses_result;
+    }
+    return lisp_sym_t;
+}
+
+// (rename-package designator new-name &optional new-nicknames): new-nameがすでに別の既存
+// パッケージを指す場合は名前衝突としてpanicする。pkg_nameを新しい文字列バッファへ置き換える
+// （lisp_make_package_objectと同じlisp_alloc+手動コピーのパターン、既存バッファの明示的な
+// freeは無し）。new-nicknamesが渡された場合のみpkg_nicknamesを置き換える（省略時は既存維持）
+LispObject lisp_builtin_rename_package(LispObject args) {
+    LispObject pkg = lisp_resolve_package_designator(lisp_car(args));
+    LispObject rest = lisp_cdr(args);
+    const char *new_name = lisp_string_designator_name(lisp_car(rest));
+
+    LispObject existing = lisp_find_package(new_name);
+    if (existing != LISP_NIL && existing != pkg) {
+        lisp_panic(L"rename-package: name conflict with an existing package");
+    }
+
+    LispClosure *pkg_cell = lisp_closure_cell(pkg);
+    UINTN len = lisp_cstrlen(new_name);
+    char *buf = (char *)lisp_alloc(len + 1);
+    UINTN i = 0;
+    while (i < len) {
+        buf[i] = new_name[i];
+        i++;
+    }
+    buf[len] = '\0';
+    pkg_cell->pkg_name = buf;
+
+    LispObject nicknames_rest = lisp_cdr(rest);
+    if (lisp_is_cons(nicknames_rest)) {
+        LispObject new_nicknames = LISP_NIL;
+        for (LispObject cur = lisp_car(nicknames_rest); cur != LISP_NIL; cur = lisp_cdr(cur)) {
+            const char *nickname = lisp_string_designator_name(lisp_car(cur));
+            new_nicknames = lisp_cons(lisp_make_string(nickname, lisp_cstrlen(nickname)), new_nicknames);
+        }
+        pkg_cell->pkg_nicknames = new_nicknames;
+    }
     return pkg;
 }
 
@@ -4443,6 +4879,22 @@ LispObject lisp_builtins_init(void) {
     env = lisp_env_extend(env, lisp_intern("use-package"), lisp_make_builtin(lisp_builtin_use_package));
     env = lisp_env_extend(env, lisp_intern("intern"), lisp_make_builtin(lisp_builtin_intern));
     env = lisp_env_extend(env, lisp_intern("in-package"), lisp_make_builtin(lisp_builtin_in_package));
+    env = lisp_env_extend(env, lisp_intern("package-name"), lisp_make_builtin(lisp_builtin_package_name));
+    env = lisp_env_extend(env, lisp_intern("package-nicknames"), lisp_make_builtin(lisp_builtin_package_nicknames));
+    env = lisp_env_extend(env, lisp_intern("package-use-list"), lisp_make_builtin(lisp_builtin_package_use_list));
+    env = lisp_env_extend(env, lisp_intern("list-all-packages"), lisp_make_builtin(lisp_builtin_list_all_packages));
+    env = lisp_env_extend(env, lisp_intern("%package-symbols"), lisp_make_builtin(lisp_builtin_package_symbols));
+    env = lisp_env_extend(env, lisp_intern("%package-exported-symbols"),
+                          lisp_make_builtin(lisp_builtin_package_exported_symbols));
+    env = lisp_env_extend(env, lisp_intern("find-symbol"), lisp_make_builtin(lisp_builtin_find_symbol));
+    env = lisp_env_extend(env, lisp_intern("find-all-symbols"), lisp_make_builtin(lisp_builtin_find_all_symbols));
+    env = lisp_env_extend(env, lisp_intern("shadow"), lisp_make_builtin(lisp_builtin_shadow));
+    env = lisp_env_extend(env, lisp_intern("unexport"), lisp_make_builtin(lisp_builtin_unexport));
+    env = lisp_env_extend(env, lisp_intern("unuse-package"), lisp_make_builtin(lisp_builtin_unuse_package));
+    env = lisp_env_extend(env, lisp_intern("import"), lisp_make_builtin(lisp_builtin_import));
+    env = lisp_env_extend(env, lisp_intern("shadowing-import"), lisp_make_builtin(lisp_builtin_shadowing_import));
+    env = lisp_env_extend(env, lisp_intern("delete-package"), lisp_make_builtin(lisp_builtin_delete_package));
+    env = lisp_env_extend(env, lisp_intern("rename-package"), lisp_make_builtin(lisp_builtin_rename_package));
     env = lisp_env_extend(env, lisp_intern("rplaca"), lisp_make_builtin(lisp_builtin_rplaca));
     env = lisp_env_extend(env, lisp_intern("rplacd"), lisp_make_builtin(lisp_builtin_rplacd));
     env = lisp_env_extend(env, lisp_intern("hash-code"), lisp_make_builtin(lisp_builtin_hash_code));
