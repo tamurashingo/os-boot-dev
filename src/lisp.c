@@ -4620,6 +4620,68 @@ int lisp_reader_special_form_export_selftest(void) {
     return 1;
 }
 
+// milestone 101: lisp_builtins_initで登録した全ビルトイン関数（LISP_REGISTER_BUILTIN経由の
+// ものと、それを経由しないprint-object・*macroexpand-hook*の両方）が、*package*を切り替えて
+// use-package済みの別パッケージからでも無修飾で正しく解決される（common-lisp-user側の正規
+// オブジェクトとeqであり、実際に呼び出せる）ことを確認する自己テスト。milestone100と同じ理由で
+// test/lisp/配下（load経由）では組めないため、C内で直接呼び出し順序を制御して検証する。
+// また、milestone79で判明した「in-package自身が無修飾で呼べず二重コロン修飾でしか復帰できない」
+// という既存の制約がこれで解消されることも合わせて確認する。真なら成功
+int lisp_reader_builtin_export_selftest(void) {
+    LispObject saved_package = lisp_symbol_cell(lisp_sym_package)->value;
+
+    LispObject pkg = lisp_make_package("selftest-pkg101", 0);
+    LispObject use_args = lisp_cons(lisp_cl_user_package, lisp_cons(pkg, LISP_NIL));
+    if (lisp_builtin_use_package(use_args) != lisp_sym_t) {
+        return 0;
+    }
+    lisp_symbol_cell(lisp_sym_package)->value = pkg;
+
+    // (a) 代表的なビルトインシンボル（LISP_REGISTER_BUILTIN経由のものと個別exportの2つ）が、
+    // use-package先での無修飾名解決でcommon-lisp-user側の正規オブジェクトと同一(eq)であること
+    const char *names[] = {
+        "car", "cdr", "cons", "eq", "atom", "+", "-", "<", "funcall", "apply",
+        "symbolp", "macroexpand-1", "gensym", "in-package",
+        "print-object", "*macroexpand-hook*",
+    };
+    for (UINTN i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+        if (lisp_intern(names[i]) != lisp_intern_in_package(lisp_cl_user_package, names[i])) {
+            return 0;
+        }
+    }
+
+    // (b) 単なるeq識別性だけでなく、実際にreader+evalの経路で呼び出せること
+    // （exportしなければ本来unbound variableでpanicしていた挙動の回帰確認）
+    if (lisp_eval(lisp_read_from_buffer("(car (cons 1 2))"), global_env) != lisp_make_fixnum(1)) {
+        return 0;
+    }
+    if (lisp_eval(lisp_read_from_buffer("(cdr (cons 1 2))"), global_env) != lisp_make_fixnum(2)) {
+        return 0;
+    }
+    if (lisp_eval(lisp_read_from_buffer("(+ 1 2)"), global_env) != lisp_make_fixnum(3)) {
+        return 0;
+    }
+    if (lisp_eval(lisp_read_from_buffer("(< 1 2)"), global_env) != lisp_sym_t) {
+        return 0;
+    }
+    if (lisp_eval(lisp_read_from_buffer("(atom 5)"), global_env) != lisp_sym_t) {
+        return 0;
+    }
+
+    // (c) milestone79の既存制約解消確認: *package*がcommon-lisp-user以外の間でも、
+    // in-package自身を無修飾（二重コロン修飾なし）で呼んでcommon-lisp-userへ復帰できること
+    if (lisp_eval(lisp_read_from_buffer("(in-package \"common-lisp-user\")"), global_env)
+        != lisp_cl_user_package) {
+        return 0;
+    }
+    if (lisp_symbol_cell(lisp_sym_package)->value != lisp_cl_user_package) {
+        return 0;
+    }
+
+    lisp_symbol_cell(lisp_sym_package)->value = saved_package;
+    return 1;
+}
+
 // (rplaca cons-cell new-car): cons-cellのcarをnew-carへ破壊的に書き換え、cons-cell自身を
 // 返す（milestone 27。CommonLispのrplacaと同じ「書き換えたコンスセル自身を返す」仕様で、
 // svsetがvalueを返すのとは異なる）。既存のlisp_set_carがlisp_assert_consを内包しているため
@@ -5698,12 +5760,21 @@ LispObject lisp_builtin_add_method(LispObject args) {
     return name;
 }
 
+// milestone 101: LISP_REGISTER_BUILTINで登録する全ビルトイン関数のシンボルを、milestone100の
+// 特殊形式exportと同じ理由でcommon-lisp-userからexportする。マクロの展開先をこの1箇所に
+// 集約することで、以後LISP_REGISTER_BUILTINで追加される新規ビルトインも自動的にexport対象になる
+static void lisp_register_and_export_builtin(const char *name, LispBuiltinFn func) {
+    LispObject sym = lisp_intern(name);
+    lisp_symbol_cell(sym)->fn = lisp_make_builtin(func);
+    LispClosure *cl_user_cell = lisp_closure_cell(lisp_cl_user_package);
+    cl_user_cell->pkg_exports = lisp_cons(sym, cl_user_cell->pkg_exports);
+}
+
 // car/cdr/cons/eq/atom/+/-/load をグローバル環境に束縛して返す
 // milestone94: 組み込み関数の登録先をglobal_env(alist)から各symbolの関数セル(fn)への
 // 直接書き込みへ変更した。戻り値のenvは不要になったためvoidにした(呼び出し元main.cの
 // 代入も削除する)
-#define LISP_REGISTER_BUILTIN(name, func) \
-    (lisp_symbol_cell(lisp_intern(name))->fn = lisp_make_builtin(func))
+#define LISP_REGISTER_BUILTIN(name, func) lisp_register_and_export_builtin(name, func)
 
 void lisp_builtins_init(void) {
     LISP_REGISTER_BUILTIN("car", lisp_builtin_car);
@@ -5800,6 +5871,15 @@ void lisp_builtins_init(void) {
     LispSymbol *hook_cell = lisp_symbol_cell(lisp_sym_macroexpand_hook);
     hook_cell->value = lisp_make_builtin(lisp_default_macroexpand_hook);
     hook_cell->is_special = 1;
+
+    // milestone 101: print-object（総称関数、LISP_REGISTER_BUILTIN経由ではなくlisp_sym_print_object
+    // を直接使って登録される）と*macroexpand-hook*（動的変数、global_envを経由しない）は
+    // 上のLISP_REGISTER_BUILTIN自動export網の対象外なので、ここで個別にexportする
+    {
+        LispClosure *cl_user_cell = lisp_closure_cell(lisp_cl_user_package);
+        cl_user_cell->pkg_exports = lisp_cons(lisp_sym_print_object, cl_user_cell->pkg_exports);
+        cl_user_cell->pkg_exports = lisp_cons(lisp_sym_macroexpand_hook, cl_user_cell->pkg_exports);
+    }
 }
 
 #undef LISP_REGISTER_BUILTIN

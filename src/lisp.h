@@ -158,6 +158,13 @@ int lisp_global_ref_package_identity_selftest(void);
 // main.cでのstdlib.lisp自動load後に呼び出す必要がある。真なら成功
 int lisp_reader_special_form_export_selftest(void);
 
+// milestone 101: lisp_builtins_initで登録した全ビルトイン関数（LISP_REGISTER_BUILTIN経由の
+// ものと、それを経由しないprint-object・*macroexpand-hook*）が、*package*を切り替えて
+// use-package済みの別パッケージからでも無修飾で正しく解決され、実際に呼び出せることを確認する
+// 自己テスト。in-package自身が無修飾で呼べる（milestone79の制約解消）ことも合わせて確認する。
+// main.cでのstdlib.lisp自動load後に呼び出す必要がある。真なら成功
+int lisp_reader_builtin_export_selftest(void);
+
 // --- VMオペコード (milestone 35) ---
 // 各命令は1byteのopcode+固定長の即値オペランド（今のところ0または2byte、リトルエンディアン）
 // から成る。手動でバイトコード配列を構築する目標1の各マイルストン（35〜39）はこの定義を直接使う

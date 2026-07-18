@@ -111,6 +111,16 @@ static void lisp_reader_special_form_export_selftest_run(EFI_SYSTEM_TABLE *Syste
     }
 }
 
+// --- ビルトインexport自己テスト (milestone 101) ---
+static void lisp_reader_builtin_export_selftest_run(EFI_SYSTEM_TABLE *SystemTable) {
+    if (lisp_reader_builtin_export_selftest()) {
+        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"Builtin export self-test: PASS\r\n");
+    } else {
+        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"Builtin export self-test: FAIL\r\n");
+        for (;;) {}
+    }
+}
+
 // --- VM最小実行ループ自己テスト (milestone 35) ---
 // OP_CONST 1, OP_CONST 2, OP_ADD, OP_RETURN相当を手動でバイトコード配列として構築し、
 // lisp_vm_execに渡して3が返ることを確認する。定数オブジェクトはlisp_make_fixnum相当の
@@ -563,6 +573,7 @@ static EFI_STATUS EFIAPI EfiMainImpl(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *S
             lisp_bootstrap_package_context_selftest_run(SystemTable); // milestone 80: ブートストラップのパッケージ文脈自己テスト
             lisp_global_ref_package_identity_selftest_run(SystemTable); // milestone 81: グローバル参照とシンボル同一性の回帰自己テスト
             lisp_reader_special_form_export_selftest_run(SystemTable); // milestone 100: 特殊形式export自己テスト
+            lisp_reader_builtin_export_selftest_run(SystemTable); // milestone 101: ビルトインexport自己テスト
 
             lisp_load_init_file(); // milestone 47: EFI/BOOT/init.lispがあれば読み込む(無ければ何もしない)
 
