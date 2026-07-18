@@ -31,7 +31,31 @@
          (eq (cdr os:*all-processes*) before)
          (eq (car (os:get-all-processes)) p))))
 
+; milestone 103: make-processの名前一意性のみを検証する(実行機構は無いので生成・登録のみ)。
+; 名前衝突panicシナリオは検証方針(documents/lisp_os_process.md)どおりmake testでは検証せず、
+; 個別のQEMU対話セッションで確認する
+(defun run-test-os-make-process-auto-name ()
+  (let ((before os:*all-processes*)
+        (p1 (os:make-process))
+        (p2 (os:make-process)))
+    (and (eq (class-of p1) (find-class 'os:process))
+         (not (eq (slot-value p1 'name) nil))
+         (not (eq (slot-value p1 'name) (slot-value p2 'name)))
+         (eq (car (cdr os:*all-processes*)) p1)
+         (eq (car os:*all-processes*) p2)
+         (eq (cdr (cdr os:*all-processes*)) before))))
+
+(defun run-test-os-make-process-named ()
+  (let ((name-val "make-process-test-a")
+        (before os:*all-processes*))
+    (let ((p (os:make-process name-val)))
+      (and (eq (slot-value p 'name) name-val)
+           (eq (car os:*all-processes*) p)
+           (eq (cdr os:*all-processes*) before)))))
+
 (defun run-test-os ()
   (and (run-test-os-process-class-exists)
        (run-test-os-process-slots)
-       (run-test-os-all-processes-registry)))
+       (run-test-os-all-processes-registry)
+       (run-test-os-make-process-auto-name)
+       (run-test-os-make-process-named)))

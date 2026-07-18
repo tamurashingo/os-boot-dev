@@ -5525,6 +5525,95 @@ LispObject lisp_builtin_class_of(LispObject args) {
     return lisp_closure_cell(obj)->inst_class;
 }
 
+// --- os:make-process (milestone 103) ---
+//
+// この段階ではos:processインスタンスの生成・name slotの設定・os:*all-processes*への
+// 登録のみを行う。fork実行・パッケージ分離・スタック確保は一切行わない(documents/
+// lisp_os_process.mdフェーズCの対象)。
+//
+// 文字列の内容比較(lisp_streq)・一意名生成の両方に、Lisp側に公開されていないstr_data直接
+// アクセスが必要なため、%make-classと同様にCビルトインとして実装し、lisp/os.lispの
+// os:make-processラッパー(&optional引数展開のみ担当)から呼ぶ
+
+// os:*all-processes*内にnameと内容が一致するプロセス名を持つインスタンスが既にあればtrue
+static int lisp_process_name_taken(LispObject os_pkg, const char *name) {
+    LispObject all_processes_sym = lisp_intern_in_package(os_pkg, "*all-processes*");
+    LispObject name_slot_sym = lisp_intern("name");
+    for (LispObject cur = lisp_symbol_cell(all_processes_sym)->value; lisp_is_cons(cur); cur = lisp_cdr(cur)) {
+        LispObject proc_name = lisp_closure_cell(
+            lisp_closure_cell(lisp_car(cur))->inst_slots)->vec_data[lisp_instance_slot_index(lisp_car(cur), name_slot_sym)];
+        if (lisp_is_string(proc_name) && lisp_streq(lisp_closure_cell(proc_name)->str_data, name)) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+// gensymと同じカウンタ方式で"PROCESS-<N>"という名前を生成する。文字列を返す点のみ異なる
+// (gensymは非intern済みシンボルを返す)。カウンタが生成した名前が(ユーザー指定名との衝突により
+// 既に使われていた場合はカウンタを進めて再試行する
+static UINTN lisp_process_name_counter = 0;
+
+static LispObject lisp_generate_process_name(LispObject os_pkg) {
+    for (;;) {
+        char name[LISP_SYMBOL_NAME_MAX];
+        UINTN i = 0;
+        const char *prefix = "PROCESS-";
+        while (prefix[i] != '\0') {
+            name[i] = prefix[i];
+            i++;
+        }
+        char digits[24];
+        UINTN dcount = 0;
+        UINTN n = lisp_process_name_counter;
+        do {
+            digits[dcount] = '0' + (char)(n % 10);
+            dcount++;
+            n /= 10;
+        } while (n > 0);
+        while (dcount > 0 && i < LISP_SYMBOL_NAME_MAX - 1) {
+            dcount--;
+            name[i] = digits[dcount];
+            i++;
+        }
+        name[i] = '\0';
+        lisp_process_name_counter++;
+        if (!lisp_process_name_taken(os_pkg, name)) {
+            return lisp_make_string(name, lisp_cstrlen(name));
+        }
+    }
+}
+
+// (%make-process name-or-nil): nameがnilなら自動生成した一意名を使う。文字列が指定されて
+// いれば、既存のos:*all-processes*内のいずれかのプロセス名と内容が一致する場合はpanicする
+// (make-instanceのみでは名前の一意性を保証できないため、この専用ビルトインが必要)
+LispObject lisp_builtin_make_process(LispObject args) {
+    LispObject os_pkg = lisp_find_package("os");
+    LispObject name_arg = lisp_is_cons(args) ? lisp_car(args) : LISP_NIL;
+
+    LispObject name_obj;
+    if (name_arg == LISP_NIL) {
+        name_obj = lisp_generate_process_name(os_pkg);
+    } else {
+        lisp_assert_string(name_arg);
+        if (lisp_process_name_taken(os_pkg, lisp_closure_cell(name_arg)->str_data)) {
+            lisp_panic(L"make-process: duplicate process name");
+        }
+        name_obj = name_arg;
+    }
+
+    LispObject cls = lisp_find_class(lisp_intern_in_package(os_pkg, "process"));
+    LispObject instance = lisp_make_instance(cls);
+    UINTN name_index = lisp_instance_slot_index(instance, lisp_intern("name"));
+    lisp_closure_cell(lisp_closure_cell(instance)->inst_slots)->vec_data[name_index] = name_obj;
+
+    LispObject all_processes_sym = lisp_intern_in_package(os_pkg, "*all-processes*");
+    LispSymbol *sym_cell = lisp_symbol_cell(all_processes_sym);
+    sym_cell->value = lisp_cons(instance, sym_cell->value);
+
+    return instance;
+}
+
 // milestone98: print-objectの既定method。m96/97時点の#<name instance>相当の表示を、
 // defmethodでオーバーライド可能な総称関数の1メソッドとして提供する。lisp_method_applicable
 // は無指定specializerを引数の型を問わず適用可能と判定するため、instance以外が渡された
@@ -5849,6 +5938,7 @@ void lisp_builtins_init(void) {
     LISP_REGISTER_BUILTIN("slot-value", lisp_builtin_slot_value);
     LISP_REGISTER_BUILTIN("set-slot-value", lisp_builtin_set_slot_value);
     LISP_REGISTER_BUILTIN("class-of", lisp_builtin_class_of);
+    LISP_REGISTER_BUILTIN("%make-process", lisp_builtin_make_process);
 
     // milestone97: defmethod・総称関数・多重ディスパッチ
     LISP_REGISTER_BUILTIN("%ensure-generic-function", lisp_builtin_ensure_generic_function);

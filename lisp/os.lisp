@@ -22,3 +22,15 @@
 (defvar os:*all-processes* nil)
 
 (defun os:get-all-processes () os:*all-processes*)
+
+; milestone 103: make-process(名前一意性のみ、実行機構無し)。
+;
+; 名前の自動生成("PROCESS-<N>"形式、gensymと同じカウンタ方式)・既存os:*all-processes*との
+; 内容比較による一意性チェックのいずれも、str_data(文字列の生バイト列)への直接アクセスが
+; 必要でLisp側からは行えない(本処理系にはstring=もlengthも無い、milestone102で確認済みの
+; 制約)ため、実体は%make-process(Cビルトイン、src/lisp.c)にあり、ここでは&optional引数の
+; 展開のみを担当する薄いラッパーにしている(%make-class/defclassと同じパターン)。
+;
+; 名前が衝突した場合(ユーザー指定名が既存プロセスと内容一致)は%make-process内でpanicする。
+; この段階ではまだfork実行・パッケージ分離・スタック確保は行わない
+(defun os:make-process (&optional name) (%make-process name))

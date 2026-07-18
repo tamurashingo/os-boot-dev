@@ -8,4 +8,4 @@
 ; milestone72/76/78/79/81/100/101と同根の制約)
 (defpackage "os"
   (:use "common-lisp-user")
-  (:export "process" "*all-processes*" "get-all-processes"))
+  (:export "process" "*all-processes*" "get-all-processes" "make-process"))
