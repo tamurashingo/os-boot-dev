@@ -1231,6 +1231,7 @@ static LispObject lisp_sym_lambda_rest;
 static LispObject lisp_sym_lambda_key;
 static LispObject lisp_sym_lambda_aux;
 static LispObject lisp_sym_lambda_allow_other_keys;
+static LispObject lisp_sym_print_object;
 
 void lisp_symbols_init(void) {
     lisp_sym_t = lisp_intern("t");
@@ -1273,6 +1274,9 @@ void lisp_symbols_init(void) {
     lisp_sym_lambda_key = lisp_intern("&key");
     lisp_sym_lambda_aux = lisp_intern("&aux");
     lisp_sym_lambda_allow_other_keys = lisp_intern("&allow-other-keys");
+    // milestone 98: print-objectもcompile-and-run(m78)と同じ理由で*package*切替後も
+    // 同一symbolを指し続けるようここで1度だけinternしてキャッシュする
+    lisp_sym_print_object = lisp_intern("print-object");
 }
 
 
@@ -1518,6 +1522,10 @@ static int lisp_symbol_visible_in_current_package(LispObject sym_obj) {
     return 0;
 }
 
+// milestone98: instance印字をprint-object総称関数へ委譲するための前方宣言
+// (本来の定義は2965行目付近、m97でlisp_gf_select_method用に追加した前方宣言と同じ理由)
+LispObject lisp_apply(LispObject fn, LispObject args);
+
 // LispObjectを人間が読める形式でコンソールに表示する。
 // fixnumは10進、symbolは名前、consは(a b c)または(a . b)形式、nilはnilと表示する
 void lisp_print(LispOutputStream *stream, LispObject obj) {
@@ -1555,10 +1563,13 @@ void lisp_print(LispOutputStream *stream, LispObject obj) {
         return;
     }
 
+    // milestone98: instanceの印字はprint-object総称関数へ委譲する。defmethod print-objectで
+    // ユーザーがオーバーライド可能にするため（class/instance/generic-function自体のような
+    // 非拡張の専用分岐ではなくす）。print-objectはlisp_builtins_init内で既定methodを
+    // 登録済みのため(stdlib.lisp読込前に完了する)、instanceが存在し得る時点では常にbind済み
     if (lisp_is_instance(obj)) {
-        lisp_print_ascii(stream, "#<");
-        lisp_print_ascii(stream, lisp_symbol_cell(lisp_closure_cell(lisp_closure_cell(obj)->inst_class)->class_name)->name);
-        lisp_print_ascii(stream, " instance>");
+        LispObject print_object_gf = lisp_symbol_cell(lisp_sym_print_object)->fn;
+        lisp_apply(print_object_gf, lisp_cons(obj, LISP_NIL));
         return;
     }
 
@@ -5040,6 +5051,29 @@ LispObject lisp_builtin_write_line(LispObject args) {
     return lisp_sym_t;
 }
 
+// milestone98: write-lineの改行無し版。文字列連結プリミティブが存在しないこの処理系で
+// print-objectのmethod本体が出力を組み立てるための基本手段として追加する
+LispObject lisp_builtin_write_string(LispObject args) {
+    LispObject content_obj = lisp_car(args);
+    lisp_assert_string(content_obj);
+    LispClosure *content = lisp_closure_cell(content_obj);
+
+    LispOutputStream stream = lisp_make_console_stream(g_system_table);
+    lisp_print_ascii(&stream, content->str_data);
+
+    return lisp_sym_t;
+}
+
+// milestone98: 任意のLispObjectを既存のlisp_print経由でコンソールへ改行無しで書き出す
+// (CLのprincと同様、引数自身を返す)。print-objectのmethod本体からスロット値等の
+// 非文字列オブジェクトを書き出すための手段
+LispObject lisp_builtin_princ(LispObject args) {
+    LispObject obj = lisp_car(args);
+    LispOutputStream stream = lisp_make_console_stream(g_system_table);
+    lisp_print(&stream, obj);
+    return obj;
+}
+
 // milestone 29: EfiMainが起動時に標準ライブラリファイルを読み込むための入口。
 // lisp_builtin_loadはLisp文字列オブジェクトの引数リストを要求するので、
 // Cの文字列リテラルからそれを組み立てるだけの薄いラッパー
@@ -5314,6 +5348,21 @@ LispObject lisp_builtin_class_of(LispObject args) {
     return lisp_closure_cell(obj)->inst_class;
 }
 
+// milestone98: print-objectの既定method。m96/97時点の#<name instance>相当の表示を、
+// defmethodでオーバーライド可能な総称関数の1メソッドとして提供する。lisp_method_applicable
+// は無指定specializerを引数の型を問わず適用可能と判定するため、instance以外が渡された
+// 誤用はここのlisp_assert_instanceで止める
+LispObject lisp_builtin_default_print_object(LispObject args) {
+    LispObject obj = lisp_car(args);
+    lisp_assert_instance(obj);
+    LispOutputStream stream = lisp_make_console_stream(g_system_table);
+    lisp_print_ascii(&stream, "#<");
+    lisp_print_ascii(&stream,
+        lisp_symbol_cell(lisp_closure_cell(lisp_closure_cell(obj)->inst_class)->class_name)->name);
+    lisp_print_ascii(&stream, " instance>");
+    return obj;
+}
+
 // --- defmethod・総称関数・多重ディスパッチ (milestone 97) ---
 
 // name用の新しいgeneric-function objectを作る（gf_methodsは空リストから開始する。
@@ -5581,6 +5630,9 @@ void lisp_builtins_init(void) {
     LISP_REGISTER_BUILTIN("load", lisp_builtin_load);
     LISP_REGISTER_BUILTIN("write-file", lisp_builtin_write_file);
     LISP_REGISTER_BUILTIN("write-line", lisp_builtin_write_line);
+    // milestone98: print-objectのmethod本体が出力を組み立てるための基本手段
+    LISP_REGISTER_BUILTIN("write-string", lisp_builtin_write_string);
+    LISP_REGISTER_BUILTIN("princ", lisp_builtin_princ);
     LISP_REGISTER_BUILTIN("sleep", lisp_builtin_sleep);
     LISP_REGISTER_BUILTIN("gensym", lisp_builtin_gensym);
     LISP_REGISTER_BUILTIN("gc", lisp_builtin_gc);
@@ -5615,6 +5667,17 @@ void lisp_builtins_init(void) {
     // milestone97: defmethod・総称関数・多重ディスパッチ
     LISP_REGISTER_BUILTIN("%ensure-generic-function", lisp_builtin_ensure_generic_function);
     LISP_REGISTER_BUILTIN("%add-method", lisp_builtin_add_method);
+
+    // milestone98: print-objectの既定methodをstdlib.lisp読込前(defmethodマクロが使えない
+    // 時点)にC側から直接登録する。instanceが存在し得るのはstdlib.lisp読込完了後のみなので、
+    // この時点で常にbind済みにしておけば未束縛フォールバックは不要
+    lisp_builtin_ensure_generic_function(lisp_cons(lisp_sym_print_object, LISP_NIL));
+    {
+        LispObject print_object_default_specializers = lisp_cons(LISP_NIL, LISP_NIL);
+        lisp_builtin_add_method(lisp_cons(lisp_sym_print_object,
+            lisp_cons(print_object_default_specializers,
+            lisp_cons(lisp_make_builtin(lisp_builtin_default_print_object), LISP_NIL))));
+    }
 
     // *macroexpand-hook*をdefvarと同じ形（is_special=1 + 初期値）で直接セットアップする
     // (milestone 21)。動的変数はenvチェーンに束縛を積まないため、global_envへの
