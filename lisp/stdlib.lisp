@@ -248,6 +248,28 @@
             nil)
         (list 'quote slots)))
 
+; milestone97: defmethodのパラメータ1個をspecializer無し(bare symbol)/有り((name class-name))
+; どちらの形かで分岐する2つのヘルパー。atomはcar/cdrを一切呼ばないため、bare symbol(non-cons)
+; を渡してもmilestone96で踏んだcar-on-nil panicの心配は無い
+(defun defmethod-param-name (spec)
+  (if (atom spec) spec (car spec)))
+
+(defun defmethod-param-specializer-form (spec)
+  (if (atom spec) nil (list 'find-class (list 'quote (car (cdr spec))))))
+
+; (defmethod name ((p1 c1) (p2 c2) p3) body...)。各パラメータはbare symbol(無指定)または
+; (name class-name)(指定)。&optional/&rest/&keyは非対応(positional-onlyでmulti-arg
+; specializer matchingを単純に保つ)。bodyは複数formを取れるので(cons 'progn body)で単一式へ
+; 畳む(defun/lambda本体は単一formのみという既存の制約、milestone96のclos-move-pointと同型)。
+; mapcarへ渡す関数名はLisp-2化(milestone93〜95)後の規約に従い#'で関数セルから取る
+(defmacro defmethod (name params &rest body)
+  (list 'progn
+        (list '%ensure-generic-function (list 'quote name))
+        (list '%add-method
+              (list 'quote name)
+              (cons 'list (mapcar #'defmethod-param-specializer-form params))
+              (list 'lambda (mapcar #'defmethod-param-name params) (cons 'progn body)))))
+
 (defmacro defpackage (name &rest clauses)
   (let* ((nicknames (defpackage-clause-names clauses :nicknames))
          (shadow-forms (mapcar (lambda (n) (defpackage-shadow-form name n))

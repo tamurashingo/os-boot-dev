@@ -89,6 +89,8 @@ typedef struct LispClosure {
     LispObject class_all_slots;    // superclassのclass_all_slots ++ direct_slots（defclass時に計算・キャッシュ）
     LispObject inst_class;         // milestone96: NILならinstanceではない。非NILなら生成元クラスオブジェクト
     LispObject inst_slots;         // スロット値を保持する独立したvectorオブジェクト（inst自身のvec_dataとは別）
+    LispObject gf_name;            // milestone97: NILならgeneric-functionではない。非NILなら総称関数名symbol
+    LispObject gf_methods;         // ((specializer-list . method-closure) ...) のconsリスト
 } LispClosure;
 
 static inline LispObject lisp_make_fixnum(long long value) {
@@ -164,6 +166,11 @@ static inline int lisp_is_class(LispObject obj) {
 
 static inline int lisp_is_instance(LispObject obj) {
     return lisp_is_closure(obj) && lisp_closure_cell(obj)->inst_class != LISP_NIL;
+}
+
+// generic-functionも同じくLISP_TAG_CLOSUREを共有するescape hatch（milestone 97）
+static inline int lisp_is_generic_function(LispObject obj) {
+    return lisp_is_closure(obj) && lisp_closure_cell(obj)->gf_name != LISP_NIL;
 }
 
 static inline int lisp_is_number(LispObject obj) {
@@ -375,6 +382,8 @@ LispObject lisp_make_closure(LispObject params, LispObject body, LispObject env)
     closure->class_all_slots = LISP_NIL;
     closure->inst_class = LISP_NIL;
     closure->inst_slots = LISP_NIL;
+    closure->gf_name = LISP_NIL;
+    closure->gf_methods = LISP_NIL;
     return ((LispObject)closure) | LISP_TAG_CLOSURE;
 }
 
@@ -415,6 +424,8 @@ LispObject lisp_make_builtin(LispBuiltinFn fn) {
     closure->class_all_slots = LISP_NIL;
     closure->inst_class = LISP_NIL;
     closure->inst_slots = LISP_NIL;
+    closure->gf_name = LISP_NIL;
+    closure->gf_methods = LISP_NIL;
     return ((LispObject)closure) | LISP_TAG_CLOSURE;
 }
 
@@ -457,6 +468,8 @@ LispObject lisp_make_macro(LispObject params, LispObject body, LispObject env) {
     closure->class_all_slots = LISP_NIL;
     closure->inst_class = LISP_NIL;
     closure->inst_slots = LISP_NIL;
+    closure->gf_name = LISP_NIL;
+    closure->gf_methods = LISP_NIL;
     return ((LispObject)closure) | LISP_TAG_CLOSURE;
 }
 
@@ -506,6 +519,8 @@ LispObject lisp_make_string(const char *chars, UINTN len) {
     closure->class_all_slots = LISP_NIL;
     closure->inst_class = LISP_NIL;
     closure->inst_slots = LISP_NIL;
+    closure->gf_name = LISP_NIL;
+    closure->gf_methods = LISP_NIL;
     return ((LispObject)closure) | LISP_TAG_CLOSURE;
 }
 
@@ -549,6 +564,8 @@ LispObject lisp_make_float(double value) {
     closure->class_all_slots = LISP_NIL;
     closure->inst_class = LISP_NIL;
     closure->inst_slots = LISP_NIL;
+    closure->gf_name = LISP_NIL;
+    closure->gf_methods = LISP_NIL;
     return ((LispObject)closure) | LISP_TAG_CLOSURE;
 }
 
@@ -597,6 +614,8 @@ LispObject lisp_make_bignum(const UINT32 *digits, UINTN len, int negative) {
     closure->class_all_slots = LISP_NIL;
     closure->inst_class = LISP_NIL;
     closure->inst_slots = LISP_NIL;
+    closure->gf_name = LISP_NIL;
+    closure->gf_methods = LISP_NIL;
     return ((LispObject)closure) | LISP_TAG_CLOSURE;
 }
 
@@ -646,6 +665,8 @@ LispObject lisp_make_vector(UINTN len, LispObject fill) {
     closure->class_all_slots = LISP_NIL;
     closure->inst_class = LISP_NIL;
     closure->inst_slots = LISP_NIL;
+    closure->gf_name = LISP_NIL;
+    closure->gf_methods = LISP_NIL;
     return ((LispObject)closure) | LISP_TAG_CLOSURE;
 }
 
@@ -701,6 +722,8 @@ LispObject lisp_make_compiled(const unsigned char *bytecode, UINTN bytecode_len,
     closure->class_all_slots = LISP_NIL;
     closure->inst_class = LISP_NIL;
     closure->inst_slots = LISP_NIL;
+    closure->gf_name = LISP_NIL;
+    closure->gf_methods = LISP_NIL;
     return ((LispObject)closure) | LISP_TAG_CLOSURE;
 }
 
@@ -990,6 +1013,8 @@ static LispObject lisp_make_package_object(const char *name, int is_keyword_pack
     closure->class_all_slots = LISP_NIL;
     closure->inst_class = LISP_NIL;
     closure->inst_slots = LISP_NIL;
+    closure->gf_name = LISP_NIL;
+    closure->gf_methods = LISP_NIL;
     return ((LispObject)closure) | LISP_TAG_CLOSURE;
 }
 
@@ -1537,6 +1562,14 @@ void lisp_print(LispOutputStream *stream, LispObject obj) {
         return;
     }
 
+    // milestone97: generic-functionも同じ理由で専用に印字する（#<closure>へ落とさない）
+    if (lisp_is_generic_function(obj)) {
+        lisp_print_ascii(stream, "#<GENERIC-FUNCTION ");
+        lisp_print_ascii(stream, lisp_symbol_cell(lisp_closure_cell(obj)->gf_name)->name);
+        lisp_print_ascii(stream, ">");
+        return;
+    }
+
     if (lisp_is_symbol(obj)) {
         LispSymbol *sym = lisp_symbol_cell(obj);
         // milestone 23: keywordパッケージのシンボルは":"を前置して印字する
@@ -1926,6 +1959,9 @@ LispObject global_env = LISP_NIL;
 LispObject lisp_env_lookup(LispObject env, LispObject sym);
 void lisp_env_set(LispObject env, LispObject sym, LispObject value);
 LispObject lisp_apply(LispObject fn, LispObject args);
+// milestone97: lisp_applyの4番目の分岐(generic-function dispatch)が使うため、定義順として
+// 後に来るlisp_gf_select_methodを前方宣言する
+static LispObject lisp_gf_select_method(LispObject gf, LispObject args);
 
 // 非局所脱出の進行中シグナル (milestone 19)。setjmp/longjmpが使えないため、
 // return-fromが「対象タグ＋値」をここにセットしてから通常のLispObjectとして
@@ -2181,6 +2217,8 @@ static LispObject lisp_vm_run(LispClosure *cl, UINTN fp) {
                 instance->class_all_slots = LISP_NIL;
                 instance->inst_class = LISP_NIL;
                 instance->inst_slots = LISP_NIL;
+                instance->gf_name = LISP_NIL;
+                instance->gf_methods = LISP_NIL;
                 lisp_vm_push(((LispObject)instance) | LISP_TAG_CLOSURE);
                 break;
             }
@@ -2386,6 +2424,13 @@ static void lisp_gc_mark(LispObject obj) {
         if (cl->inst_class != LISP_NIL) {
             lisp_gc_mark(cl->inst_class);
             lisp_gc_mark(cl->inst_slots);
+        }
+        // milestone97: generic-function（gf_name != NILのescape hatch）のgf_methodsは
+        // ((specializer-list . method-closure) ...)のconsリストなので、markするだけで
+        // 各specializerのクラスオブジェクト・method closureまで再帰的に辿れる。専用rootは
+        // 不要（generic-function object自体は対象symbolの関数セルfn経由でGCに到達する）
+        if (cl->gf_name != LISP_NIL) {
+            lisp_gc_mark(cl->gf_methods);
         }
         obj = cl->env;
     }
@@ -2856,6 +2901,13 @@ LispObject lisp_apply(LispObject fn, LispObject args) {
     }
     if (closure->builtin != 0) {
         return closure->builtin(args);
+    }
+    // milestone97: generic-function objectはlisp_gf_select_methodで選んだmethod closureへ
+    // 再度lisp_applyする(OP_CALL側は無変更、非compiled-calleeフォールバックがここへ自動的に
+    // 流れてくる)
+    if (closure->gf_name != LISP_NIL) {
+        LispObject method = lisp_gf_select_method(fn, args);
+        return lisp_apply(method, args);
     }
     LispObject call_env = lisp_env_bind_params(closure->params, args, closure->env);
     return lisp_eval(closure->body, call_env);
@@ -5139,6 +5191,8 @@ static LispObject lisp_make_class(LispObject name, LispObject superclass, LispOb
     closure->class_all_slots = all_slots;
     closure->inst_class = LISP_NIL;
     closure->inst_slots = LISP_NIL;
+    closure->gf_name = LISP_NIL;
+    closure->gf_methods = LISP_NIL;
     LispObject cls = ((LispObject)closure) | LISP_TAG_CLOSURE;
     global_classes = lisp_cons(cls, global_classes);
     return cls;
@@ -5182,6 +5236,8 @@ static LispObject lisp_make_instance(LispObject cls) {
     closure->class_all_slots = LISP_NIL;
     closure->inst_class = cls;
     closure->inst_slots = lisp_make_vector(lisp_list_length(lisp_closure_cell(cls)->class_all_slots), LISP_NIL);
+    closure->gf_name = LISP_NIL;
+    closure->gf_methods = LISP_NIL;
     return ((LispObject)closure) | LISP_TAG_CLOSURE;
 }
 
@@ -5256,6 +5312,226 @@ LispObject lisp_builtin_class_of(LispObject args) {
     LispObject obj = lisp_car(args);
     lisp_assert_instance(obj);
     return lisp_closure_cell(obj)->inst_class;
+}
+
+// --- defmethod・総称関数・多重ディスパッチ (milestone 97) ---
+
+// name用の新しいgeneric-function objectを作る（gf_methodsは空リストから開始する。
+// %ensure-generic-functionの新規作成分岐からのみ呼ばれる）
+static LispObject lisp_make_generic_function(LispObject name) {
+    LispClosure *closure = (LispClosure *)lisp_alloc_tracked(sizeof(LispClosure), LISP_TAG_CLOSURE);
+    closure->params = LISP_NIL;
+    closure->body = LISP_NIL;
+    closure->env = LISP_NIL;
+    closure->builtin = 0;
+    closure->is_macro = 0;
+    closure->str_data = 0;
+    closure->str_len = 0;
+    closure->is_float = 0;
+    closure->float_value = 0.0;
+    closure->big_digits = 0;
+    closure->big_len = 0;
+    closure->big_negative = 0;
+    closure->vec_data = 0;
+    closure->vec_len = 0;
+    closure->bytecode = 0;
+    closure->bytecode_len = 0;
+    closure->constants = 0;
+    closure->constants_len = 0;
+    closure->nargs = 0;
+    closure->max_locals = 0;
+    closure->upvalue_descs = LISP_NIL;
+    closure->upvalues = LISP_NIL;
+    closure->pkg_name = 0;
+    closure->pkg_symbols = LISP_NIL;
+    closure->pkg_exports = LISP_NIL;
+    closure->pkg_uses = LISP_NIL;
+    closure->pkg_is_keyword = 0;
+    closure->pkg_nicknames = LISP_NIL;
+    closure->pkg_shadowing_symbols = LISP_NIL;
+    closure->class_name = LISP_NIL;
+    closure->class_superclass = LISP_NIL;
+    closure->class_direct_slots = LISP_NIL;
+    closure->class_all_slots = LISP_NIL;
+    closure->inst_class = LISP_NIL;
+    closure->inst_slots = LISP_NIL;
+    closure->gf_name = name;
+    closure->gf_methods = LISP_NIL;
+    return ((LispObject)closure) | LISP_TAG_CLOSURE;
+}
+
+// clsからancestorまでclass_superclassを辿ったホップ数を返す（cls自身なら0、辿り着けなければ-1）
+static long long lisp_class_hops_to_ancestor(LispObject cls, LispObject ancestor) {
+    long long hops = 0;
+    for (LispObject cur = cls; cur != LISP_NIL; cur = lisp_closure_cell(cur)->class_superclass) {
+        if (cur == ancestor) {
+            return hops;
+        }
+        hops++;
+    }
+    return -1;
+}
+
+// specializers(specializer-listのconsリスト、各要素はclassオブジェクトまたは無指定のNIL)が
+// args(評価済みリスト)に適用可能か判定する。各位置について、specializerがNILなら常に適用可、
+// 非NILなら対応する実引数がinstanceであり、そのinst_classからspecializerまでのホップ数が
+// 求まる(>=0)ことが必要
+static int lisp_method_applicable(LispObject specializers, LispObject args) {
+    LispObject spec_cur = specializers;
+    LispObject arg_cur = args;
+    while (lisp_is_cons(spec_cur)) {
+        if (!lisp_is_cons(arg_cur)) {
+            return 0; // アリティ不足（%add-methodのチェックにより通常は起こらない）
+        }
+        LispObject spec = lisp_car(spec_cur);
+        LispObject arg = lisp_car(arg_cur);
+        if (spec != LISP_NIL) {
+            if (!lisp_is_instance(arg) || lisp_class_hops_to_ancestor(lisp_closure_cell(arg)->inst_class, spec) < 0) {
+                return 0;
+            }
+        }
+        spec_cur = lisp_cdr(spec_cur);
+        arg_cur = lisp_cdr(arg_cur);
+    }
+    return 1;
+}
+
+// specs_a/specs_bをargs(適用可能であること前提、ホップ数解決に使う)のもとで比較する。
+// 「無指定より指定ありが詳細」「指定ありどうしはホップ数が少ない方が詳細」を各位置で判定し、
+// 全位置を通して一方だけが勝っていた場合のみ非0を返す(部分順序としての比較)。+1ならspecs_aが
+// より詳細、-1ならspecs_bがより詳細、0なら比較不能（両方が異なる位置で勝った、または
+// どちらも勝たなかった）
+static int lisp_compare_method_specificity(LispObject specs_a, LispObject specs_b, LispObject args) {
+    int a_wins = 0;
+    int b_wins = 0;
+    LispObject cur_a = specs_a;
+    LispObject cur_b = specs_b;
+    LispObject cur_arg = args;
+    while (lisp_is_cons(cur_a)) {
+        LispObject spec_a = lisp_car(cur_a);
+        LispObject spec_b = lisp_car(cur_b);
+        if (spec_a == LISP_NIL && spec_b != LISP_NIL) {
+            b_wins = 1;
+        } else if (spec_a != LISP_NIL && spec_b == LISP_NIL) {
+            a_wins = 1;
+        } else if (spec_a != LISP_NIL && spec_b != LISP_NIL && spec_a != spec_b) {
+            LispObject arg_cls = lisp_closure_cell(lisp_car(cur_arg))->inst_class;
+            long long hops_a = lisp_class_hops_to_ancestor(arg_cls, spec_a);
+            long long hops_b = lisp_class_hops_to_ancestor(arg_cls, spec_b);
+            if (hops_a < hops_b) {
+                a_wins = 1;
+            } else if (hops_b < hops_a) {
+                b_wins = 1;
+            }
+        }
+        cur_a = lisp_cdr(cur_a);
+        cur_b = lisp_cdr(cur_b);
+        cur_arg = lisp_cdr(cur_arg);
+    }
+    if (a_wins && !b_wins) {
+        return 1;
+    }
+    if (b_wins && !a_wins) {
+        return -1;
+    }
+    return 0;
+}
+
+// gfのgf_methodsからargs(評価済みリスト)に適用可能かつ他のどのmethodにも劣後しなかった
+// method closureを選ぶ。適用可能なmethodが無ければ"no applicable method"、非劣後なものが
+// 2つ以上残れば"ambiguous method call"でpanicする（部分順序は非空有限集合なら必ず非劣後な
+// 要素を持つため、この判定は健全）
+static LispObject lisp_gf_select_method(LispObject gf, LispObject args) {
+    LispObject applicable = LISP_NIL;
+    for (LispObject cur = lisp_closure_cell(gf)->gf_methods; lisp_is_cons(cur); cur = lisp_cdr(cur)) {
+        LispObject entry = lisp_car(cur);
+        if (lisp_method_applicable(lisp_car(entry), args)) {
+            applicable = lisp_cons(entry, applicable);
+        }
+    }
+    if (applicable == LISP_NIL) {
+        lisp_panic(L"no applicable method");
+    }
+    LispObject survivors = LISP_NIL;
+    for (LispObject cur = applicable; lisp_is_cons(cur); cur = lisp_cdr(cur)) {
+        LispObject candidate = lisp_car(cur);
+        int dominated = 0;
+        for (LispObject other_cur = applicable; lisp_is_cons(other_cur); other_cur = lisp_cdr(other_cur)) {
+            LispObject other = lisp_car(other_cur);
+            if (other != candidate &&
+                lisp_compare_method_specificity(lisp_car(other), lisp_car(candidate), args) > 0) {
+                dominated = 1;
+                break;
+            }
+        }
+        if (!dominated) {
+            survivors = lisp_cons(candidate, survivors);
+        }
+    }
+    if (lisp_cdr(survivors) != LISP_NIL) {
+        lisp_panic(L"ambiguous method call");
+    }
+    return lisp_cdr(lisp_car(survivors));
+}
+
+// (%ensure-generic-function name): fboundpかつ既存のsymbol-functionがgeneric-functionで
+// あればそれを返す。無ければ新規作成してnameの関数セルへbindする（defunの同名再定義と同じ
+// 「shadowで上書き」規約）
+LispObject lisp_builtin_ensure_generic_function(LispObject args) {
+    LispObject name = lisp_car(args);
+    lisp_assert_symbol(name);
+    LispObject existing = lisp_symbol_cell(name)->fn;
+    if (existing != LISP_NIL && lisp_is_generic_function(existing)) {
+        return existing;
+    }
+    LispObject gf = lisp_make_generic_function(name);
+    lisp_symbol_cell(name)->fn = gf;
+    return gf;
+}
+
+// (%add-method name specializer-list method-closure): nameの関数セルがgeneric-function
+// であることを確認する。既存entryとspecializer-listが(要素ごとにeq)一致すれば置き換え、
+// 無ければ新規追加する。既存entryとアリティが異なれば"incongruent lambda list"でpanicする
+LispObject lisp_builtin_add_method(LispObject args) {
+    LispObject name = lisp_car(args);
+    lisp_assert_symbol(name);
+    LispObject specializers = lisp_car(lisp_cdr(args));
+    LispObject method_closure = lisp_car(lisp_cdr(lisp_cdr(args)));
+
+    LispObject gf = lisp_symbol_cell(name)->fn;
+    if (gf == LISP_NIL || !lisp_is_generic_function(gf)) {
+        lisp_panic(L"%add-method: expected a generic function");
+    }
+    LispClosure *gfc = lisp_closure_cell(gf);
+    UINTN new_arity = lisp_list_length(specializers);
+
+    // 既存method群は互いに同じアリティのはず(この不変条件自体をここで維持する)なので、
+    // 先頭entryのアリティとだけ比較すれば十分
+    if (lisp_is_cons(gfc->gf_methods) &&
+        lisp_list_length(lisp_car(lisp_car(gfc->gf_methods))) != new_arity) {
+        lisp_panic(L"%add-method: incongruent lambda list");
+    }
+
+    for (LispObject cur = gfc->gf_methods; lisp_is_cons(cur); cur = lisp_cdr(cur)) {
+        LispObject entry = lisp_car(cur);
+        LispObject a = lisp_car(entry);
+        LispObject b = specializers;
+        int same = 1;
+        while (lisp_is_cons(a) && lisp_is_cons(b)) {
+            if (lisp_car(a) != lisp_car(b)) {
+                same = 0;
+                break;
+            }
+            a = lisp_cdr(a);
+            b = lisp_cdr(b);
+        }
+        if (same) {
+            lisp_set_cdr(entry, method_closure);
+            return name;
+        }
+    }
+    gfc->gf_methods = lisp_cons(lisp_cons(specializers, method_closure), gfc->gf_methods);
+    return name;
 }
 
 // car/cdr/cons/eq/atom/+/-/load をグローバル環境に束縛して返す
@@ -5335,6 +5611,10 @@ void lisp_builtins_init(void) {
     LISP_REGISTER_BUILTIN("slot-value", lisp_builtin_slot_value);
     LISP_REGISTER_BUILTIN("set-slot-value", lisp_builtin_set_slot_value);
     LISP_REGISTER_BUILTIN("class-of", lisp_builtin_class_of);
+
+    // milestone97: defmethod・総称関数・多重ディスパッチ
+    LISP_REGISTER_BUILTIN("%ensure-generic-function", lisp_builtin_ensure_generic_function);
+    LISP_REGISTER_BUILTIN("%add-method", lisp_builtin_add_method);
 
     // *macroexpand-hook*をdefvarと同じ形（is_special=1 + 初期値）で直接セットアップする
     // (milestone 21)。動的変数はenvチェーンに束縛を積まないため、global_envへの
