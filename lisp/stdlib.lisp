@@ -235,6 +235,19 @@
 ; (find-package name)。:shadowを:useより先に処理することで、use-package実行時点で
 ; shadowingが既に有効になっている(use-packageの名前衝突チェックがshadowingを見て
 ; 例外扱いできる)
+; milestone96: 最小CLOSサブセット。superclassesは0または1個(2個以上は(car superclasses)に
+; より無条件に無視、多重継承はスコープ外)。slotsはbare symbolのリストのみ
+; (:initarg/:initform/:accessorは無し、全スロットnilで初期化される)。
+; この処理系のcar/cdrはnilを渡すとpanicする(CommonLispの(car nil)=>nilとは異なる)ため、
+; (car superclasses)を直接テストせずsuperclasses自体の真偽をまず見てからcarを取る。
+(defmacro defclass (name superclasses slots)
+  (list '%make-class
+        (list 'quote name)
+        (if superclasses
+            (list 'find-class (list 'quote (car superclasses)))
+            nil)
+        (list 'quote slots)))
+
 (defmacro defpackage (name &rest clauses)
   (let* ((nicknames (defpackage-clause-names clauses :nicknames))
          (shadow-forms (mapcar (lambda (n) (defpackage-shadow-form name n))

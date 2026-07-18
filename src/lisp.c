@@ -83,6 +83,12 @@ typedef struct LispClosure {
     int pkg_is_keyword;     // 真なら自己評価し印字時に":"を前置する特別なパッケージ
     LispObject pkg_nicknames; // milestone91: 別名文字列のconsリスト
     LispObject pkg_shadowing_symbols; // milestone92: shadow/shadowing-importで登録されたローカルシンボルのconsリスト（eq基準）
+    LispObject class_name;         // milestone96: NILならclassではない。非NILならクラス名symbol
+    LispObject class_superclass;   // 直接の親クラスオブジェクト（単一継承、無ければNIL）
+    LispObject class_direct_slots; // このクラス自身が直接宣言したスロット名symbolのリスト
+    LispObject class_all_slots;    // superclassのclass_all_slots ++ direct_slots（defclass時に計算・キャッシュ）
+    LispObject inst_class;         // milestone96: NILならinstanceではない。非NILなら生成元クラスオブジェクト
+    LispObject inst_slots;         // スロット値を保持する独立したvectorオブジェクト（inst自身のvec_dataとは別）
 } LispClosure;
 
 static inline LispObject lisp_make_fixnum(long long value) {
@@ -149,6 +155,15 @@ static inline int lisp_is_compiled(LispObject obj) {
 // パッケージも同じくLISP_TAG_CLOSUREを共有するescape hatch（milestone 68）
 static inline int lisp_is_package(LispObject obj) {
     return lisp_is_closure(obj) && lisp_closure_cell(obj)->pkg_name != 0;
+}
+
+// class/instanceも同じくLISP_TAG_CLOSUREを共有するescape hatch（milestone 96）
+static inline int lisp_is_class(LispObject obj) {
+    return lisp_is_closure(obj) && lisp_closure_cell(obj)->class_name != LISP_NIL;
+}
+
+static inline int lisp_is_instance(LispObject obj) {
+    return lisp_is_closure(obj) && lisp_closure_cell(obj)->inst_class != LISP_NIL;
 }
 
 static inline int lisp_is_number(LispObject obj) {
@@ -354,6 +369,12 @@ LispObject lisp_make_closure(LispObject params, LispObject body, LispObject env)
     closure->pkg_is_keyword = 0;
     closure->pkg_nicknames = LISP_NIL;
     closure->pkg_shadowing_symbols = LISP_NIL;
+    closure->class_name = LISP_NIL;
+    closure->class_superclass = LISP_NIL;
+    closure->class_direct_slots = LISP_NIL;
+    closure->class_all_slots = LISP_NIL;
+    closure->inst_class = LISP_NIL;
+    closure->inst_slots = LISP_NIL;
     return ((LispObject)closure) | LISP_TAG_CLOSURE;
 }
 
@@ -388,6 +409,12 @@ LispObject lisp_make_builtin(LispBuiltinFn fn) {
     closure->pkg_is_keyword = 0;
     closure->pkg_nicknames = LISP_NIL;
     closure->pkg_shadowing_symbols = LISP_NIL;
+    closure->class_name = LISP_NIL;
+    closure->class_superclass = LISP_NIL;
+    closure->class_direct_slots = LISP_NIL;
+    closure->class_all_slots = LISP_NIL;
+    closure->inst_class = LISP_NIL;
+    closure->inst_slots = LISP_NIL;
     return ((LispObject)closure) | LISP_TAG_CLOSURE;
 }
 
@@ -424,6 +451,12 @@ LispObject lisp_make_macro(LispObject params, LispObject body, LispObject env) {
     closure->pkg_is_keyword = 0;
     closure->pkg_nicknames = LISP_NIL;
     closure->pkg_shadowing_symbols = LISP_NIL;
+    closure->class_name = LISP_NIL;
+    closure->class_superclass = LISP_NIL;
+    closure->class_direct_slots = LISP_NIL;
+    closure->class_all_slots = LISP_NIL;
+    closure->inst_class = LISP_NIL;
+    closure->inst_slots = LISP_NIL;
     return ((LispObject)closure) | LISP_TAG_CLOSURE;
 }
 
@@ -467,6 +500,12 @@ LispObject lisp_make_string(const char *chars, UINTN len) {
     closure->pkg_is_keyword = 0;
     closure->pkg_nicknames = LISP_NIL;
     closure->pkg_shadowing_symbols = LISP_NIL;
+    closure->class_name = LISP_NIL;
+    closure->class_superclass = LISP_NIL;
+    closure->class_direct_slots = LISP_NIL;
+    closure->class_all_slots = LISP_NIL;
+    closure->inst_class = LISP_NIL;
+    closure->inst_slots = LISP_NIL;
     return ((LispObject)closure) | LISP_TAG_CLOSURE;
 }
 
@@ -504,6 +543,12 @@ LispObject lisp_make_float(double value) {
     closure->pkg_is_keyword = 0;
     closure->pkg_nicknames = LISP_NIL;
     closure->pkg_shadowing_symbols = LISP_NIL;
+    closure->class_name = LISP_NIL;
+    closure->class_superclass = LISP_NIL;
+    closure->class_direct_slots = LISP_NIL;
+    closure->class_all_slots = LISP_NIL;
+    closure->inst_class = LISP_NIL;
+    closure->inst_slots = LISP_NIL;
     return ((LispObject)closure) | LISP_TAG_CLOSURE;
 }
 
@@ -546,6 +591,12 @@ LispObject lisp_make_bignum(const UINT32 *digits, UINTN len, int negative) {
     closure->pkg_is_keyword = 0;
     closure->pkg_nicknames = LISP_NIL;
     closure->pkg_shadowing_symbols = LISP_NIL;
+    closure->class_name = LISP_NIL;
+    closure->class_superclass = LISP_NIL;
+    closure->class_direct_slots = LISP_NIL;
+    closure->class_all_slots = LISP_NIL;
+    closure->inst_class = LISP_NIL;
+    closure->inst_slots = LISP_NIL;
     return ((LispObject)closure) | LISP_TAG_CLOSURE;
 }
 
@@ -589,6 +640,12 @@ LispObject lisp_make_vector(UINTN len, LispObject fill) {
     closure->pkg_is_keyword = 0;
     closure->pkg_nicknames = LISP_NIL;
     closure->pkg_shadowing_symbols = LISP_NIL;
+    closure->class_name = LISP_NIL;
+    closure->class_superclass = LISP_NIL;
+    closure->class_direct_slots = LISP_NIL;
+    closure->class_all_slots = LISP_NIL;
+    closure->inst_class = LISP_NIL;
+    closure->inst_slots = LISP_NIL;
     return ((LispObject)closure) | LISP_TAG_CLOSURE;
 }
 
@@ -638,6 +695,12 @@ LispObject lisp_make_compiled(const unsigned char *bytecode, UINTN bytecode_len,
     closure->pkg_is_keyword = 0;
     closure->pkg_nicknames = LISP_NIL;
     closure->pkg_shadowing_symbols = LISP_NIL;
+    closure->class_name = LISP_NIL;
+    closure->class_superclass = LISP_NIL;
+    closure->class_direct_slots = LISP_NIL;
+    closure->class_all_slots = LISP_NIL;
+    closure->inst_class = LISP_NIL;
+    closure->inst_slots = LISP_NIL;
     return ((LispObject)closure) | LISP_TAG_CLOSURE;
 }
 
@@ -921,6 +984,12 @@ static LispObject lisp_make_package_object(const char *name, int is_keyword_pack
     closure->pkg_is_keyword = is_keyword_package;
     closure->pkg_nicknames = LISP_NIL;
     closure->pkg_shadowing_symbols = LISP_NIL;
+    closure->class_name = LISP_NIL;
+    closure->class_superclass = LISP_NIL;
+    closure->class_direct_slots = LISP_NIL;
+    closure->class_all_slots = LISP_NIL;
+    closure->inst_class = LISP_NIL;
+    closure->inst_slots = LISP_NIL;
     return ((LispObject)closure) | LISP_TAG_CLOSURE;
 }
 
@@ -930,6 +999,9 @@ static LispObject lisp_make_package_object(const char *name, int is_keyword_pack
 static LispObject global_packages = LISP_NIL;
 static LispObject lisp_cl_user_package;
 static LispObject lisp_keyword_package;
+// milestone96: 最小CLOSサブセットのクラスレジストリ。global_packagesと同型のfile-scope
+// consリスト(symbolのeq線形探索)。lisp_gc_mark_rootsより前方で参照されるためここで宣言する
+static LispObject global_classes = LISP_NIL;
 // milestone 73: 現在のパッケージを指す動的変数*package*のシンボル。lisp_internが読む
 // ため、lisp_packages_init内でlisp_intern自身より先にlisp_intern_in_packageで直接
 // internし、is_special/valueをdefvarと同じ形で直接セットアップする（*macroexpand-hook*と
@@ -1446,6 +1518,22 @@ void lisp_print(LispOutputStream *stream, LispObject obj) {
 
     if (lisp_is_vector(obj)) {
         lisp_print_vector(stream, lisp_closure_cell(obj));
+        return;
+    }
+
+    // milestone96: 既存はpackage種別すら専用分岐が無く#<closure>へ落ちていたが、
+    // class/instanceはその抜けを繰り返さず専用に印字する
+    if (lisp_is_class(obj)) {
+        lisp_print_ascii(stream, "#<STANDARD-CLASS ");
+        lisp_print_ascii(stream, lisp_symbol_cell(lisp_closure_cell(obj)->class_name)->name);
+        lisp_print_ascii(stream, ">");
+        return;
+    }
+
+    if (lisp_is_instance(obj)) {
+        lisp_print_ascii(stream, "#<");
+        lisp_print_ascii(stream, lisp_symbol_cell(lisp_closure_cell(lisp_closure_cell(obj)->inst_class)->class_name)->name);
+        lisp_print_ascii(stream, " instance>");
         return;
     }
 
@@ -2087,6 +2175,12 @@ static LispObject lisp_vm_run(LispClosure *cl, UINTN fp) {
                 instance->pkg_is_keyword = 0;
                 instance->pkg_nicknames = LISP_NIL;
                 instance->pkg_shadowing_symbols = LISP_NIL;
+                instance->class_name = LISP_NIL;
+                instance->class_superclass = LISP_NIL;
+                instance->class_direct_slots = LISP_NIL;
+                instance->class_all_slots = LISP_NIL;
+                instance->inst_class = LISP_NIL;
+                instance->inst_slots = LISP_NIL;
                 lisp_vm_push(((LispObject)instance) | LISP_TAG_CLOSURE);
                 break;
             }
@@ -2279,6 +2373,20 @@ static void lisp_gc_mark(LispObject obj) {
             lisp_gc_mark(cl->pkg_nicknames);
             lisp_gc_mark(cl->pkg_shadowing_symbols);
         }
+        // milestone96: class（class_name != NILのescape hatch）のsuperclass/スロット名リストも
+        // clに属する生フィールドなので、closure分岐に組み込んでlisp_gc_mark_roots側の個別ループを
+        // 不要にする（global_classes自体をmarkするだけで各クラスオブジェクトへ到達する）
+        if (cl->class_name != LISP_NIL) {
+            lisp_gc_mark(cl->class_superclass);
+            lisp_gc_mark(cl->class_direct_slots);
+            lisp_gc_mark(cl->class_all_slots);
+        }
+        // milestone96: instance（inst_class != NILのescape hatch）のinst_slotsは独立した
+        // vectorオブジェクトなので、markするだけで既存のvec_dataマーキングへ自動的に再帰する
+        if (cl->inst_class != LISP_NIL) {
+            lisp_gc_mark(cl->inst_class);
+            lisp_gc_mark(cl->inst_slots);
+        }
         obj = cl->env;
     }
 }
@@ -2297,6 +2405,7 @@ static void lisp_gc_mark(LispObject obj) {
 static void lisp_gc_mark_roots(void) {
     lisp_gc_mark(global_env);
     lisp_gc_mark(global_packages);
+    lisp_gc_mark(global_classes); // milestone96: 各クラスオブジェクトとそのsuperclass/スロット名リストを辿るroot
     lisp_gc_mark(lisp_return_tag);
     lisp_gc_mark(lisp_return_value);
     lisp_gc_mark(lisp_gc_extra_root);
@@ -4948,6 +5057,207 @@ LispObject lisp_builtin_sleep(LispObject args) {
     return LISP_NIL;
 }
 
+// --- 最小CLOSサブセット: class/instance/単一継承、ディスパッチ無し (milestone 96) ---
+// global_classesはlisp_gc_mark_rootsより前方(global_packagesの隣)で宣言済み
+
+// symbolのeq線形探索でクラスを探す。見つからなければNILを返す（内部ヘルパー自体は
+// find-packageと同じnil-on-miss方針。panicはlisp_builtin_find_class側の責務にする）
+static LispObject lisp_find_class(LispObject name) {
+    for (LispObject cur = global_classes; cur != LISP_NIL; cur = lisp_cdr(cur)) {
+        LispObject cls = lisp_car(cur);
+        if (lisp_closure_cell(cls)->class_name == name) {
+            return cls;
+        }
+    }
+    return LISP_NIL;
+}
+
+// consリストの長さを返す（既存には無かった汎用ヘルパー。inst_slotsの確保に使う）
+static UINTN lisp_list_length(LispObject list) {
+    UINTN len = 0;
+    while (lisp_is_cons(list)) {
+        len++;
+        list = lisp_cdr(list);
+    }
+    return len;
+}
+
+static inline void lisp_assert_instance(LispObject obj) {
+    if (!lisp_is_instance(obj)) {
+        lisp_panic(L"expected a CLOS instance but got something else");
+    }
+}
+
+// (name superclass-or-nil direct-slots-list)からクラスを作る。名前がglobal_classesに
+// 既に存在すれば同一オブジェクトのフィールドを書き換えて返す（defvarの再load冪等性と同じ
+// 考え方で、eq同一性を保つ）。無ければ新規に確保してglobal_classesへconsする
+static LispObject lisp_make_class(LispObject name, LispObject superclass, LispObject direct_slots) {
+    LispObject all_slots = superclass == LISP_NIL
+        ? direct_slots
+        : lisp_append(lisp_closure_cell(superclass)->class_all_slots, direct_slots);
+    LispObject existing = lisp_find_class(name);
+    if (existing != LISP_NIL) {
+        LispClosure *cell = lisp_closure_cell(existing);
+        cell->class_superclass = superclass;
+        cell->class_direct_slots = direct_slots;
+        cell->class_all_slots = all_slots;
+        return existing;
+    }
+    LispClosure *closure = (LispClosure *)lisp_alloc_tracked(sizeof(LispClosure), LISP_TAG_CLOSURE);
+    closure->params = LISP_NIL;
+    closure->body = LISP_NIL;
+    closure->env = LISP_NIL;
+    closure->builtin = 0;
+    closure->is_macro = 0;
+    closure->str_data = 0;
+    closure->str_len = 0;
+    closure->is_float = 0;
+    closure->float_value = 0.0;
+    closure->big_digits = 0;
+    closure->big_len = 0;
+    closure->big_negative = 0;
+    closure->vec_data = 0;
+    closure->vec_len = 0;
+    closure->bytecode = 0;
+    closure->bytecode_len = 0;
+    closure->constants = 0;
+    closure->constants_len = 0;
+    closure->nargs = 0;
+    closure->max_locals = 0;
+    closure->upvalue_descs = LISP_NIL;
+    closure->upvalues = LISP_NIL;
+    closure->pkg_name = 0;
+    closure->pkg_symbols = LISP_NIL;
+    closure->pkg_exports = LISP_NIL;
+    closure->pkg_uses = LISP_NIL;
+    closure->pkg_is_keyword = 0;
+    closure->pkg_nicknames = LISP_NIL;
+    closure->pkg_shadowing_symbols = LISP_NIL;
+    closure->class_name = name;
+    closure->class_superclass = superclass;
+    closure->class_direct_slots = direct_slots;
+    closure->class_all_slots = all_slots;
+    closure->inst_class = LISP_NIL;
+    closure->inst_slots = LISP_NIL;
+    LispObject cls = ((LispObject)closure) | LISP_TAG_CLOSURE;
+    global_classes = lisp_cons(cls, global_classes);
+    return cls;
+}
+
+// clsのinstanceを1つ確保する。全スロットはnilで初期化する（:initarg/:initformは非対応）
+static LispObject lisp_make_instance(LispObject cls) {
+    LispClosure *closure = (LispClosure *)lisp_alloc_tracked(sizeof(LispClosure), LISP_TAG_CLOSURE);
+    closure->params = LISP_NIL;
+    closure->body = LISP_NIL;
+    closure->env = LISP_NIL;
+    closure->builtin = 0;
+    closure->is_macro = 0;
+    closure->str_data = 0;
+    closure->str_len = 0;
+    closure->is_float = 0;
+    closure->float_value = 0.0;
+    closure->big_digits = 0;
+    closure->big_len = 0;
+    closure->big_negative = 0;
+    closure->vec_data = 0;
+    closure->vec_len = 0;
+    closure->bytecode = 0;
+    closure->bytecode_len = 0;
+    closure->constants = 0;
+    closure->constants_len = 0;
+    closure->nargs = 0;
+    closure->max_locals = 0;
+    closure->upvalue_descs = LISP_NIL;
+    closure->upvalues = LISP_NIL;
+    closure->pkg_name = 0;
+    closure->pkg_symbols = LISP_NIL;
+    closure->pkg_exports = LISP_NIL;
+    closure->pkg_uses = LISP_NIL;
+    closure->pkg_is_keyword = 0;
+    closure->pkg_nicknames = LISP_NIL;
+    closure->pkg_shadowing_symbols = LISP_NIL;
+    closure->class_name = LISP_NIL;
+    closure->class_superclass = LISP_NIL;
+    closure->class_direct_slots = LISP_NIL;
+    closure->class_all_slots = LISP_NIL;
+    closure->inst_class = cls;
+    closure->inst_slots = lisp_make_vector(lisp_list_length(lisp_closure_cell(cls)->class_all_slots), LISP_NIL);
+    return ((LispObject)closure) | LISP_TAG_CLOSURE;
+}
+
+// slot-value/set-slot-valueが共有するインデックス探索。class_all_slots内でslot_nameとeqな
+// 最初の位置を返す（親のスロット名をサブクラスが再宣言した場合の重複は未定義動作として
+// スコープ外、先頭=親側のoccurrenceが見つかる）。見つからなければpanicする
+static UINTN lisp_instance_slot_index(LispObject instance, LispObject slot_name) {
+    LispObject slots = lisp_closure_cell(lisp_closure_cell(instance)->inst_class)->class_all_slots;
+    UINTN index = 0;
+    for (LispObject cur = slots; lisp_is_cons(cur); cur = lisp_cdr(cur), index++) {
+        if (lisp_car(cur) == slot_name) {
+            return index;
+        }
+    }
+    lisp_panic(L"slot-value: no such slot");
+    return 0; // 到達しない（lisp_panicはlongjmpする）。コンパイラの戻り値警告を避けるためのみ
+}
+
+// (%make-class name superclass-or-nil direct-slots-list)
+LispObject lisp_builtin_make_class(LispObject args) {
+    LispObject name = lisp_car(args);
+    lisp_assert_symbol(name);
+    LispObject superclass = lisp_car(lisp_cdr(args));
+    LispObject direct_slots = lisp_car(lisp_cdr(lisp_cdr(args)));
+    return lisp_make_class(name, superclass, direct_slots);
+}
+
+// (find-class name): 見つからなければpanicする（find-packageのnil-on-miss方針とは意図的に
+// 異なる。specializer解決でnilと「無指定」を区別できなくなるためfail-fastにする）
+LispObject lisp_builtin_find_class(LispObject args) {
+    LispObject name = lisp_car(args);
+    lisp_assert_symbol(name);
+    LispObject cls = lisp_find_class(name);
+    if (cls == LISP_NIL) {
+        lisp_panic(L"find-class: no such class");
+    }
+    return cls;
+}
+
+// (make-instance class-or-name): symbolならまずfind-classで解決する
+LispObject lisp_builtin_make_instance(LispObject args) {
+    LispObject designator = lisp_car(args);
+    LispObject cls = lisp_is_symbol(designator) ? lisp_builtin_find_class(args) : designator;
+    if (!lisp_is_class(cls)) {
+        lisp_panic(L"make-instance: expected a class");
+    }
+    return lisp_make_instance(cls);
+}
+
+// (slot-value instance slot-name)
+LispObject lisp_builtin_slot_value(LispObject args) {
+    LispObject instance = lisp_car(args);
+    lisp_assert_instance(instance);
+    LispObject slot_name = lisp_car(lisp_cdr(args));
+    UINTN index = lisp_instance_slot_index(instance, slot_name);
+    return lisp_closure_cell(lisp_closure_cell(instance)->inst_slots)->vec_data[index];
+}
+
+// (set-slot-value instance slot-name value): valueを返す（svsetと同じ規約、setfは存在しない）
+LispObject lisp_builtin_set_slot_value(LispObject args) {
+    LispObject instance = lisp_car(args);
+    lisp_assert_instance(instance);
+    LispObject slot_name = lisp_car(lisp_cdr(args));
+    LispObject value = lisp_car(lisp_cdr(lisp_cdr(args)));
+    UINTN index = lisp_instance_slot_index(instance, slot_name);
+    lisp_closure_cell(lisp_closure_cell(instance)->inst_slots)->vec_data[index] = value;
+    return value;
+}
+
+// (class-of obj): lisp_is_instance必須（ビルトイン型のクラス階層は無いためそれ以外はpanic）
+LispObject lisp_builtin_class_of(LispObject args) {
+    LispObject obj = lisp_car(args);
+    lisp_assert_instance(obj);
+    return lisp_closure_cell(obj)->inst_class;
+}
+
 // car/cdr/cons/eq/atom/+/-/load をグローバル環境に束縛して返す
 // milestone94: 組み込み関数の登録先をglobal_env(alist)から各symbolの関数セル(fn)への
 // 直接書き込みへ変更した。戻り値のenvは不要になったためvoidにした(呼び出し元main.cの
@@ -5017,6 +5327,14 @@ void lisp_builtins_init(void) {
     LISP_REGISTER_BUILTIN("%set-symbol-function", lisp_builtin_set_symbol_function);
     LISP_REGISTER_BUILTIN("fboundp", lisp_builtin_fboundp);
     LISP_REGISTER_BUILTIN("symbol-value", lisp_builtin_symbol_value);
+
+    // milestone96: 最小CLOSサブセット(class/instance/単一継承、ディスパッチ無し)
+    LISP_REGISTER_BUILTIN("%make-class", lisp_builtin_make_class);
+    LISP_REGISTER_BUILTIN("find-class", lisp_builtin_find_class);
+    LISP_REGISTER_BUILTIN("make-instance", lisp_builtin_make_instance);
+    LISP_REGISTER_BUILTIN("slot-value", lisp_builtin_slot_value);
+    LISP_REGISTER_BUILTIN("set-slot-value", lisp_builtin_set_slot_value);
+    LISP_REGISTER_BUILTIN("class-of", lisp_builtin_class_of);
 
     // *macroexpand-hook*をdefvarと同じ形（is_special=1 + 初期値）で直接セットアップする
     // (milestone 21)。動的変数はenvチェーンに束縛を積まないため、global_envへの
