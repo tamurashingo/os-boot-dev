@@ -575,6 +575,9 @@ static EFI_STATUS EFIAPI EfiMainImpl(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *S
             lisp_reader_special_form_export_selftest_run(SystemTable); // milestone 100: 特殊形式export自己テスト
             lisp_reader_builtin_export_selftest_run(SystemTable); // milestone 101: ビルトインexport自己テスト
 
+            lisp_load_boot_file("os-package.lisp"); // milestone 102: osパッケージ作成(別ファイルに分離、下記コメント参照)
+            lisp_load_boot_file("os.lisp"); // milestone 102: processクラス・os:*all-processes*・os:get-all-processes
+
             lisp_load_init_file(); // milestone 47: EFI/BOOT/init.lispがあれば読み込む(無ければ何もしない)
 
             SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\nMinimal Lisp REPL. Type an expression and press Enter.\r\n");
