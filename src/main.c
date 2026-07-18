@@ -536,7 +536,7 @@ static EFI_STATUS EFIAPI EfiMainImpl(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *S
 
             lisp_packages_init();
             lisp_symbols_init();
-            global_env = lisp_builtins_init();
+            lisp_builtins_init();
             lisp_load_boot_file("compiler.lisp"); // milestone 65: コンパイラ本体を先に読み込む(フラグfalseのままツリーウォークで評価され、末尾のmark-compiler-readyでtrueへ切り替わる)
             lisp_load_boot_file("stdlib.lisp"); // milestone 29/65: 標準ライブラリを読み込む(この時点でフラグがtrueになっているため、新しいコンパイル駆動の経路で読み込まれる)
             lisp_setjmp_selftest(SystemTable); // milestone 30: setjmp/longjmp自己テスト

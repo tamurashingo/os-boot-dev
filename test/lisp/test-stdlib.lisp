@@ -26,8 +26,9 @@
   (eq (nth 1 (list 'a 'b 'c)) 'b))
 
 (defun run-test-stdlib-mapcar ()
-  ; fnがローカル変数（仮引数）のまま(fn ...)として呼び出せることの確認
-  ; （milestone29で新しいfuncallプリミティブを追加せずに済んだ根拠）
+  ; lambda式リテラルを直接渡すケース。mapcar内部は(milestone94のLisp-2化により)
+  ; ローカル変数fnをfuncall経由で呼ぶ実装になっている(compile-call自体は無関係、
+  ; mapcarはインタプリタクロージャなのでlisp_evalの通常の呼び出し経路を通る)
   (equal-ints (mapcar (lambda (x) (+ x 1)) (list 1 2 3)) (list 2 3 4)))
 
 (defun run-test-stdlib-comparisons ()

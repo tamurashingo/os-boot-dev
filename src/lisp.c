@@ -1826,11 +1826,11 @@ static int lisp_reader_at_end(void) {
 
 // --- 評価器 (milestone 9) ---
 
-// トップレベルの永続グローバル環境 (milestone 12)。EfiMainのREPLループが起動時に
-// lisp_builtins_init()の結果で初期化する。ファイルスコープのグローバル変数にすることで、
-// defun/loadなど今後の特殊形式がここを直接書き換えて新しい束縛を追加すれば、その後の
-// すべてのREPL入力から見えるようになる（引数↔値のバインディング自体は
-// マイルストーン9のlisp_env_bind_paramsのままで変更しない）
+// トップレベルの永続グローバル環境 (milestone 12)。milestone94のLisp-2化により、
+// defun/defmacro/組み込み関数の登録先はここではなく各symbolの関数セル(fn、milestone93)へ
+// 変更されたため、global_envは以後「関数namespaceとは独立したグローバル変数」専用の
+// 値namespace用alistとして残る（引数↔値のバインディング自体はマイルストーン9の
+// lisp_env_bind_paramsのままで変更しない）
 LispObject global_env = LISP_NIL;
 
 // lisp_vm_run(milestone 51のOP_GLOBAL_REF/OP_GLOBAL_SET、milestone 52のOP_CALLフォールバック)が
@@ -2140,6 +2140,17 @@ static LispObject lisp_vm_run(LispClosure *cl, UINTN fp) {
                 LispObject sym = cl->constants[idx];
                 LispObject value = lisp_vm_pop();
                 lisp_env_set(global_env, sym, value);
+                break;
+            }
+            case OP_GLOBAL_FUNCTION_REF: {
+                unsigned int idx = pc[0] | (pc[1] << 8);
+                pc += 2;
+                LispObject sym = cl->constants[idx];
+                LispObject fn = lisp_symbol_cell(sym)->fn;
+                if (fn == LISP_NIL) {
+                    lisp_panic(L"unbound function");
+                }
+                lisp_vm_push(fn);
                 break;
             }
             case OP_RETURN: {
@@ -2741,26 +2752,17 @@ LispObject lisp_apply(LispObject fn, LispObject args) {
     return lisp_eval(closure->body, call_env);
 }
 
-// symがglobal_envにマクロクロージャとして束縛されていればそれを返し、無ければpanicせず
-// LISP_NILを返す（design docの確定方針「マクロは恒久的にグローバルのまま」により、
-// マクロ判定はglobal_envだけを見れば十分）。lisp_env_lookupと違い見つからなくてもpanicしない
-// のは、macroexpand-1/macroexpand-all(milestone 40, lisp/stdlib.lisp)がS式を静的に
-// 全走査する際、関数呼び出し位置のsymbolが再帰関数呼び出し等のローカル変数（global_envには
-// 存在しない）であるケースを日常的に踏むため。lisp_evalの完全なevalで代用すると、
-// そのようなローカル変数はunbound variableとしてpanicしてしまう（milestone 50で発見）
+// symがマクロクロージャとして関数セル(fn、milestone93)に束縛されていればそれを返し、
+// 無ければpanicせずLISP_NILを返す（milestone94でdefmacroの書き込み先がglobal_envから
+// fnへ移った後も、この「未束縛ならpanicしない」契約自体は変わらない。fnは未束縛時に
+// LISP_NILがそのまま入っているため、そのまま返せば従来と同じ挙動になる）。
+// panicしない理由は、macroexpand-1/macroexpand-all(milestone 40, lisp/stdlib.lisp)がS式を
+// 静的に全走査する際、関数呼び出し位置のsymbolが再帰関数呼び出し等のローカル変数
+// （関数セルには存在しない）であるケースを日常的に踏むため。lisp_evalの完全なevalで
+// 代用すると、そのようなローカル変数はunbound functionとしてpanicしてしまう
+// （global_envだった頃のmilestone 50の発見と同根）
 static LispObject lisp_lookup_global_macro_candidate(LispObject sym) {
-    if (lisp_symbol_cell(sym)->is_special) {
-        return lisp_symbol_cell(sym)->value;
-    }
-    LispObject cur = global_env;
-    while (lisp_is_cons(cur)) {
-        LispObject pair = lisp_car(cur);
-        if (lisp_car(pair) == sym) {
-            return lisp_cdr(pair);
-        }
-        cur = lisp_cdr(cur);
-    }
-    return LISP_NIL;
+    return lisp_symbol_cell(sym)->fn;
 }
 
 // (macroexpand-1 form): マクロ呼び出しの外側の呼び出し1回分だけを展開する (milestone 21)。
@@ -3255,9 +3257,9 @@ LispObject lisp_eval(LispObject expr, LispObject env) {
             LispObject params = lisp_car(lisp_cdr(lisp_cdr(expr)));
             LispObject body = lisp_car(lisp_cdr(lisp_cdr(lisp_cdr(expr))));
             LispObject closure = lisp_make_closure(params, body, env);
-            // 同名の再定義でも既存の束縛を消さず先頭に追加するだけでよい。
-            // lisp_env_lookupは先頭から線形探索するため新しい束縛が優先される
-            global_env = lisp_env_extend(global_env, name, closure);
+            // milestone94: 書き込み先はglobal_envではなく関数セル(fn)。同名の再定義は
+            // 単純にfnを上書きするだけでよい（alistではないため先頭追加という概念も無い）
+            lisp_symbol_cell(name)->fn = closure;
             return name;
         }
 
@@ -3267,13 +3269,24 @@ LispObject lisp_eval(LispObject expr, LispObject env) {
             LispObject params = lisp_car(lisp_cdr(lisp_cdr(expr)));
             LispObject body = lisp_car(lisp_cdr(lisp_cdr(lisp_cdr(expr))));
             LispObject macro = lisp_make_macro(params, body, env);
-            global_env = lisp_env_extend(global_env, name, macro);
+            lisp_symbol_cell(name)->fn = macro;
             return name;
         }
 
-        LispObject fn = lisp_eval(op, env);
-        if (lisp_return_tag != LISP_NIL) {
-            return fn; // milestone 19: 呼び出す関数式自体の評価中に脱出した
+        // milestone94: 呼び出し位置のbare symbolはレキシカルenv/global_envを一切見ず
+        // 関数セル(fn)のみを見る（この処理系にflet/labels相当が無いため、関数の局所束縛
+        // という概念自体が無い）。非symbol(lambda式リテラル等)は従来通りlisp_evalに委ねる
+        LispObject fn;
+        if (lisp_is_symbol(op)) {
+            fn = lisp_symbol_cell(op)->fn;
+            if (fn == LISP_NIL) {
+                lisp_panic(L"unbound function");
+            }
+        } else {
+            fn = lisp_eval(op, env);
+            if (lisp_return_tag != LISP_NIL) {
+                return fn; // milestone 19: 呼び出す関数式自体の評価中に脱出した
+            }
         }
 
         // マクロ呼び出しは引数を評価せず、未評価の式のまま仮引数に束縛して
@@ -3329,18 +3342,18 @@ LispObject lisp_builtin_compiler_ready_p(LispObject args) {
 
 // milestone 60: defunをcompile-expr経由でコンパイルした結果（コンパイル済みクロージャ）を、
 // ツリーウォークのdefun特殊形式（本ファイル上部のop == lisp_sym_defun分岐）と全く同じ
-// lisp_env_extendでglobal_envへ束縛する。symを返す（defun特殊形式の戻り値と一致させる）
+// 関数セル(fn)へ書き込む（milestone94で書き込み先をglobal_envからfnへ変更）。symを返す
+// （defun特殊形式の戻り値と一致させる）
 LispObject lisp_builtin_establish_global_function(LispObject args) {
     LispObject sym = lisp_car(args);
     lisp_assert_symbol(sym);
     LispObject closure = lisp_car(lisp_cdr(args));
-    global_env = lisp_env_extend(global_env, sym, closure);
+    lisp_symbol_cell(sym)->fn = closure;
     return sym;
 }
 
-// milestone 93: 関数セル(LispSymbol.fn)を読み書きする最小API。defunの書き込み先切替
-// (milestone94)より先に整備する土台であり、この時点ではdefun/組み込み関数のどちらも
-// fnへ書き込まないため、動作確認には%set-symbol-functionで明示的に設定する必要がある
+// milestone 93: 関数セル(LispSymbol.fn)を読み書きする最小API。milestone94でdefun/
+// defmacro/組み込み関数すべての書き込み先がここへ切り替わった
 
 // (symbol-function sym): fnを返す。未束縛(LISP_NIL)ならpanicする
 LispObject lisp_builtin_symbol_function(LispObject args) {
@@ -3435,7 +3448,7 @@ LispObject lisp_eval_toplevel(LispObject expr) {
     LispObject result;
     int defun_needs_interpreter = (op == lisp_sym_defun) && lisp_defun_params_needs_interpreter(expr);
     if (lisp_compiler_ready && op != lisp_sym_defmacro && !defun_needs_interpreter) {
-        LispObject compile_and_run = lisp_env_lookup(global_env, lisp_sym_compile_and_run);
+        LispObject compile_and_run = lisp_symbol_cell(lisp_sym_compile_and_run)->fn;
         result = lisp_apply(compile_and_run, lisp_cons(expr, LISP_NIL));
     } else {
         result = lisp_eval(expr, global_env);
@@ -4246,12 +4259,13 @@ int lisp_bootstrap_package_context_selftest(void) {
 
     // compiler.lisp/stdlib.lispロード後にdefunで定義された関数（list）のシンボルも
     // common-lisp-userへ帰属し、無修飾で再internすると同一オブジェクト(eq)を返すこと。
-    // global_envで実際に束縛されている（unbound variableでpanicしない）ことも確認する
+    // 関数セル(fn、milestone93/94)で実際に束縛されている（unbound functionでpanicしない）
+    // ことも確認する
     LispObject list_sym = lisp_intern("list");
     if (lisp_symbol_cell(list_sym)->package != lisp_cl_user_package) {
         return 0;
     }
-    if (!lisp_is_closure(lisp_env_lookup(global_env, list_sym))) {
+    if (!lisp_is_closure(lisp_symbol_cell(list_sym)->fn)) {
         return 0;
     }
 
@@ -4935,80 +4949,84 @@ LispObject lisp_builtin_sleep(LispObject args) {
 }
 
 // car/cdr/cons/eq/atom/+/-/load をグローバル環境に束縛して返す
-LispObject lisp_builtins_init(void) {
-    LispObject env = LISP_NIL;
-    env = lisp_env_extend(env, lisp_intern("car"), lisp_make_builtin(lisp_builtin_car));
-    env = lisp_env_extend(env, lisp_intern("cdr"), lisp_make_builtin(lisp_builtin_cdr));
-    env = lisp_env_extend(env, lisp_intern("cons"), lisp_make_builtin(lisp_builtin_cons));
-    env = lisp_env_extend(env, lisp_intern("funcall"), lisp_make_builtin(lisp_builtin_funcall));
-    env = lisp_env_extend(env, lisp_intern("apply"), lisp_make_builtin(lisp_builtin_apply));
-    env = lisp_env_extend(env, lisp_intern("eq"), lisp_make_builtin(lisp_builtin_eq));
-    env = lisp_env_extend(env, lisp_intern("atom"), lisp_make_builtin(lisp_builtin_atom));
-    env = lisp_env_extend(env, lisp_intern("symbolp"), lisp_make_builtin(lisp_builtin_symbolp));
-    env = lisp_env_extend(env, lisp_intern("keywordp"), lisp_make_builtin(lisp_builtin_keywordp));
-    env = lisp_env_extend(env, lisp_intern("make-package"), lisp_make_builtin(lisp_builtin_make_package));
-    env = lisp_env_extend(env, lisp_intern("find-package"), lisp_make_builtin(lisp_builtin_find_package));
-    env = lisp_env_extend(env, lisp_intern("export"), lisp_make_builtin(lisp_builtin_export));
-    env = lisp_env_extend(env, lisp_intern("use-package"), lisp_make_builtin(lisp_builtin_use_package));
-    env = lisp_env_extend(env, lisp_intern("intern"), lisp_make_builtin(lisp_builtin_intern));
-    env = lisp_env_extend(env, lisp_intern("in-package"), lisp_make_builtin(lisp_builtin_in_package));
-    env = lisp_env_extend(env, lisp_intern("package-name"), lisp_make_builtin(lisp_builtin_package_name));
-    env = lisp_env_extend(env, lisp_intern("package-nicknames"), lisp_make_builtin(lisp_builtin_package_nicknames));
-    env = lisp_env_extend(env, lisp_intern("package-use-list"), lisp_make_builtin(lisp_builtin_package_use_list));
-    env = lisp_env_extend(env, lisp_intern("list-all-packages"), lisp_make_builtin(lisp_builtin_list_all_packages));
-    env = lisp_env_extend(env, lisp_intern("%package-symbols"), lisp_make_builtin(lisp_builtin_package_symbols));
-    env = lisp_env_extend(env, lisp_intern("%package-exported-symbols"),
-                          lisp_make_builtin(lisp_builtin_package_exported_symbols));
-    env = lisp_env_extend(env, lisp_intern("find-symbol"), lisp_make_builtin(lisp_builtin_find_symbol));
-    env = lisp_env_extend(env, lisp_intern("find-all-symbols"), lisp_make_builtin(lisp_builtin_find_all_symbols));
-    env = lisp_env_extend(env, lisp_intern("shadow"), lisp_make_builtin(lisp_builtin_shadow));
-    env = lisp_env_extend(env, lisp_intern("unexport"), lisp_make_builtin(lisp_builtin_unexport));
-    env = lisp_env_extend(env, lisp_intern("unuse-package"), lisp_make_builtin(lisp_builtin_unuse_package));
-    env = lisp_env_extend(env, lisp_intern("import"), lisp_make_builtin(lisp_builtin_import));
-    env = lisp_env_extend(env, lisp_intern("shadowing-import"), lisp_make_builtin(lisp_builtin_shadowing_import));
-    env = lisp_env_extend(env, lisp_intern("delete-package"), lisp_make_builtin(lisp_builtin_delete_package));
-    env = lisp_env_extend(env, lisp_intern("rename-package"), lisp_make_builtin(lisp_builtin_rename_package));
-    env = lisp_env_extend(env, lisp_intern("rplaca"), lisp_make_builtin(lisp_builtin_rplaca));
-    env = lisp_env_extend(env, lisp_intern("rplacd"), lisp_make_builtin(lisp_builtin_rplacd));
-    env = lisp_env_extend(env, lisp_intern("hash-code"), lisp_make_builtin(lisp_builtin_hash_code));
-    env = lisp_env_extend(env, lisp_intern("+"), lisp_make_builtin(lisp_builtin_add));
-    env = lisp_env_extend(env, lisp_intern("-"), lisp_make_builtin(lisp_builtin_sub));
-    env = lisp_env_extend(env, lisp_intern("<"), lisp_make_builtin(lisp_builtin_lt));
-    env = lisp_env_extend(env, lisp_intern("load"), lisp_make_builtin(lisp_builtin_load));
-    env = lisp_env_extend(env, lisp_intern("write-file"), lisp_make_builtin(lisp_builtin_write_file));
-    env = lisp_env_extend(env, lisp_intern("write-line"), lisp_make_builtin(lisp_builtin_write_line));
-    env = lisp_env_extend(env, lisp_intern("sleep"), lisp_make_builtin(lisp_builtin_sleep));
-    env = lisp_env_extend(env, lisp_intern("gensym"), lisp_make_builtin(lisp_builtin_gensym));
-    env = lisp_env_extend(env, lisp_intern("gc"), lisp_make_builtin(lisp_builtin_gc));
-    env = lisp_env_extend(env, lisp_intern("heap-remaining"), lisp_make_builtin(lisp_builtin_heap_remaining));
-    env = lisp_env_extend(env, lisp_intern("make-vector"), lisp_make_builtin(lisp_builtin_make_vector));
-    env = lisp_env_extend(env, lisp_intern("svref"), lisp_make_builtin(lisp_builtin_svref));
-    env = lisp_env_extend(env, lisp_intern("svset"), lisp_make_builtin(lisp_builtin_svset));
-    env = lisp_env_extend(env, lisp_intern("macroexpand-1"), lisp_make_builtin(lisp_builtin_macroexpand_1));
-    env = lisp_env_extend(env, lisp_intern("vm-make-closure"), lisp_make_builtin(lisp_builtin_vm_make_closure));
-    env = lisp_env_extend(env, lisp_intern("vm-exec"), lisp_make_builtin(lisp_builtin_vm_exec));
-    env = lisp_env_extend(env, lisp_intern("special-variable-p"), lisp_make_builtin(lisp_builtin_special_variable_p));
-    env = lisp_env_extend(env, lisp_intern("establish-special"), lisp_make_builtin(lisp_builtin_establish_special));
-    env = lisp_env_extend(env, lisp_intern("mark-compiler-ready"), lisp_make_builtin(lisp_builtin_mark_compiler_ready));
-    env = lisp_env_extend(env, lisp_intern("compiler-ready-p"), lisp_make_builtin(lisp_builtin_compiler_ready_p));
-    env = lisp_env_extend(env, lisp_intern("establish-global-function"), lisp_make_builtin(lisp_builtin_establish_global_function));
-    env = lisp_env_extend(env, lisp_intern("%panic-compiled-lambda-list-keyword"), lisp_make_builtin(lisp_builtin_panic_compiled_lambda_list_keyword));
-    // milestone 93: 関数セル(fn)のfuncall系API。defun等の書き込み先はまだglobal_envのまま
-    // (milestone94で切り替える)
-    env = lisp_env_extend(env, lisp_intern("symbol-function"), lisp_make_builtin(lisp_builtin_symbol_function));
-    env = lisp_env_extend(env, lisp_intern("%set-symbol-function"), lisp_make_builtin(lisp_builtin_set_symbol_function));
-    env = lisp_env_extend(env, lisp_intern("fboundp"), lisp_make_builtin(lisp_builtin_fboundp));
-    env = lisp_env_extend(env, lisp_intern("symbol-value"), lisp_make_builtin(lisp_builtin_symbol_value));
+// milestone94: 組み込み関数の登録先をglobal_env(alist)から各symbolの関数セル(fn)への
+// 直接書き込みへ変更した。戻り値のenvは不要になったためvoidにした(呼び出し元main.cの
+// 代入も削除する)
+#define LISP_REGISTER_BUILTIN(name, func) \
+    (lisp_symbol_cell(lisp_intern(name))->fn = lisp_make_builtin(func))
+
+void lisp_builtins_init(void) {
+    LISP_REGISTER_BUILTIN("car", lisp_builtin_car);
+    LISP_REGISTER_BUILTIN("cdr", lisp_builtin_cdr);
+    LISP_REGISTER_BUILTIN("cons", lisp_builtin_cons);
+    LISP_REGISTER_BUILTIN("funcall", lisp_builtin_funcall);
+    LISP_REGISTER_BUILTIN("apply", lisp_builtin_apply);
+    LISP_REGISTER_BUILTIN("eq", lisp_builtin_eq);
+    LISP_REGISTER_BUILTIN("atom", lisp_builtin_atom);
+    LISP_REGISTER_BUILTIN("symbolp", lisp_builtin_symbolp);
+    LISP_REGISTER_BUILTIN("keywordp", lisp_builtin_keywordp);
+    LISP_REGISTER_BUILTIN("make-package", lisp_builtin_make_package);
+    LISP_REGISTER_BUILTIN("find-package", lisp_builtin_find_package);
+    LISP_REGISTER_BUILTIN("export", lisp_builtin_export);
+    LISP_REGISTER_BUILTIN("use-package", lisp_builtin_use_package);
+    LISP_REGISTER_BUILTIN("intern", lisp_builtin_intern);
+    LISP_REGISTER_BUILTIN("in-package", lisp_builtin_in_package);
+    LISP_REGISTER_BUILTIN("package-name", lisp_builtin_package_name);
+    LISP_REGISTER_BUILTIN("package-nicknames", lisp_builtin_package_nicknames);
+    LISP_REGISTER_BUILTIN("package-use-list", lisp_builtin_package_use_list);
+    LISP_REGISTER_BUILTIN("list-all-packages", lisp_builtin_list_all_packages);
+    LISP_REGISTER_BUILTIN("%package-symbols", lisp_builtin_package_symbols);
+    LISP_REGISTER_BUILTIN("%package-exported-symbols", lisp_builtin_package_exported_symbols);
+    LISP_REGISTER_BUILTIN("find-symbol", lisp_builtin_find_symbol);
+    LISP_REGISTER_BUILTIN("find-all-symbols", lisp_builtin_find_all_symbols);
+    LISP_REGISTER_BUILTIN("shadow", lisp_builtin_shadow);
+    LISP_REGISTER_BUILTIN("unexport", lisp_builtin_unexport);
+    LISP_REGISTER_BUILTIN("unuse-package", lisp_builtin_unuse_package);
+    LISP_REGISTER_BUILTIN("import", lisp_builtin_import);
+    LISP_REGISTER_BUILTIN("shadowing-import", lisp_builtin_shadowing_import);
+    LISP_REGISTER_BUILTIN("delete-package", lisp_builtin_delete_package);
+    LISP_REGISTER_BUILTIN("rename-package", lisp_builtin_rename_package);
+    LISP_REGISTER_BUILTIN("rplaca", lisp_builtin_rplaca);
+    LISP_REGISTER_BUILTIN("rplacd", lisp_builtin_rplacd);
+    LISP_REGISTER_BUILTIN("hash-code", lisp_builtin_hash_code);
+    LISP_REGISTER_BUILTIN("+", lisp_builtin_add);
+    LISP_REGISTER_BUILTIN("-", lisp_builtin_sub);
+    LISP_REGISTER_BUILTIN("<", lisp_builtin_lt);
+    LISP_REGISTER_BUILTIN("load", lisp_builtin_load);
+    LISP_REGISTER_BUILTIN("write-file", lisp_builtin_write_file);
+    LISP_REGISTER_BUILTIN("write-line", lisp_builtin_write_line);
+    LISP_REGISTER_BUILTIN("sleep", lisp_builtin_sleep);
+    LISP_REGISTER_BUILTIN("gensym", lisp_builtin_gensym);
+    LISP_REGISTER_BUILTIN("gc", lisp_builtin_gc);
+    LISP_REGISTER_BUILTIN("heap-remaining", lisp_builtin_heap_remaining);
+    LISP_REGISTER_BUILTIN("make-vector", lisp_builtin_make_vector);
+    LISP_REGISTER_BUILTIN("svref", lisp_builtin_svref);
+    LISP_REGISTER_BUILTIN("svset", lisp_builtin_svset);
+    LISP_REGISTER_BUILTIN("macroexpand-1", lisp_builtin_macroexpand_1);
+    LISP_REGISTER_BUILTIN("vm-make-closure", lisp_builtin_vm_make_closure);
+    LISP_REGISTER_BUILTIN("vm-exec", lisp_builtin_vm_exec);
+    LISP_REGISTER_BUILTIN("special-variable-p", lisp_builtin_special_variable_p);
+    LISP_REGISTER_BUILTIN("establish-special", lisp_builtin_establish_special);
+    LISP_REGISTER_BUILTIN("mark-compiler-ready", lisp_builtin_mark_compiler_ready);
+    LISP_REGISTER_BUILTIN("compiler-ready-p", lisp_builtin_compiler_ready_p);
+    LISP_REGISTER_BUILTIN("establish-global-function", lisp_builtin_establish_global_function);
+    LISP_REGISTER_BUILTIN("%panic-compiled-lambda-list-keyword", lisp_builtin_panic_compiled_lambda_list_keyword);
+    // milestone 93で追加した関数セル(fn)のfuncall系API自身も、milestone94で他の組み込み関数と
+    // 同じ関数セル直接登録方式に統一する
+    LISP_REGISTER_BUILTIN("symbol-function", lisp_builtin_symbol_function);
+    LISP_REGISTER_BUILTIN("%set-symbol-function", lisp_builtin_set_symbol_function);
+    LISP_REGISTER_BUILTIN("fboundp", lisp_builtin_fboundp);
+    LISP_REGISTER_BUILTIN("symbol-value", lisp_builtin_symbol_value);
 
     // *macroexpand-hook*をdefvarと同じ形（is_special=1 + 初期値）で直接セットアップする
     // (milestone 21)。動的変数はenvチェーンに束縛を積まないため、global_envへの
-    // lisp_env_extendは不要
+    // 登録は不要（milestone94以降も、これは値namespace専用のis_special機構なので無変更）
     LispSymbol *hook_cell = lisp_symbol_cell(lisp_sym_macroexpand_hook);
     hook_cell->value = lisp_make_builtin(lisp_default_macroexpand_hook);
     hook_cell->is_special = 1;
-
-    return env;
 }
+
+#undef LISP_REGISTER_BUILTIN
 
 // --- 大脱出機構 (milestone 30) ---
 // 通常のC関数だとGCCが自動でプロローグ(push rbp; mov rsp,rbp等)を生成し、

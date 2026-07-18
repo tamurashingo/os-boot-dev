@@ -50,22 +50,26 @@
   ; milestone37の再帰呼び出し(階乗相当)を、この段階で使える命令(+/cons/car/cdr/eq/if)
   ; だけで表現したもの: 自分自身をouter letのボックス経由で捕捉する再帰的なlen関数で
   ; consリストの長さを数える。letの本体は単一式のみなので、setqでlenへ実体を
-  ; 代入する副作用を「使わない束縛の初期化式」として発生させ、その後の本体で呼び出す
+  ; 代入する副作用を「使わない束縛の初期化式」として発生させ、その後の本体で呼び出す。
+  ; milestone94(Lisp-2化)以降、ローカル変数lenを呼び出し位置に直接置くことはできないため、
+  ; 再帰呼び出し・外側からの呼び出しいずれもfuncall経由にする
   (eq (compile-and-run
         '(let ((len nil))
-           (let ((ignored (setq len (lambda (lst) (if lst (+ 1 (len (cdr lst))) 0)))))
-             (len (cons 1 (cons 2 (cons 3 nil)))))))
+           (let ((ignored (setq len (lambda (lst) (if lst (+ 1 (funcall len (cdr lst))) 0)))))
+             (funcall len (cons 1 (cons 2 (cons 3 nil)))))))
       3))
 
 (defun run-test-compile-and-run-closure-captures-state ()
   ; milestone38のクロージャ捕捉(カウンタ)相当: make-counterが返すlambdaは
   ; 呼び出しごとに新しいボックスnをkind=0で捕捉し、setqで書き換えた状態が
-  ; 同じクロージャの複数回の呼び出しをまたいで共有されることを検証する
+  ; 同じクロージャの複数回の呼び出しをまたいで共有されることを検証する。
+  ; milestone94(Lisp-2化)以降、ローカル変数make-counter/c1は呼び出し位置に
+  ; 直接置けないため、いずれもfuncall経由で呼ぶ
   (struct-eq
     (compile-and-run
       '(let ((make-counter (lambda () (let ((n 0)) (lambda () (setq n (+ n 1)))))))
-         (let ((c1 (make-counter)))
-           (cons (c1) (cons (c1) (cons (c1) nil))))))
+         (let ((c1 (funcall make-counter)))
+           (cons (funcall c1) (cons (funcall c1) (cons (funcall c1) nil))))))
     (list 1 2 3)))
 
 ; milestone 50: compile-and-runがmacroexpand-allを経由していなかった配線漏れの回帰テスト。
@@ -100,8 +104,11 @@
                     (list 1)
                     nil))
 
+; milestone94(Lisp-2化)以降、*compile51-global-fn*はdefvarによる値namespaceの束縛であり
+; 関数セルには何も入っていないため、呼び出し位置にbareで置くとunbound functionになる。
+; funcall経由でOP_GLOBAL_REF(値namespace)から読んだ値を呼び出す形に変更する
 (defun run-test-compile-and-run-global-call ()
-  (eq (compile-and-run '(*compile51-global-fn* 10)) 11))
+  (eq (compile-and-run '(funcall *compile51-global-fn* 10)) 11))
 
 ; milestone 52: OP_CALLの汎用ディスパッチ化の回帰テスト。OP_CALLがコンパイル済みでない
 ; 呼び出し先(Cビルトイン・従来のdefunによるインタプリタクロージャ)をlisp_applyへ
@@ -123,9 +130,11 @@
                              (list *op-load-local* 0 0 *op-const* 0 0 *op-add* *op-return*)
                              (list 1)
                              nil)))
-    (eq (f 10) 11)))
+    ; milestone94(Lisp-2化)以降、呼び出し位置のbare symbolはローカル変数を一切見ないため
+    ; (f 10)ではなくfuncall経由で呼ぶ必要がある
+    (eq (funcall f 10) 11)))
 
-; mapcarはstdlib.lispのdefunによる従来のインタプリタクロージャで、その本体(fn (car lst))が
+; mapcarはstdlib.lispのdefunによる従来のインタプリタクロージャで、その本体(funcall fn (car lst))が
 ; lisp_evalの通常の関数呼び出し経路(lisp_apply)を通る。fnにコンパイル済みクロージャを渡すことで、
 ; 既存の高階ビルトイン(mapcar)がコンパイル済み・インタプリタ済みいずれのクロージャも区別なく
 ; 第一級の値として扱えることを確認する
@@ -205,7 +214,9 @@
 
 ; run-test-compile-and-run-recursive-callと同じ「使わない束縛の初期化式」の技法で
 ; 自己参照するlambdaを作り、再帰呼び出しを何段か経由してもreturn-fromが呼び出し元の
-; blockまで正しく伝播することを確認する(OP_CALLの汎用伝播チェックの回帰テスト)
+; blockまで正しく伝播することを確認する(OP_CALLの汎用伝播チェックの回帰テスト)。
+; milestone94(Lisp-2化)以降、ローカル変数scanは呼び出し位置に直接置けないため、
+; 再帰呼び出し・外側からの呼び出しいずれもfuncall経由にする
 (defun run-test-compile-and-run-block-escapes-recursion ()
   (eq (compile-and-run
         '(block scan-loop
@@ -214,9 +225,9 @@
                                           (if lst
                                               (if (eq (car lst) target)
                                                   (return-from scan-loop (car lst))
-                                                  (scan (cdr lst) target))
+                                                  (funcall scan (cdr lst) target))
                                               nil)))))
-               (scan (cons 1 (cons 2 (cons 3 (cons 4 (cons 5 nil))))) 3)))
+               (funcall scan (cons 1 (cons 2 (cons 3 (cons 4 (cons 5 nil))))) 3)))
            999))
       3))
 

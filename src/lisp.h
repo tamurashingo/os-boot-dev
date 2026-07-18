@@ -15,10 +15,11 @@ extern EFI_SYSTEM_TABLE *g_system_table;
 // EfiMainが起動時に設定する (milestone 16)
 extern EFI_HANDLE g_image_handle;
 
-// トップレベルの永続グローバル環境 (milestone 12)。EfiMainが起動時に
-// lisp_builtins_init()の結果で初期化する。defun/loadなど今後の特殊形式が
-// lisp_eval内部からここを直接書き換えて新しい束縛を追加すれば、その後の
-// すべてのREPL入力から見えるようになる
+// トップレベルの永続グローバル環境 (milestone 12)。milestone94のLisp-2化により、
+// defun/defmacro/組み込み関数はここではなく各symbolの関数セル(fn、milestone93)へ
+// 書き込むようになったため、global_envは「関数namespaceと独立した、レキシカルにも
+// is_specialにも属さないグローバル変数」専用の値namespace用alistとして残る
+// (setqは新規束縛を暗黙に作らないため、現時点でこの経路で実際に値が入ることはない)
 extern LispObject global_env;
 
 // --- 文字入力 (milestone 6) ---
@@ -28,7 +29,7 @@ extern UINTN input_length;
 void lisp_heap_init(UINT64 start, UINT64 size);
 void lisp_packages_init(void);
 void lisp_symbols_init(void);
-LispObject lisp_builtins_init(void);
+void lisp_builtins_init(void); // milestone94: 各symbolの関数セル(fn)へ直接登録するためvoid化
 void lisp_load_boot_file(const char *filename); // milestone 29
 void lisp_load_init_file(void); // milestone 47
 
@@ -248,6 +249,15 @@ int lisp_global_ref_package_identity_selftest(void);
 // 使うと後続の計算（OP_CALLのnargsが期待するスタック深さ等）を壊してしまう。OP_POPは値を
 // スタックに残さず単純に捨てるため、この問題を起こさない
 #define OP_POP 20   // スタック最上位をpopし、捨てる（pushし直さない）
+
+// --- 関数namespace参照オペコード (milestone 94、Lisp-2化) ---
+// 呼び出し位置のbare symbolおよび#'foo/(function foo)は、レキシカルスコープ・global_env
+// のどちらも経由せずsymbolの関数セル(fn、milestone93)のみを見る（この処理系にflet/labels
+// 相当が無いため、関数の局所束縛という概念自体が無い）。書き込み版(OP_GLOBAL_SET相当)は
+// 不要（コンパイル済みコードから関数セルへ書き込む経路が存在しないため）
+#define OP_GLOBAL_FUNCTION_REF 21  // 次の2byteをconstants配列のindexとして解釈し、そこにある
+                            // symbolの関数セル(fn)をpushする（未束縛(LISP_NIL)ならunbound
+                            // functionでpanicする）
 
 // bytecode(bytecode_len byte)とconstants(constants_len個のLispObject)を保持するVM
 // コンパイル済み関数オブジェクトを作る（LispClosureのescape hatch方式、milestone15/22/26と

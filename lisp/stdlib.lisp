@@ -55,7 +55,7 @@
 
 ; (a b c ...)が単調減少(a>b>c>...)かどうかは、逆順にした列に<の単調増加判定を
 ; かけるのと同値
-(defun > (&rest args) (apply < (reverse args)))
+(defun > (&rest args) (apply #'< (reverse args)))
 
 (defun <= (&rest args) (every-adjacent-pair (lambda (a b) (not (< b a))) args))
 (defun >= (&rest args) (every-adjacent-pair (lambda (a b) (not (< a b))) args))

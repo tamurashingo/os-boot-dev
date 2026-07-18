@@ -68,24 +68,25 @@
             (rplacd tail cell)
             (setq tail cell))))))
 
-; fnはローカル変数（仮引数）だが、lisp_evalの関数呼び出し分岐は呼び出し式の演算子位置を
-; 常に汎用evalで評価するため、ローカル変数が指すクロージャをそのまま(fn ...)の形で
-; 呼び出せる。新しいfuncall/applyプリミティブは不要（milestone29の調査で確認済み）
+; milestone94(Lisp-2化)以降、呼び出し位置のbare symbolはレキシカルscope上の
+; ローカル変数を一切見ず、symbolの関数セル(fn)のみを見るようになった。そのため
+; ローカル変数fnが指すクロージャを呼ぶには(funcall fn ...)が必須になった
+; (milestone29時点でこの用途向けに導入したfuncall/applyをここで初めて使う)
 ;
 ; milestone87: append/reverseと同じ理由でdo化する。macroexpand-all-forms自身がandの
 ; 28節のように長い節リストに対して直接mapcarを呼ぶため(例:
-; (cons op (mapcar macroexpand-all (cdr form)))、'and節)、append/reverseだけを
+; (cons op (mapcar #'macroexpand-all (cdr form)))、'and節)、append/reverseだけを
 ; do化してもmapcarが非tail再帰のままだとCスタックの深さが節数に比例してしまい、
 ; 実測でも修正しきれなかった。appendと同じ理由(2倍のconsセル生成によるヒープ圧迫を
 ; 避ける)で、reverse2回通しではなくrplacdによるhead/tail連結方式にしてある
 (defun mapcar (fn lst)
   (if (null lst)
       nil
-      (let ((head (cons (fn (car lst)) nil)))
+      (let ((head (cons (funcall fn (car lst)) nil)))
         (do ((src (cdr lst) (cdr src))
              (tail head))
             ((null src) head)
-          (let ((cell (cons (fn (car src)) nil)))
+          (let ((cell (cons (funcall fn (car src)) nil)))
             (rplacd tail cell)
             (setq tail cell))))))
 
@@ -99,11 +100,11 @@
 
 (defun macroexpand-all-let (form)
   (cons (car form)
-        (cons (mapcar macroexpand-all-let-binding (car (cdr form)))
-              (mapcar macroexpand-all (cdr (cdr form))))))
+        (cons (mapcar #'macroexpand-all-let-binding (car (cdr form)))
+              (mapcar #'macroexpand-all (cdr (cdr form))))))
 
 (defun macroexpand-all-cond-clause (clause)
-  (mapcar macroexpand-all clause))
+  (mapcar #'macroexpand-all clause))
 
 ; milestone87: doのbinding-specは(var init step)/(var init)/(var)/varのいずれかを
 ; 取り得る(let同様の並行束縛+step-formによる並行再束縛)。varの位置は評価されない
@@ -113,7 +114,7 @@
 (defun macroexpand-all-do-binding (binding)
   (if (atom binding)
       binding
-      (cons (car binding) (mapcar macroexpand-all (cdr binding)))))
+      (cons (car binding) (mapcar #'macroexpand-all (cdr binding)))))
 
 ; (do bindings (end-test . result-forms) . body)。end-test/result-formsはいずれも
 ; 評価される位置なので、まとめて1つのリストとしてmapcar macroexpand-allで展開できる
@@ -121,33 +122,34 @@
 ; 分けて扱う必要は無い)
 (defun macroexpand-all-do (form)
   (cons (car form)
-        (cons (mapcar macroexpand-all-do-binding (car (cdr form)))
-              (cons (mapcar macroexpand-all (car (cdr (cdr form))))
-                    (mapcar macroexpand-all (cdr (cdr (cdr form))))))))
+        (cons (mapcar #'macroexpand-all-do-binding (car (cdr form)))
+              (cons (mapcar #'macroexpand-all (car (cdr (cdr form))))
+                    (mapcar #'macroexpand-all (cdr (cdr (cdr form))))))))
 
 ; formはこの時点でトップレベルのマクロ呼び出しではないと分かっているconsである。
 ; いずれの特殊形式にも該当しない場合は関数呼び出しとみなし、演算子位置も含め
-; 全要素を展開する（lisp_evalは演算子位置も汎用evalするため、lambda式の直書きなども
-; そのままmacroexpand-allに乗る。stdlib.lispのmapcar冒頭の注釈参照）
+; 全要素を展開する（bare symbolはmacroexpand-all自身がatomとして素通しするため無害だが、
+; 演算子位置がlambda式の直書きである場合はその本体にもマクロ展開が必要なため、
+; 演算子位置を除外せず全要素へmacroexpand-allを適用する）
 (defun macroexpand-all-forms (form)
   (let ((op (car form)))
     (cond
       ((eq op 'quote) form)
       ((eq op 'quasiquote) form)
       ((eq op 'defmacro) form)
-      ((eq op 'if) (cons op (mapcar macroexpand-all (cdr form))))
-      ((eq op 'progn) (cons op (mapcar macroexpand-all (cdr form))))
-      ((eq op 'and) (cons op (mapcar macroexpand-all (cdr form))))
-      ((eq op 'or) (cons op (mapcar macroexpand-all (cdr form))))
-      ((eq op 'when) (cons op (mapcar macroexpand-all (cdr form))))
-      ((eq op 'unless) (cons op (mapcar macroexpand-all (cdr form))))
+      ((eq op 'if) (cons op (mapcar #'macroexpand-all (cdr form))))
+      ((eq op 'progn) (cons op (mapcar #'macroexpand-all (cdr form))))
+      ((eq op 'and) (cons op (mapcar #'macroexpand-all (cdr form))))
+      ((eq op 'or) (cons op (mapcar #'macroexpand-all (cdr form))))
+      ((eq op 'when) (cons op (mapcar #'macroexpand-all (cdr form))))
+      ((eq op 'unless) (cons op (mapcar #'macroexpand-all (cdr form))))
       ((eq op 'setq)
        (list op (car (cdr form)) (macroexpand-all (car (cdr (cdr form))))))
       ((eq op 'let) (macroexpand-all-let form))
       ((eq op 'let*) (macroexpand-all-let form))
-      ((eq op 'cond) (cons op (mapcar macroexpand-all-cond-clause (cdr form))))
+      ((eq op 'cond) (cons op (mapcar #'macroexpand-all-cond-clause (cdr form))))
       ((eq op 'block)
-       (cons op (cons (car (cdr form)) (mapcar macroexpand-all (cdr (cdr form))))))
+       (cons op (cons (car (cdr form)) (mapcar #'macroexpand-all (cdr (cdr form))))))
       ((eq op 'return-from)
        (if (null (cdr (cdr form)))
            form
@@ -164,7 +166,7 @@
        (list op (car (cdr form)) (car (cdr (cdr form)))
              (macroexpand-all (car (cdr (cdr (cdr form)))))))
       ((eq op 'do) (macroexpand-all-do form))
-      (t (mapcar macroexpand-all form)))))
+      (t (mapcar #'macroexpand-all form)))))
 
 ; macroexpand-1(lisp_macroexpand_1)は呼び出し式の演算子を無条件にlisp_evalで評価して
 ; マクロかどうかを確認するため、if/let/quoteなど特殊形式のキーワードをそのまま渡すと
@@ -235,6 +237,9 @@
 (defvar *op-block*         18)
 (defvar *op-return-from*   19)
 (defvar *op-pop*           20)
+(defvar *op-global-function-ref* 21) ; milestone94: 関数namespace専用の読み取り専用参照。
+                                      ; global_env・レキシカルscopeどちらも経由せず
+                                      ; symbolの関数セル(fn)のみを見る
 
 (defun asm-label-p (instr) (eq (car instr) 'label))
 
@@ -339,12 +344,20 @@
 (defun compile-literal (form ctx)
   (list (list *op-const* (compile-register-const ctx form))))
 
-; レキシカルスコープ外のsymbol(グローバル変数・グローバル関数)を実行時に
-; global_envへ問い合わせるコードにコンパイルする(milestone51)。symbol自身を
-; 定数プールへ登録し、OP_GLOBAL_REFにそのindexを持たせる(compile-literalが
-; 値そのものを登録するのと同じ仕組みを、symbolの登録に使い回している)
+; レキシカルスコープ外のsymbol(グローバル変数)を実行時にglobal_envへ問い合わせる
+; コードにコンパイルする(milestone51)。symbol自身を定数プールへ登録し、
+; OP_GLOBAL_REFにそのindexを持たせる(compile-literalが値そのものを登録するのと
+; 同じ仕組みを、symbolの登録に使い回している)。milestone94以降、呼び出し位置・
+; #'foo/(function foo)の関数namespace参照はcompile-function-refが専用に担う
 (defun compile-global-ref (form ctx)
   (list (list *op-global-ref* (compile-register-const ctx form))))
+
+; symbolの関数セル(fn)を実行時に問い合わせるコードにコンパイルする(milestone94、
+; Lisp-2化)。呼び出し位置のbare symbolと#'foo/(function foo)の両方がこれを使う
+; (「関数セルを読む」操作自体は同一のため命令を共有できる)。compile-global-refと
+; 異なりレキシカルscopeを一切辿らない(この処理系にflet/labels相当が無いため)
+(defun compile-function-ref (form ctx)
+  (list (list *op-global-function-ref* (compile-register-const ctx form))))
 
 ; quoteの内側はそもそも評価されないデータなので、car(cdr form)（quoteされた
 ; S式そのもの）をそのまま定数として登録する(macroexpand-allがquoteの内側を
@@ -758,9 +771,11 @@
 ; OP_CALL <nargs>(src/lisp.c)の呼び出し規約は「先にnargs個の生の引数値をスタックに積み、
 ; その上に呼び出し対象の関数値を積んでから発行する」(OP_CALLは最初にfn_objをpopし、
 ; 残りのnargs個をそのままフレームとしてボックス化する)。そのためcompile-callは
-; 引数を先頭から順にコンパイルしてから、最後に関数式(car form。symbolの場合も
-; あればlambda式そのものである場合もあり、いずれもcompile-expr自身に委ねられる)
-; をコンパイルする
+; 引数を先頭から順にコンパイルしてから、最後に関数式(car form)をコンパイルする。
+; milestone94(Lisp-2化)以降、car formがbare symbolであれば関数namespace専用の
+; compile-function-refを使う(レキシカルscope・global_envのどちらも経由しない)。
+; lambda式そのもの等の非symbolはcompile-exprへ委ねる(既に閉包を返すため
+; namespaceの区別が無い)
 (defun compile-call-args (args ctx scope)
   (if (null args)
       nil
@@ -769,7 +784,9 @@
 
 (defun compile-call (form ctx scope)
   (compile-concat (compile-call-args (cdr form) ctx scope)
-                  (compile-expr (car form) ctx scope)
+                  (if (symbolp (car form))
+                      (compile-function-ref (car form) ctx)
+                      (compile-expr (car form) ctx scope))
                   (list (list *op-call* (compile-env-length (cdr form))))))
 
 ; milestone39でVMにインライン化された4つのプリミティブ(OP_CONS/OP_CAR/OP_CDR/OP_EQ)は
@@ -1147,14 +1164,14 @@
             (list (list 'label loop-end))
             (compile-let-restore-code restores ctx)))))))
 
-; milestone93: #'foo/(function foo)をコンパイルする。専用のOP_GLOBAL_FUNCTION_REF
-; opcodeはmilestone94で追加するため、この時点ではbare symbolをsymbol-functionビルトイン
-; 呼び出しへ脱糖する(ツリーウォーク側のfunction特殊形式と同じ「関数セルのみを見る」挙動)。
+; #'foo/(function foo)をコンパイルする。milestone94(Lisp-2化)以降、bare symbolは
+; compile-callの呼び出し位置と同じcompile-function-refに委ねる(「関数セルを読む」
+; 操作自体は呼び出し位置・値位置のどちらでも同一のため命令を共有できる)。
 ; 非symbol(lambda式等)はcompile-exprへ委ねる(既に閉包を返すためnamespaceの区別が無い)
 (defun compile-function (form ctx scope)
   (let ((target (car (cdr form))))
     (if (symbolp target)
-        (compile-call (list 'symbol-function (list 'quote target)) ctx scope)
+        (compile-function-ref target ctx)
         (compile-expr target ctx scope))))
 
 ; atomは(既にレキシカル束縛の有無を確認する)compile-variable-refに委ねる。

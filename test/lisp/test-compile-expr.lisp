@@ -235,14 +235,17 @@
            (struct-eq (compile-ctx-constants ctx) (list 1 1))))))
 
 (defun run-test-compile-expr-call-simple ()
-  ; (let ((f (lambda (x) x))) (f 5)) -> letでfにクロージャを束縛し、本体でfを
-  ; 呼び出す。OP_CALLの呼び出し規約に合わせ、引数5を先に積み、関数式fを
-  ; その後に積んでからOP_CALL 1を発行する
+  ; (let ((f (lambda (x) x))) (funcall f 5)) -> letでfにクロージャを束縛し、本体で
+  ; funcallを呼び出す。milestone94(Lisp-2化)以降、呼び出し位置の演算子がbare symbol
+  ; (この場合funcall自身)であれば常にcompile-function-refがOP_GLOBAL_FUNCTION_REFを
+  ; 発行し、レキシカルスコープ上のローカル変数fは(局所関数束縛という概念がこの処理系に
+  ; 無いため)呼び出し位置解決には一切関与しない。引数f・5はこの順で先に積まれ(fは通常の
+  ; 値参照としてOP_LOAD_LOCAL)、最後にfuncallの関数セル参照とOP_CALL 2を発行する
   (let ((ctx (compile-make-ctx)))
-    (let ((bytes (assemble (compile-expr '(let ((f (lambda (x) x))) (f 5)) ctx (compile-make-top-scope)))))
+    (let ((bytes (assemble (compile-expr '(let ((f (lambda (x) x))) (funcall f 5)) ctx (compile-make-top-scope)))))
       (let ((package (list 'closure-template 1 1 (list 5 0 0 2) nil nil)))
-        (and (struct-eq bytes (list 9 0 0 7 0 0 0 1 0 5 0 0 8 1 0))
-             (struct-eq (compile-ctx-constants ctx) (list package 5)))))))
+        (and (struct-eq bytes (list 9 0 0 7 0 0 5 0 0 0 1 0 21 2 0 8 2 0))
+             (struct-eq (compile-ctx-constants ctx) (list package 5 'funcall)))))))
 
 (defun run-test-compile-expr-call-immediate-lambda-multiple-args ()
   ; ((lambda (x y) x) 1 2) -> 関数式自体がlambda式であっても(carがsymbolでは
