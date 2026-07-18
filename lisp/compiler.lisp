@@ -1147,6 +1147,16 @@
             (list (list 'label loop-end))
             (compile-let-restore-code restores ctx)))))))
 
+; milestone93: #'foo/(function foo)をコンパイルする。専用のOP_GLOBAL_FUNCTION_REF
+; opcodeはmilestone94で追加するため、この時点ではbare symbolをsymbol-functionビルトイン
+; 呼び出しへ脱糖する(ツリーウォーク側のfunction特殊形式と同じ「関数セルのみを見る」挙動)。
+; 非symbol(lambda式等)はcompile-exprへ委ねる(既に閉包を返すためnamespaceの区別が無い)
+(defun compile-function (form ctx scope)
+  (let ((target (car (cdr form))))
+    (if (symbolp target)
+        (compile-call (list 'symbol-function (list 'quote target)) ctx scope)
+        (compile-expr target ctx scope))))
+
 ; atomは(既にレキシカル束縛の有無を確認する)compile-variable-refに委ねる。
 ; cons/car/cdr/eq/+はインライン化された専用命令へ、それ以外の形式(carがsymbol
 ; でもlambda式でも構わない)はすべて汎用の関数呼び出しcompile-callへコンパイル
@@ -1157,6 +1167,7 @@
     ((atom form) (compile-variable-ref form ctx scope))
     ((eq (car form) 'quote) (compile-quote form ctx))
     ((eq (car form) 'quasiquote) (compile-quasiquote form ctx scope))
+    ((eq (car form) 'function) (compile-function form ctx scope))
     ((eq (car form) 'if) (compile-if form ctx scope))
     ((eq (car form) 'let) (compile-let form ctx scope))
     ((eq (car form) 'let*) (compile-let-star form ctx scope))

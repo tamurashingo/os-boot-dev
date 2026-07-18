@@ -34,6 +34,9 @@ typedef struct {
     LispObject package;  // milestone 23: 属するパッケージ。gensymの未interned symbolはLISP_NIL。
                           // milestone 68でLispPackageを廃しLispClosureのescape hatchに統合、
                           // milestone 70でタグ付きLispObjectへ変更した（生ポインタは廃止）
+    LispObject fn;        // milestone 93: 関数セル（Lisp-2化の土台）。未束縛はLISP_NIL。
+                          // valueと独立した名前空間で、symbol-function/%set-symbol-functionが
+                          // 読み書きする。defun等の書き込み先切替はmilestone94で行う。
 } LispSymbol;
 
 typedef LispObject (*LispBuiltinFn)(LispObject args);
@@ -995,6 +998,7 @@ static LispObject lisp_create_local_symbol(LispObject pkg, const char *truncated
     sym->is_special = 0;
     sym->value = LISP_NIL;
     sym->package = pkg;
+    sym->fn = LISP_NIL;
 
     LispObject obj = ((LispObject)sym) | LISP_TAG_SYMBOL;
     pkg_cell->pkg_symbols = lisp_cons(obj, pkg_cell->pkg_symbols);
@@ -1094,6 +1098,7 @@ static LispObject lisp_make_uninterned_symbol(const char *name) {
     sym->is_special = 0;
     sym->value = LISP_NIL;
     sym->package = LISP_NIL;
+    sym->fn = LISP_NIL;
     return ((LispObject)sym) | LISP_TAG_SYMBOL;
 }
 
@@ -1121,6 +1126,7 @@ static LispObject lisp_sym_defparameter;
 static LispObject lisp_sym_block;
 static LispObject lisp_sym_return_from;
 static LispObject lisp_sym_do;
+static LispObject lisp_sym_function;
 static LispObject lisp_sym_macroexpand_hook;
 static LispObject lisp_sym_compile_and_run;
 static LispObject lisp_sym_lambda_optional;
@@ -1153,6 +1159,7 @@ void lisp_symbols_init(void) {
     lisp_sym_block = lisp_intern("block");
     lisp_sym_return_from = lisp_intern("return-from");
     lisp_sym_do = lisp_intern("do");
+    lisp_sym_function = lisp_intern("function");
     lisp_sym_macroexpand_hook = lisp_intern("*macroexpand-hook*");
     // milestone 78 (バグ修正): compile-and-runは他の特殊形式シンボルと同様、*package*が
     // common-lisp-userの間にここで1度だけinternしてキャッシュする。lisp_eval_toplevel内で
@@ -1674,6 +1681,16 @@ LispObject lisp_read(void) {
             return lisp_cons(lisp_sym_unquote_splicing, lisp_cons(lisp_read(), LISP_NIL));
         }
         return lisp_cons(lisp_sym_unquote, lisp_cons(lisp_read(), LISP_NIL));
+    }
+    if (c == '#') {
+        lisp_reader_pos++;
+        // milestone 93: #'fooを(function foo)へ展開する。それ以外の#構文(#\/#(/#x等)は
+        // 未実装のため即座にpanicする
+        if (*lisp_reader_pos == '\'') {
+            lisp_reader_pos++;
+            return lisp_cons(lisp_sym_function, lisp_cons(lisp_read(), LISP_NIL));
+        }
+        lisp_panic(L"unsupported reader macro after #");
     }
     if (c == '"') {
         lisp_reader_pos++;
@@ -2212,6 +2229,7 @@ static void lisp_gc_mark(LispObject obj) {
                 return;
             }
             s->gc_marked = 1;
+            lisp_gc_mark(s->fn);
             obj = s->value;
             continue;
         }
@@ -2847,6 +2865,21 @@ LispObject lisp_eval(LispObject expr, LispObject env) {
             return lisp_qq_expand(lisp_car(lisp_cdr(expr)), env);
         }
 
+        // milestone 93: #'foo/(function foo)。bare symbolなら関数セルのみを見る
+        // （lexical envは経由しない、この処理系にflet/labels相当が無いため）。
+        // 非symbol（lambda式等）はlisp_evalに委ねる（既に閉包を返すためnamespaceの区別が無い）
+        if (op == lisp_sym_function) {
+            LispObject target = lisp_car(lisp_cdr(expr));
+            if (lisp_is_symbol(target)) {
+                LispObject fn = lisp_symbol_cell(target)->fn;
+                if (fn == LISP_NIL) {
+                    lisp_panic(L"unbound function");
+                }
+                return fn;
+            }
+            return lisp_eval(target, env);
+        }
+
         if (op == lisp_sym_if) {
             LispObject test = lisp_eval(lisp_car(lisp_cdr(expr)), env);
             if (lisp_return_tag != LISP_NIL) {
@@ -3303,6 +3336,46 @@ LispObject lisp_builtin_establish_global_function(LispObject args) {
     LispObject closure = lisp_car(lisp_cdr(args));
     global_env = lisp_env_extend(global_env, sym, closure);
     return sym;
+}
+
+// milestone 93: 関数セル(LispSymbol.fn)を読み書きする最小API。defunの書き込み先切替
+// (milestone94)より先に整備する土台であり、この時点ではdefun/組み込み関数のどちらも
+// fnへ書き込まないため、動作確認には%set-symbol-functionで明示的に設定する必要がある
+
+// (symbol-function sym): fnを返す。未束縛(LISP_NIL)ならpanicする
+LispObject lisp_builtin_symbol_function(LispObject args) {
+    LispObject sym = lisp_car(args);
+    lisp_assert_symbol(sym);
+    LispObject fn = lisp_symbol_cell(sym)->fn;
+    if (fn == LISP_NIL) {
+        lisp_panic(L"unbound function");
+    }
+    return fn;
+}
+
+// (%set-symbol-function sym value): fnへ直接書き込む内部API。milestone94でdefun等の
+// 書き込み先として使う
+LispObject lisp_builtin_set_symbol_function(LispObject args) {
+    LispObject sym = lisp_car(args);
+    lisp_assert_symbol(sym);
+    LispObject value = lisp_car(lisp_cdr(args));
+    lisp_symbol_cell(sym)->fn = value;
+    return value;
+}
+
+// (fboundp sym): fnが束縛済みか
+LispObject lisp_builtin_fboundp(LispObject args) {
+    LispObject sym = lisp_car(args);
+    lisp_assert_symbol(sym);
+    return lisp_symbol_cell(sym)->fn != LISP_NIL ? lisp_sym_t : LISP_NIL;
+}
+
+// (symbol-value sym): 既存の値セル取得(is_specialならsym->value、通常はglobal_env経由)の
+// 薄いラッパー。lisp_env_lookupが両方のケースをすでに内包している
+LispObject lisp_builtin_symbol_value(LispObject args) {
+    LispObject sym = lisp_car(args);
+    lisp_assert_symbol(sym);
+    return lisp_env_lookup(global_env, sym);
 }
 
 // milestone 89: すでにコンパイルされている関数の内側に直接書かれた
@@ -4920,6 +4993,12 @@ LispObject lisp_builtins_init(void) {
     env = lisp_env_extend(env, lisp_intern("compiler-ready-p"), lisp_make_builtin(lisp_builtin_compiler_ready_p));
     env = lisp_env_extend(env, lisp_intern("establish-global-function"), lisp_make_builtin(lisp_builtin_establish_global_function));
     env = lisp_env_extend(env, lisp_intern("%panic-compiled-lambda-list-keyword"), lisp_make_builtin(lisp_builtin_panic_compiled_lambda_list_keyword));
+    // milestone 93: 関数セル(fn)のfuncall系API。defun等の書き込み先はまだglobal_envのまま
+    // (milestone94で切り替える)
+    env = lisp_env_extend(env, lisp_intern("symbol-function"), lisp_make_builtin(lisp_builtin_symbol_function));
+    env = lisp_env_extend(env, lisp_intern("%set-symbol-function"), lisp_make_builtin(lisp_builtin_set_symbol_function));
+    env = lisp_env_extend(env, lisp_intern("fboundp"), lisp_make_builtin(lisp_builtin_fboundp));
+    env = lisp_env_extend(env, lisp_intern("symbol-value"), lisp_make_builtin(lisp_builtin_symbol_value));
 
     // *macroexpand-hook*をdefvarと同じ形（is_special=1 + 初期値）で直接セットアップする
     // (milestone 21)。動的変数はenvチェーンに束縛を積まないため、global_envへの
