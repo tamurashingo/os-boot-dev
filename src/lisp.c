@@ -1277,6 +1277,30 @@ void lisp_symbols_init(void) {
     // milestone 98: print-objectもcompile-and-run(m78)と同じ理由で*package*切替後も
     // 同一symbolを指し続けるようここで1度だけinternしてキャッシュする
     lisp_sym_print_object = lisp_intern("print-object");
+
+    // milestone 100: *package*をcommon-lisp-user以外へ切り替えてもuse-package済みなら
+    // defun/if/let等の特殊形式トークン（lisp_evalおよびlisp_compileがeq比較でディスパッチ
+    // するシンボル群）を無修飾で使えるよう、common-lisp-userからexportしておく。
+    // t（self-eval、lisp_eval側でeq比較される）と&optional等のラムダリストキーワード
+    // （lambda/defunの引数リスト内でeq比較される）も同じ理由で対象に含める。
+    // compile-and-run（トップレベル評価専用の内部トークンでユーザーが直接書くことはない）と
+    // *macroexpand-hook*/print-object（特殊形式ではなく通常のグローバル束縛でmilestone101の
+    // 対象）は対象外とする
+    {
+        LispObject special_form_syms[] = {
+            lisp_sym_t, lisp_sym_quote, lisp_sym_if, lisp_sym_lambda, lisp_sym_defun,
+            lisp_sym_defmacro, lisp_sym_quasiquote, lisp_sym_unquote, lisp_sym_unquote_splicing,
+            lisp_sym_progn, lisp_sym_let, lisp_sym_let_star, lisp_sym_setq, lisp_sym_cond,
+            lisp_sym_and, lisp_sym_or, lisp_sym_when, lisp_sym_unless, lisp_sym_defvar,
+            lisp_sym_defparameter, lisp_sym_block, lisp_sym_return_from, lisp_sym_do,
+            lisp_sym_function, lisp_sym_lambda_optional, lisp_sym_lambda_rest,
+            lisp_sym_lambda_key, lisp_sym_lambda_aux, lisp_sym_lambda_allow_other_keys,
+        };
+        LispClosure *cl_user_cell = lisp_closure_cell(lisp_cl_user_package);
+        for (UINTN i = 0; i < sizeof(special_form_syms) / sizeof(special_form_syms[0]); i++) {
+            cl_user_cell->pkg_exports = lisp_cons(special_form_syms[i], cl_user_cell->pkg_exports);
+        }
+    }
 }
 
 
@@ -4514,6 +4538,81 @@ int lisp_global_ref_package_identity_selftest(void) {
         return 0;
     }
     if (lisp_intern_in_package(other_pkg, "m81-probe") != probe_sym) {
+        return 0;
+    }
+
+    lisp_symbol_cell(lisp_sym_package)->value = saved_package;
+    return 1;
+}
+
+// milestone 100: lisp_symbols_init末尾でcommon-lisp-userからexportした特殊形式トークン
+// （defun/if/let等の特殊形式ディスパッチシンボル・tの自己評価トークン・&optional等の
+// ラムダリストキーワード）が、*package*を切り替えてuse-package済みの別パッケージからでも
+// 無修飾で正しく解決される（同一オブジェクトであること、かつ実際に特殊形式として機能する
+// こと）ことを確認する自己テスト。「*package*を切り替えた後に無修飾名を読む」という順序は
+// milestone76以降と同根の理由でtest/lisp/配下（load経由）では組めないため、C内で直接
+// 呼び出し順序を制御して検証する。真なら成功
+int lisp_reader_special_form_export_selftest(void) {
+    LispObject saved_package = lisp_symbol_cell(lisp_sym_package)->value;
+
+    LispObject pkg = lisp_make_package("selftest-pkg100", 0);
+    LispObject use_args = lisp_cons(lisp_cl_user_package, lisp_cons(pkg, LISP_NIL));
+    if (lisp_builtin_use_package(use_args) != lisp_sym_t) {
+        return 0;
+    }
+    lisp_symbol_cell(lisp_sym_package)->value = pkg;
+
+    // (a) exportした全トークンが、use-package先での無修飾名解決で同一オブジェクト(eq)に
+    // 解決されること
+    struct { const char *name; LispObject expected; } tokens[] = {
+        {"t", lisp_sym_t}, {"quote", lisp_sym_quote}, {"if", lisp_sym_if},
+        {"lambda", lisp_sym_lambda}, {"defun", lisp_sym_defun}, {"defmacro", lisp_sym_defmacro},
+        {"quasiquote", lisp_sym_quasiquote}, {"unquote", lisp_sym_unquote},
+        {"unquote-splicing", lisp_sym_unquote_splicing}, {"progn", lisp_sym_progn},
+        {"let", lisp_sym_let}, {"let*", lisp_sym_let_star}, {"setq", lisp_sym_setq},
+        {"cond", lisp_sym_cond}, {"and", lisp_sym_and}, {"or", lisp_sym_or},
+        {"when", lisp_sym_when}, {"unless", lisp_sym_unless}, {"defvar", lisp_sym_defvar},
+        {"defparameter", lisp_sym_defparameter}, {"block", lisp_sym_block},
+        {"return-from", lisp_sym_return_from}, {"do", lisp_sym_do}, {"function", lisp_sym_function},
+        {"&optional", lisp_sym_lambda_optional}, {"&rest", lisp_sym_lambda_rest},
+        {"&key", lisp_sym_lambda_key}, {"&aux", lisp_sym_lambda_aux},
+        {"&allow-other-keys", lisp_sym_lambda_allow_other_keys},
+    };
+    for (UINTN i = 0; i < sizeof(tokens) / sizeof(tokens[0]); i++) {
+        if (lisp_intern(tokens[i].name) != tokens[i].expected) {
+            return 0;
+        }
+    }
+
+    // (b) 単なるeq識別性だけでなく、実際にreader+evalの経路で特殊形式として機能すること
+    // （exportしなければ本来unbound variableでpanicしていた挙動の回帰確認）
+    if (lisp_eval(lisp_read_from_buffer("t"), global_env) != lisp_sym_t) {
+        return 0;
+    }
+    if (lisp_eval(lisp_read_from_buffer("(if t 1 2)"), global_env) != lisp_make_fixnum(1)) {
+        return 0;
+    }
+    if (lisp_eval(lisp_read_from_buffer("(let ((x 5)) x)"), global_env) != lisp_make_fixnum(5)) {
+        return 0;
+    }
+    if (lisp_eval(lisp_read_from_buffer("(and t t)"), global_env) != lisp_sym_t) {
+        return 0;
+    }
+    if (lisp_eval(lisp_read_from_buffer("(or nil t)"), global_env) != lisp_sym_t) {
+        return 0;
+    }
+    if (lisp_eval(lisp_read_from_buffer("(cond (t 42))"), global_env) != lisp_make_fixnum(42)) {
+        return 0;
+    }
+    if (lisp_eval(lisp_read_from_buffer("(block m100-blk (return-from m100-blk 7))"), global_env)
+        != lisp_make_fixnum(7)) {
+        return 0;
+    }
+    lisp_eval(lisp_read_from_buffer("(defun m100-opt-fn (x &optional y) (if y y x))"), global_env);
+    if (lisp_eval(lisp_read_from_buffer("(m100-opt-fn 1)"), global_env) != lisp_make_fixnum(1)) {
+        return 0;
+    }
+    if (lisp_eval(lisp_read_from_buffer("(m100-opt-fn 1 2)"), global_env) != lisp_make_fixnum(2)) {
         return 0;
     }
 

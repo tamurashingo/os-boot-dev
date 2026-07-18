@@ -151,6 +151,13 @@ int lisp_bootstrap_package_context_selftest(void);
 // lisp_gc()安全性を検証する。main.cでのstdlib.lisp自動load後に呼び出す必要がある。真なら成功
 int lisp_global_ref_package_identity_selftest(void);
 
+// milestone 100: lisp_symbols_init末尾でcommon-lisp-userからexportした特殊形式トークン
+// （defun/if/let等の特殊形式ディスパッチシンボル・tの自己評価トークン・&optional等の
+// ラムダリストキーワード）が、*package*を切り替えてuse-package済みの別パッケージからでも
+// 無修飾で正しく解決され、実際に特殊形式として機能することを確認する自己テスト。
+// main.cでのstdlib.lisp自動load後に呼び出す必要がある。真なら成功
+int lisp_reader_special_form_export_selftest(void);
+
 // --- VMオペコード (milestone 35) ---
 // 各命令は1byteのopcode+固定長の即値オペランド（今のところ0または2byte、リトルエンディアン）
 // から成る。手動でバイトコード配列を構築する目標1の各マイルストン（35〜39）はこの定義を直接使う
