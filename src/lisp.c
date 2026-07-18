@@ -1581,6 +1581,22 @@ void lisp_print(LispOutputStream *stream, LispObject obj) {
         return;
     }
 
+    // milestone99: packageはclass/instance/generic-functionと同じ非拡張の専用分岐で印字する
+    // (specializerはユーザー定義クラスのみのためdefmethod print-objectでは上書きできない)
+    if (lisp_is_package(obj)) {
+        lisp_print_ascii(stream, "#<PACKAGE ");
+        lisp_print_ascii(stream, lisp_closure_cell(obj)->pkg_name);
+        lisp_print_ascii(stream, ">");
+        return;
+    }
+
+    // milestone99: compiled-functionは名前情報を持たないため#<builtin>/#<macro>と同様の
+    // 無名形式で印字する
+    if (lisp_is_compiled(obj)) {
+        lisp_print_ascii(stream, "#<COMPILED-FUNCTION>");
+        return;
+    }
+
     if (lisp_is_symbol(obj)) {
         LispSymbol *sym = lisp_symbol_cell(obj);
         // milestone 23: keywordパッケージのシンボルは":"を前置して印字する

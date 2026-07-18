@@ -63,7 +63,7 @@
 | # | マイルストーン | 状態 | 主な内容 |
 |---|---|---|---|
 | 98 | print-object総称関数・write-string・princ | 完了 | `lisp_print`のinstance分岐を、ハードコードされた`#<name instance>`直接出力から`print-object`総称関数への委譲(`lisp_apply(print_object_gf, (obj))`)へ書き換える。新規ビルトイン`write-string`(文字列を要求し改行無しでコンソールへ書き出し、`t`を返す)・`princ`(任意の`LispObject`を`lisp_print`経由でコンソールへ改行無しで書き出し、引数自身を返す)を追加する。既定`print-object`method(`lisp_builtin_default_print_object`、`lisp_assert_instance`で非instanceをガードしつつ従来と同じ`#<name instance>`を出力)を`lisp_make_builtin`でbuiltin closure化し、`lisp_builtins_init`内で`%ensure-generic-function`/`%add-method`をCから直接呼び出して起動時に登録する(`defmethod`マクロはstdlib.lisp読込完了まで使えないため)。`*package*`切替後も同一symbolを指し続けるよう`lisp_sym_print_object`を`lisp_symbols_init`内でキャッシュする(milestone78と同じ理由)。 |
-| 99 | package・compiled-functionの専用印字分岐 | 未着手 | `lisp_print`のgeneric-function分岐の直後に、package(`#<PACKAGE name>`)とcompiled-function(`#<COMPILED-FUNCTION>`、名前情報を持たないため`#<builtin>`/`#<macro>`と同様の無名形式)の2つの専用分岐を追加する。class/instance/generic-functionと同じ非拡張パターン(`defmethod print-object`では上書きできない)。 |
+| 99 | package・compiled-functionの専用印字分岐 | 完了 | `lisp_print`のgeneric-function分岐の直後に、package(`#<PACKAGE name>`)とcompiled-function(`#<COMPILED-FUNCTION>`、名前情報を持たないため`#<builtin>`/`#<macro>`と同様の無名形式)の2つの専用分岐を追加する。class/instance/generic-functionと同じ非拡張パターン(`defmethod print-object`では上書きできない)。 |
 
 ## スコープ外として明記する項目
 
