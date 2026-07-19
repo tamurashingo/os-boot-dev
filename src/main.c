@@ -171,6 +171,16 @@ static void lisp_screen_flush_selftest_run(EFI_SYSTEM_TABLE *SystemTable) {
     }
 }
 
+// --- VM命令ディスパッチループの1命令ごとflushフック自己テスト (milestone 127) ---
+static void lisp_vm_flush_hook_selftest_run(EFI_SYSTEM_TABLE *SystemTable) {
+    if (lisp_vm_flush_hook_selftest()) {
+        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"VM flush hook self-test: PASS\r\n");
+    } else {
+        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"VM flush hook self-test: FAIL\r\n");
+        for (;;) {}
+    }
+}
+
 // --- ビルトインexport自己テスト (milestone 101) ---
 static void lisp_reader_builtin_export_selftest_run(EFI_SYSTEM_TABLE *SystemTable) {
     if (lisp_reader_builtin_export_selftest()) {
@@ -738,6 +748,11 @@ static EFI_STATUS EFIAPI EfiMainImpl(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *S
             lisp_process_vm_state_selftest_run(SystemTable); // milestone 105: per-process vm_stack/vm_sp/lisp_active_trap分離自己テスト
             lisp_vm_yield_selftest_run(SystemTable); // milestone 106: コルーチンyieldチェック自己テスト
             lisp_process_gc_root_selftest_run(SystemTable); // milestone 107: 全プロセスGCルート登録自己テスト
+            lisp_vm_flush_hook_selftest_run(SystemTable); // milestone 127: VM命令ディスパッチループの
+                                                           // 1命令ごとflushフックが、呼び出し元の
+                                                           // 明示的なflush無しに動作することを確認する
+                                                           // (Lisp heapへのオブジェクト確保を伴うため
+                                                           // lisp_heap_init後のこの位置が必須)
 
             lisp_load_boot_file("os-package.lisp"); // milestone 102: osパッケージ作成(別ファイルに分離、下記コメント参照)
             lisp_load_boot_file("os.lisp"); // milestone 102: processクラス・os:*all-processes*・os:get-all-processes

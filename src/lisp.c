@@ -1376,9 +1376,12 @@ void lisp_read_line(EFI_SYSTEM_TABLE *SystemTable) {
 }
 
 // milestone 24: 出力ストリームのコンソール実装。milestone125で画面ダブルバッファ
-// (milestone122〜124)経由に切り替えた。1文字ずつlisp_screen_putcへ書き込み、この
-// 関数の呼び出し単位でlisp_screen_flushする暫定実装(VM命令ディスパッチループへの
-// 1命令ごとflushフックはmilestone127で追加し、その時点でこの即時flushは削除する)。
+// (milestone122〜124)経由に切り替え、1文字ずつlisp_screen_putcへ書き込む形にした。
+// この関数の呼び出し単位でlisp_screen_flushする即時flushはmilestone127でVM命令
+// ディスパッチループへの1命令ごとflushフックを追加した時点で削除済み(実転送は
+// lisp_vm_runの次の命令フェッチ前に自動的に行われる。ツリーウォーク経路(lisp_eval/
+// lisp_apply)から呼ばれた場合はこのフックを経由しないため、次にVM命令ループへ戻る
+// までflushが遅延する既知の制約がある。境界でのflush統合はmilestone128で行う)。
 // 初回呼び出し時にバッファが未初期化ならここで自動的に初期化する(起動シーケンスへの
 // 明示的な統合はmilestone128で行う)
 static void lisp_console_stream_write(void *ctx, const char *str) {
@@ -1391,7 +1394,6 @@ static void lisp_console_stream_write(void *ctx, const char *str) {
         lisp_screen_putc(str[i]);
         i++;
     }
-    lisp_screen_flush();
 }
 
 LispOutputStream lisp_make_console_stream(EFI_SYSTEM_TABLE *SystemTable) {
@@ -2194,6 +2196,19 @@ static LispObject lisp_vm_run(LispClosure *cl, UINTN fp) {
                 lisp_vm_yield_budget--;
             }
         }
+
+        // milestone127: 1命令ごとの画面バッファflushフック。次の命令をフェッチする前に
+        // 毎回無条件でlisp_screen_flushを呼ぶ(バッファ未初期化なら即座に戻る、dirtyも
+        // pending_newlinesも無ければ何もしない安価な早期returnなので、通常時のオーバーヘッドは
+        // 小さい)。これにより、milestone125で暫定的に置いていた「呼び出し単位での即時flush」を
+        // 廃止しても、書き込んだ内容は次の命令フェッチより前に必ず実転送される。ツリーウォーク
+        // 経路(lisp_eval/lisp_apply)はこのフックを一切通らないため、そちら経由の出力は次に
+        // VM命令ループへ戻った時点でまとめてflushされるまで遅延する(milestone106のyieldフックと
+        // 同型の既知の制約。境界でのflush統合はmilestone128で行う)
+        if (lisp_screen_buffer_is_initialized()) {
+            lisp_screen_flush();
+        }
+
         unsigned char op = *pc;
         pc++;
         switch (op) {
@@ -6198,6 +6213,47 @@ LispObject lisp_builtin_get_screen_size(LispObject args) {
     UINTN rows = 0;
     lisp_screen_get_size(&cols, &rows);
     return lisp_cons(lisp_make_fixnum((long long)cols), lisp_make_fixnum((long long)rows));
+}
+
+// --- VM命令ディスパッチループの1命令ごとflushフック自己テスト (milestone 127) ---
+//
+// 手作りbytecodeで「画面バッファへ1文字書き込むだけのCビルトイン」を呼び出し、その直後に
+// OP_RETURNするだけの関数をlisp_vm_execで実行する。lisp_console_stream_write経由の即時flush
+// (milestone125、本milestoneで削除済み)を一切経由せずに、lisp_screen_buffer.frontへ実際に
+// 反映されていること(=lisp_vm_run内の1命令ごとflushフックが自動的に動いたこと)を確認する
+static LispObject lisp_vm_flush_hook_selftest_write_x(LispObject args) {
+    (void)args;
+    lisp_screen_putc('X');
+    return lisp_sym_t;
+}
+
+static const unsigned char lisp_vm_flush_hook_selftest_bytecode[] = {
+    OP_CONST, 0, 0,  // 0: push constants[0] (=書き込みビルトイン)
+    OP_CALL,  0, 0,  // 3: nargs=0で呼ぶ(戻り値tがpushされる)
+    OP_RETURN,       // 6
+};
+
+int lisp_vm_flush_hook_selftest(void) {
+    lisp_screen_buffer_init();
+    if (lisp_screen_buffer.dirty != 0) return 0;
+    if (lisp_screen_buffer.row_touched[0] != 0) return 0;
+
+    LispObject constants[1];
+    constants[0] = lisp_make_builtin(lisp_vm_flush_hook_selftest_write_x);
+    LispObject fn = lisp_make_compiled(lisp_vm_flush_hook_selftest_bytecode,
+                                        sizeof(lisp_vm_flush_hook_selftest_bytecode),
+                                        constants, 1, 0, 0);
+
+    LispObject result = lisp_vm_exec(fn);
+    if (result != lisp_sym_t) return 0;
+
+    // lisp_vm_run自身が(OP_RETURNをフェッチする直前に)flushしたはずなので、
+    // 呼び出し元でlisp_screen_flushを一切呼んでいないにもかかわらずfrontへ反映されている
+    if (lisp_screen_buffer.front[0][0] != L'X') return 0;
+    if (lisp_screen_buffer.dirty != 0) return 0;
+    if (lisp_screen_buffer.row_touched[0] != 0) return 0;
+
+    return 1;
 }
 
 // milestone 29: EfiMainが起動時に標準ライブラリファイルを読み込むための入口。

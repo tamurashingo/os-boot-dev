@@ -568,10 +568,17 @@ int lisp_screen_flush_selftest(void);
 
 // milestone 125: lisp_console_stream_write(src/lisp.c内でこのヘッダの取り込みより
 // 前方に定義されている)が画面バッファ経由に切り替わったために必要な前方宣言。
-// 未初期化ならlisp_screen_buffer_initを呼び、1文字ずつlisp_screen_putcへ書き込み、
-// 呼び出し単位でlisp_screen_flushする(即時flushの暫定実装、milestone127で削除予定)
+// 未初期化ならlisp_screen_buffer_initを呼び、1文字ずつlisp_screen_putcへ書き込む
+// (即時flushはmilestone127でVM側の1命令ごとフックに置き換えたため削除済み)
 void lisp_screen_buffer_init(void);
 int lisp_screen_buffer_is_initialized(void);
 void lisp_screen_putc(char ch);
+
+// milestone 127: lisp_vm_run(src/lisp.c内でこのヘッダの取り込みより前方に定義されている)
+// のディスパッチループへ、次の命令をフェッチする前に無条件でlisp_screen_flushを呼ぶ
+// 1命令ごとflushフックを追加した。手作りbytecodeでこのフックが実際に動作すること
+// (呼び出し元が明示的にlisp_screen_flushを呼ばなくても内容がfrontへ反映されること)を
+// 検証する自己テスト
+int lisp_vm_flush_hook_selftest(void);
 
 #endif // OS_BOOT_DEV_LISP_H
