@@ -82,3 +82,64 @@
 ; (動的変数を除き)何も見つけられない。現状これが機能するのは、thunkの生成自体が
 ; &optional/&rest等でツリーウォークへフォールバックする経路の場合のみである
 (defun os:process-local-variable (p sym) (%process-local-variable p sym))
+
+; milestone 114: プロセス環境インスペクタ。
+;
+; 他プロセスの状態を、通常のシェル/REPL(このプロセス自身)から安全に覗くためのLispレベルの
+; 対話ユーティリティ。新規Cビルトインは追加せず、既存のdo-symbols系マクロ(milestone91、
+; documents/lisp_package_operations.md)とprocess-local-variable(113)の組み合わせのみで
+; 実装する。
+;
+; fork側パッケージ(milestone108)そのものを返す薄いアクセサ
+(defun os:process-package (p) (slot-value p 'package))
+
+; プロセスのfork側パッケージからアクセス可能な全シンボル(ローカル+useしている
+; common-lisp-user経由の継承分。milestone91のdo-symbolsが辿るのと同じ集合)のうち、
+; 関数束縛(fboundp)されているものを(symbol . function)の連想リストとして返す。
+; 「他プロセスの…関数定義を覗く」の中心部分。do-symbolsは値を集約する機能を持たない
+; 素朴なループマクロ(milestone91)なので、setqによる明示的なリスト構築
+; (test-package.lispのrun-test-package-do-symbols等と同じ既存パターン)で結果を組み立てる
+(defun os:process-function-definitions (p)
+  (let ((acc nil))
+    (do-symbols (s (os:process-package p))
+      (if (fboundp s)
+          (setq acc (cons (cons s (symbol-function s)) acc))
+          nil))
+    acc))
+
+; プロセスのレキシカル環境(envスロット。%process-resumeが初回起動時にthunkのenvを捕捉した
+; alist、milestone113)に束縛されている変数名一覧。process-local-variableは名前を渡して値を
+; 読む一方向のAPIなので、対象の名前自体を知る手段が別途必要になる。envスロット自体は素の
+; alistなので、carを取るだけで名前一覧が得られる(未起動なら常にnilなので空リストになる
+; だけで安全にスキップされる)。os:を付けない内部ヘルパーであり、exportしない
+(defun process-lexical-variable-names (p)
+  (mapcar #'car (slot-value p 'env)))
+
+(defun process-lexical-variables-helper (p names)
+  (if (null names)
+      nil
+      (cons (cons (car names) (os:process-local-variable p (car names)))
+            (process-lexical-variables-helper p (cdr names)))))
+
+; 変数名一覧(envスロットの直接参照)と、process-local-variable(113、公式アクセサ)経由の
+; 値読み取りを組み合わせる、本マイルストーンの中心的な結合部分。(symbol . value)の
+; 連想リストを返す
+(defun os:process-lexical-variables (p)
+  (process-lexical-variables-helper p (process-lexical-variable-names p)))
+
+; 上記2つ(関数定義一覧・レキシカル変数一覧)とプロセス自身のname/status/パッケージを
+; 1つの構造にまとめた、インスペクタのトップレベルエントリポイント。本処理系にはprintf的な
+; 整形出力手段が無いため、「対話ユーティリティ」はslot-value/car/cdrで覗ける構造化データを
+; 返す関数として実装する(既存のprocess関連ビルトイン群と同じ設計方針)。
+;
+; package-nameはpkg_nameから毎回新規に文字列を作って返すため(string=が本処理系に無いことと
+; 対称に、呼び出し毎にeqでない別オブジェクトが返る)、呼び出し元がeqで同一性確認したい場合は
+; package自体(オブジェクト)を使うべきなので、'packageで生のパッケージオブジェクトも
+; 併せて返す。'package-nameは表示用の文字列として別途保持する
+(defun os:inspect-process (p)
+  (list (cons 'name (slot-value p 'name))
+        (cons 'status (slot-value p 'status))
+        (cons 'package (os:process-package p))
+        (cons 'package-name (package-name (os:process-package p)))
+        (cons 'functions (os:process-function-definitions p))
+        (cons 'lexical-variables (os:process-lexical-variables p))))

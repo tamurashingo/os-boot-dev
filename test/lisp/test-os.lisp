@@ -149,6 +149,47 @@
       (and (eq (slot-value p 'status) :finished)
            (eq (os:process-local-variable p 'secret) secret)))))
 
+; milestone 114: プロセス環境インスペクタ(os:inspect-process)の検証。
+;
+; thunkはletでレキシカル変数secretを束縛した内側で生成するlambda(process-local-variableの
+; ためツリーウォークへフォールバックさせる&optional dummyが必要、milestone113と同じ理由)とし、
+; その内側でさらにfork側パッケージへ新規関数m114-marker-fnをdefun(%set-symbol-function経由、
+; run-test-os-make-process-fork-redefineと同じ理由でshadow手順は不要、単純な新規internなので
+; ベースとの名前衝突自体が無い)してから起動する。os:inspect-processの戻り値から、
+; (1)packageがfork側パッケージ自体とeqであること(package-nameは呼び出し毎に新規文字列を
+; 作るため、string=の無い本処理系ではeq比較に使えない。os:inspect-processが'packageで
+; 生のパッケージオブジェクトも返すのはこのため)、(2)functionsにm114-marker-fnの
+; (symbol . function)ペアが含まれ、そのcdrがsymbol-functionの戻り値とeqであること、
+; (3)lexical-variablesにsecretが999として含まれることを確認する。
+;
+; assocに相当する組み込みが本処理系に無いため、(key . value)の連想リストからcarがkeyと
+; eqな要素を探すローカルヘルパーfind-pair-eqを用意する
+(defun find-pair-eq (key alist)
+  (if (null alist)
+      nil
+      (if (eq (car (car alist)) key)
+          (car alist)
+          (find-pair-eq key (cdr alist)))))
+
+(defun run-test-os-inspect-process (&optional dummy)
+  (let ((p (os:make-process))
+        (secret 999))
+    (let* ((fork-pkg (slot-value p 'package))
+           (marker-sym (intern "m114-marker-fn" fork-pkg)))
+      (%set-symbol-function marker-sym (lambda () 'm114-marker-value))
+      (let ((thunk (lambda () nil)))
+        (os:process-resume p thunk)
+        (let* ((info (os:inspect-process p))
+               (functions (cdr (find-pair-eq 'functions info)))
+               (lexical-vars (cdr (find-pair-eq 'lexical-variables info)))
+               (fn-pair (find-pair-eq marker-sym functions))
+               (var-pair (find-pair-eq 'secret lexical-vars)))
+          (and (eq (cdr (find-pair-eq 'package info)) fork-pkg)
+               (not (eq fn-pair nil))
+               (eq (cdr fn-pair) (symbol-function marker-sym))
+               (not (eq var-pair nil))
+               (eq (cdr var-pair) secret)))))))
+
 (defun run-test-os ()
   (and (run-test-os-process-class-exists)
        (run-test-os-process-slots)
@@ -158,4 +199,5 @@
        (run-test-os-make-process-fork-package)
        (run-test-os-make-process-fork-redefine)
        (run-test-os-process-suspend-resume)
-       (run-test-os-process-local-variable)))
+       (run-test-os-process-local-variable)
+       (run-test-os-inspect-process)))
