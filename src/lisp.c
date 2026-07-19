@@ -5647,6 +5647,30 @@ LispObject lisp_builtin_princ(LispObject args) {
     return obj;
 }
 
+// milestone118: Lispコード(os:switch-processのプロセス選択メニュー等)がコンソールから
+// 1式読み込むための薄いビルトイン。プロンプト文字列を表示した後、REPL本体
+// (main.cのEfiMainImpl、milestone6/8)と全く同じlisp_read_line/lisp_read_from_bufferを
+// そのまま再利用するだけであり、ConIn(EFI_SIMPLE_TEXT_INPUT_PROTOCOL)以外のプロトコルには
+// 一切触れない。そのため、EFI_SIMPLE_TEXT_INPUT_EX_PROTOCOL(milestone116/117)の
+// キーイベントキューと衝突する余地を新たに持たない。空行が入力された場合はプロンプトを
+// 再表示して読み直す(REPL本体の「空行ならcontinue」とは異なり、こちらは必ず1式返す必要が
+// あるため)
+LispObject lisp_builtin_read_console_expr(LispObject args) {
+    LispObject prompt_obj = lisp_car(args);
+    lisp_assert_string(prompt_obj);
+    LispClosure *prompt = lisp_closure_cell(prompt_obj);
+
+    LispOutputStream stream = lisp_make_console_stream(g_system_table);
+    for (;;) {
+        lisp_print_ascii(&stream, prompt->str_data);
+        lisp_read_line(g_system_table);
+        if (input_length == 0) {
+            continue;
+        }
+        return lisp_read_from_buffer(input_buffer);
+    }
+}
+
 // milestone 29: EfiMainが起動時に標準ライブラリファイルを読み込むための入口。
 // lisp_builtin_loadはLisp文字列オブジェクトの引数リストを要求するので、
 // Cの文字列リテラルからそれを組み立てるだけの薄いラッパー
@@ -6653,6 +6677,7 @@ void lisp_builtins_init(void) {
     // milestone98: print-objectのmethod本体が出力を組み立てるための基本手段
     LISP_REGISTER_BUILTIN("write-string", lisp_builtin_write_string);
     LISP_REGISTER_BUILTIN("princ", lisp_builtin_princ);
+    LISP_REGISTER_BUILTIN("%read-console-expr", lisp_builtin_read_console_expr);
     LISP_REGISTER_BUILTIN("sleep", lisp_builtin_sleep);
     LISP_REGISTER_BUILTIN("gensym", lisp_builtin_gensym);
     LISP_REGISTER_BUILTIN("gc", lisp_builtin_gc);

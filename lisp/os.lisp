@@ -170,3 +170,77 @@
             (let ((base-sym (intern name)))
               (%set-symbol-function (car found) (symbol-function base-sym))
               (car found))))))
+
+; milestone 118: プロセス一覧UI・REPL切替。
+;
+; documents/lisp_os_process.mdの計画ではCtrl2回連続押下(117)からの自動発火でこの機能へ
+; 入ることを想定していたが、ConIn(EFI_SIMPLE_TEXT_INPUT_PROTOCOL、REPL本体のlisp_read_line
+; が使う)とEFI_SIMPLE_TEXT_INPUT_EX_PROTOCOL(116/117が使う)が実機/ファームウェア上で
+; 同一の下位キーストロークキューを共有している可能性があり、その場合メインREPLループの
+; ホットパスへライブなCtrl検知を組み込むと、REPL通常入力に向かうべき文字を横取りして
+; 静かに入力を破壊するリスクがある。この可能性は-display noneのヘッドレスQEMUテスト
+; 環境では検証も反証もできない(GUI/実キーボードが無い)。make testが常時実行する既存28
+; テストフィクスチャ全てが通るメインREPLループにこの未検証のリスクを晒さないため、本
+; マイルストーンはスコープを絞り、ユーザーが明示的に呼び出すコマンド(os:switch-process)
+; としてのみ実装する。ライブなCtrl-Ctrl自動発火のメインループへの統合は、実機/GUI環境で
+; 検証可能になるまで意図的に見送る(隠さず明記する)
+;
+; %read-console-expr(新規Cビルトイン、src/lisp.c)はConInのみを使う既存のlisp_read_line/
+; lisp_read_from_buffer(milestone6/8、REPL本体と全く同じ経路)をそのまま再利用するだけで
+; あり、EFI_SIMPLE_TEXT_INPUT_EX_PROTOCOLには一切触れないため、上記のキュー競合リスクを
+; 新たに持ち込まない
+; defun本体は単一formのみという既存の制約(milestone21のprogn gotcha、
+; documents/lisp_macroexpand.md等参照)に従い、複数の出力呼び出しを明示的な
+; (progn ...)でまとめて1つのformにする
+(defun %print-process-entry (p idx)
+  (progn
+    (write-string "  ")
+    (princ idx)
+    (write-string ") ")
+    (princ (slot-value p 'name))
+    (write-string " [")
+    (princ (slot-value p 'status))
+    (write-string "]")
+    (write-line "")))
+
+(defun %print-process-menu (processes idx)
+  (if (null processes)
+      nil
+      (progn
+        (%print-process-entry (car processes) idx)
+        (%print-process-menu (cdr processes) (+ idx 1)))))
+
+(defun %nth-process-or-nil (processes idx)
+  (if (null processes)
+      nil
+      (if (zerop idx)
+          (car processes)
+          (%nth-process-or-nil (cdr processes) (1- idx)))))
+
+; フェーズCのコンテキスト切替機構(104-107)とプロセスレジストリ(102)・process-resume(112)を
+; そのまま使う。選択したプロセスがまだ一度もresumeされていない(statusスロットがnil)場合、
+; %process-resumeはthunkが無いとpanicするため、事前にstatusを見て案内する(thunkはmake-process
+; 時点では持たないので、この関数からは起動できない=既存のos:process-resumeを直接thunk付きで
+; 呼んでもらう必要がある)。
+;
+; os:process-resumeはブロッキングであり、選択したプロセスがsuspendするか実行を終えるまで
+; この関数自体が戻らない。つまり呼び出しが戻ってきた時点で制御がこのREPL(呼び出し元プロセス)
+; に戻ったことを意味し、これが「アクティブなREPLを選択したプロセスへ切り替える」の実体になる
+(defun os:switch-process ()
+  (let ((processes (os:get-all-processes)))
+    (if (null processes)
+        (write-line "No processes registered.")
+        (progn
+          (write-line "Processes:")
+          (%print-process-menu processes 0)
+          (let ((selection (%read-console-expr "Select process number (nil to cancel): ")))
+            (if (null selection)
+                (write-line "Cancelled.")
+                (let ((chosen (%nth-process-or-nil processes selection)))
+                  (if (null chosen)
+                      (write-line "Invalid selection.")
+                      (if (null (slot-value chosen 'status))
+                          (write-line "That process has not started yet (needs a thunk; call os:process-resume directly).")
+                          (progn
+                            (os:process-resume chosen)
+                            (write-line "Returned to this REPL.")))))))))))
