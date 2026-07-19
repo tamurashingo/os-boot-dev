@@ -161,6 +161,16 @@ static void lisp_screen_putc_selftest_run(EFI_SYSTEM_TABLE *SystemTable) {
     }
 }
 
+// --- 画面バッファflush自己テスト (milestone 124) ---
+static void lisp_screen_flush_selftest_run(EFI_SYSTEM_TABLE *SystemTable) {
+    if (lisp_screen_flush_selftest()) {
+        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"Screen flush self-test: PASS\r\n");
+    } else {
+        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"Screen flush self-test: FAIL\r\n");
+        for (;;) {}
+    }
+}
+
 // --- ビルトインexport自己テスト (milestone 101) ---
 static void lisp_reader_builtin_export_selftest_run(EFI_SYSTEM_TABLE *SystemTable) {
     if (lisp_reader_builtin_export_selftest()) {
@@ -620,6 +630,10 @@ static EFI_STATUS EFIAPI EfiMainImpl(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *S
                                                    // 既存の出力経路には未接続の単体テスト
     lisp_screen_putc_selftest_run(SystemTable); // milestone 123: 1文字書き込み・改行・
                                                  // 行末折り返し・スクロールを確認する
+    lisp_screen_flush_selftest_run(SystemTable); // milestone 124: back/front差分のみを
+                                                  // SetCursorPosition+OutputStringで反映し、
+                                                  // pending_newlines分の実"\r\n"送出を
+                                                  // 呼び出し回数ベースで確認する
     lisp_input_ex_init(); // milestone 116: EFI_SIMPLE_TEXT_INPUT_EX_PROTOCOLをLocateProtocolで
                            // 取得する(見つからなければg_text_input_exはNULLのまま、panicしない)
     if (g_text_input_ex != (void *)0) {

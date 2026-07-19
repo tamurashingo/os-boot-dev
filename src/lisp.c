@@ -5946,6 +5946,147 @@ int lisp_screen_putc_selftest(void) {
     return 1;
 }
 
+// milestone124: back/frontの差分のみを実際のConOutへ反映する。1行内で連続してback
+// がfrontと異なるセルの区間(run)ごとに1回のSetCursorPosition+OutputStringにまとめ、
+// 画面全体を毎回送り直すことを避ける。pending_newlines分の実"\r\n"はセル差分とは
+// 独立に送出する(milestone123で改行はセル差分として表現しないことにした設計上の
+// 帰結。scripts/run_test.pyが行区切り検出に実際の改行バイトを要求するため、内容が
+// 変化していなくても改行だけは送出する必要がある)。最後にハードウェアカーソルを
+// 論理カーソル位置(cursor_col, cursor_row)へ合わせる。
+// C自己テストからUEFI呼び出し回数を検証できるよう、実ファームウェア呼び出し自体は
+// 差し替えず、本関数がSetCursorPosition/OutputStringを呼ぶと"決定"した回数を
+// 静的カウンタに記録する
+static UINTN lisp_screen_flush_cell_output_count = 0;
+static UINTN lisp_screen_flush_set_cursor_count = 0;
+static UINTN lisp_screen_flush_newline_output_count = 0;
+static CHAR16 lisp_screen_flush_run_buffer[LISP_SCREEN_COLS_MAX + 1];
+
+void lisp_screen_flush(void) {
+    EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL *out = g_system_table->ConOut;
+
+    if (!lisp_screen_buffer.dirty && lisp_screen_buffer.pending_newlines == 0) {
+        return;
+    }
+
+    for (UINTN r = 0; r < lisp_screen_buffer.rows; r++) {
+        UINTN c = 0;
+        while (c < lisp_screen_buffer.cols) {
+            if (lisp_screen_buffer.back[r][c] == lisp_screen_buffer.front[r][c]) {
+                c++;
+                continue;
+            }
+            UINTN run_start = c;
+            UINTN run_len = 0;
+            while (c < lisp_screen_buffer.cols && lisp_screen_buffer.back[r][c] != lisp_screen_buffer.front[r][c]) {
+                lisp_screen_flush_run_buffer[run_len] = lisp_screen_buffer.back[r][c];
+                lisp_screen_buffer.front[r][c] = lisp_screen_buffer.back[r][c];
+                run_len++;
+                c++;
+            }
+            lisp_screen_flush_run_buffer[run_len] = 0;
+
+            if (out->SetCursorPosition(out, run_start, r) != 0) {
+                lisp_panic(L"lisp_screen_flush: SetCursorPosition failed");
+            }
+            lisp_screen_flush_set_cursor_count++;
+            if (out->OutputString(out, lisp_screen_flush_run_buffer) != 0) {
+                lisp_panic(L"lisp_screen_flush: OutputString failed");
+            }
+            lisp_screen_flush_cell_output_count++;
+        }
+    }
+
+    for (UINTN i = 0; i < lisp_screen_buffer.pending_newlines; i++) {
+        if (out->OutputString(out, L"\r\n") != 0) {
+            lisp_panic(L"lisp_screen_flush: OutputString(newline) failed");
+        }
+        lisp_screen_flush_newline_output_count++;
+    }
+    lisp_screen_buffer.pending_newlines = 0;
+
+    if (out->SetCursorPosition(out, lisp_screen_buffer.cursor_col, lisp_screen_buffer.cursor_row) != 0) {
+        lisp_panic(L"lisp_screen_flush: SetCursorPosition (final) failed");
+    }
+    lisp_screen_flush_set_cursor_count++;
+
+    lisp_screen_buffer.dirty = 0;
+}
+
+// milestone124: lisp_screen_flushが実際にSetCursorPosition/OutputStringを呼ぶと
+// 決定した回数を、既知のback/front差分パターンに対して検証する
+int lisp_screen_flush_selftest(void) {
+    // (1) 何も変化していなければ何も送出しない
+    lisp_screen_buffer_init();
+    UINTN cell0 = lisp_screen_flush_cell_output_count;
+    UINTN cursor0 = lisp_screen_flush_set_cursor_count;
+    UINTN nl0 = lisp_screen_flush_newline_output_count;
+    lisp_screen_flush();
+    if (lisp_screen_flush_cell_output_count != cell0) return 0;
+    if (lisp_screen_flush_set_cursor_count != cursor0) return 0;
+    if (lisp_screen_flush_newline_output_count != nl0) return 0;
+
+    // (2) 1文字書き込み: run1個(1文字分のOutputString)+最終カーソル合わせで、
+    // cell_output+1、set_cursor+2
+    lisp_screen_buffer_init();
+    lisp_screen_putc('A');
+    cell0 = lisp_screen_flush_cell_output_count;
+    cursor0 = lisp_screen_flush_set_cursor_count;
+    nl0 = lisp_screen_flush_newline_output_count;
+    lisp_screen_flush();
+    if (lisp_screen_flush_cell_output_count != cell0 + 1) return 0;
+    if (lisp_screen_flush_set_cursor_count != cursor0 + 2) return 0;
+    if (lisp_screen_flush_newline_output_count != nl0) return 0;
+    if (lisp_screen_buffer.front[0][0] != L'A') return 0;
+    if (lisp_screen_buffer.dirty != 0) return 0;
+
+    // front/backが同期済みの直後にもう一度flushしても追加送出は発生しない
+    cell0 = lisp_screen_flush_cell_output_count;
+    cursor0 = lisp_screen_flush_set_cursor_count;
+    lisp_screen_flush();
+    if (lisp_screen_flush_cell_output_count != cell0) return 0;
+    if (lisp_screen_flush_set_cursor_count != cursor0) return 0;
+
+    // (3) 隣接する2文字は1つのrunにまとまる: cell_output+1、set_cursor+2
+    lisp_screen_buffer_init();
+    lisp_screen_putc('A');
+    lisp_screen_putc('B');
+    cell0 = lisp_screen_flush_cell_output_count;
+    cursor0 = lisp_screen_flush_set_cursor_count;
+    lisp_screen_flush();
+    if (lisp_screen_flush_cell_output_count != cell0 + 1) return 0;
+    if (lisp_screen_flush_set_cursor_count != cursor0 + 2) return 0;
+    if (lisp_screen_buffer.front[0][0] != L'A' || lisp_screen_buffer.front[0][1] != L'B') return 0;
+
+    // (4) 同じ行で離れた2文字(間はスペースでfrontの初期値と一致)は2つのrunに分かれる:
+    // cell_output+2、set_cursor+3
+    lisp_screen_buffer_init();
+    lisp_screen_putc('A');
+    lisp_screen_putc(' ');
+    lisp_screen_putc(' ');
+    lisp_screen_putc('B');
+    cell0 = lisp_screen_flush_cell_output_count;
+    cursor0 = lisp_screen_flush_set_cursor_count;
+    lisp_screen_flush();
+    if (lisp_screen_flush_cell_output_count != cell0 + 2) return 0;
+    if (lisp_screen_flush_set_cursor_count != cursor0 + 3) return 0;
+
+    // (5) 改行のみ(セル内容は不変、dirtyも立たない)でもpending_newlines分の実"\r\n"は
+    // 送出され、最終カーソル合わせの1回だけset_cursorが増える
+    lisp_screen_buffer_init();
+    lisp_screen_putc('\n');
+    if (lisp_screen_buffer.dirty != 0) return 0;
+    cell0 = lisp_screen_flush_cell_output_count;
+    cursor0 = lisp_screen_flush_set_cursor_count;
+    nl0 = lisp_screen_flush_newline_output_count;
+    lisp_screen_flush();
+    if (lisp_screen_flush_cell_output_count != cell0) return 0;
+    if (lisp_screen_flush_newline_output_count != nl0 + 1) return 0;
+    if (lisp_screen_flush_set_cursor_count != cursor0 + 1) return 0;
+    if (lisp_screen_buffer.pending_newlines != 0) return 0;
+
+    return 1;
+}
+
 // milestone 29: EfiMainが起動時に標準ライブラリファイルを読み込むための入口。
 // lisp_builtin_loadはLisp文字列オブジェクトの引数リストを要求するので、
 // Cの文字列リテラルからそれを組み立てるだけの薄いラッパー

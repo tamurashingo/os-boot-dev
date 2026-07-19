@@ -558,4 +558,12 @@ int lisp_screen_buffer_selftest(void);
 // それぞれ独立に検証する
 int lisp_screen_putc_selftest(void);
 
+// milestone 124: lisp_screen_flush(back/frontの差分のみをSetCursorPosition+
+// OutputStringで実際のConOutへ反映し、pending_newlines分の実"\r\n"を送出してから
+// ハードウェアカーソルを論理カーソル位置へ合わせる)を実際に呼び、既知のback/front
+// 差分パターンに対してSetCursorPosition/OutputStringの呼び出し回数が期待通りである
+// ことを検証する
+void lisp_screen_flush(void);
+int lisp_screen_flush_selftest(void);
+
 #endif // OS_BOOT_DEV_LISP_H
