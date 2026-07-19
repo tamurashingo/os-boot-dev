@@ -5405,6 +5405,105 @@ int lisp_key_state_selftest(void) {
     return 1;
 }
 
+LispCtrlWaitOutcome lisp_ctrl_wait_classify(UINTN fired_index, const EFI_KEY_DATA *key_data) {
+    if (fired_index == LISP_CTRL_WAIT_TIMER_INDEX) {
+        return LISP_CTRL_WAIT_OUTCOME_TIMEOUT;
+    }
+    if (lisp_key_state_is_lone_ctrl(key_data)) {
+        return LISP_CTRL_WAIT_OUTCOME_MATCH;
+    }
+    return LISP_CTRL_WAIT_OUTCOME_DISCARD;
+}
+
+int lisp_ctrl_wait_classify_selftest(void) {
+    EFI_KEY_DATA dummy;
+    dummy.Key.ScanCode = 0;
+    dummy.Key.UnicodeChar = 0;
+    dummy.KeyState.KeyShiftState = 0;
+    dummy.KeyState.KeyToggleState = 0;
+    // タイマー側が発火した場合は鍵データの内容に関わらずタイムアウト
+    if (lisp_ctrl_wait_classify(LISP_CTRL_WAIT_TIMER_INDEX, &dummy) != LISP_CTRL_WAIT_OUTCOME_TIMEOUT) {
+        return 0;
+    }
+
+    EFI_KEY_DATA lone_ctrl = dummy;
+    lone_ctrl.KeyState.KeyShiftState = EFI_SHIFT_STATE_VALID | EFI_LEFT_CONTROL_PRESSED;
+    if (lisp_ctrl_wait_classify(LISP_CTRL_WAIT_KEY_INDEX, &lone_ctrl) != LISP_CTRL_WAIT_OUTCOME_MATCH) {
+        return 0;
+    }
+
+    EFI_KEY_DATA plain_a = dummy;
+    plain_a.Key.UnicodeChar = (CHAR16)'a';
+    plain_a.KeyState.KeyShiftState = EFI_SHIFT_STATE_VALID;
+    if (lisp_ctrl_wait_classify(LISP_CTRL_WAIT_KEY_INDEX, &plain_a) != LISP_CTRL_WAIT_OUTCOME_DISCARD) {
+        return 0;
+    }
+
+    return 1;
+}
+
+// milestone 117: lisp_builtin_sleep(milestone25)と同じCreateEvent/SetTimer/WaitForEvent/
+// CloseEventパターンを、g_text_input_ex->WaitForKeyExとの複数イベント同時待ちへ拡張した
+// もの。g_text_input_exが未検出ならそもそも判定不能として0を返す
+int lisp_wait_for_double_ctrl(UINT64 window_100ns) {
+    if (g_text_input_ex == (void *)0) {
+        return 0;
+    }
+    EFI_BOOT_SERVICES *bs = g_system_table->BootServices;
+
+    // 1回目のCtrl単体押下を無期限に待つ(マッチしない鍵イベントは読み捨てて待ち続ける)
+    for (;;) {
+        UINTN index;
+        EFI_EVENT wait_events[1];
+        wait_events[LISP_CTRL_WAIT_KEY_INDEX] = g_text_input_ex->WaitForKeyEx;
+        if (bs->WaitForEvent(1, wait_events, &index) != 0) {
+            lisp_panic(L"double-ctrl: failed to wait for first key event");
+        }
+        EFI_KEY_DATA key_data;
+        if (g_text_input_ex->ReadKeyStrokeEx(g_text_input_ex, &key_data) != 0) {
+            continue;
+        }
+        if (lisp_ctrl_wait_classify(LISP_CTRL_WAIT_KEY_INDEX, &key_data) == LISP_CTRL_WAIT_OUTCOME_MATCH) {
+            break;
+        }
+    }
+
+    // 2回目のCtrl単体押下がwindow_100ns以内に来るかを判定する
+    EFI_EVENT timer_event;
+    if (bs->CreateEvent(EVT_TIMER, TPL_APPLICATION, (void *)0, (void *)0, &timer_event) != 0) {
+        lisp_panic(L"double-ctrl: failed to create timer event");
+    }
+    if (bs->SetTimer(timer_event, TimerRelative, window_100ns) != 0) {
+        lisp_panic(L"double-ctrl: failed to set timer");
+    }
+
+    int matched = 0;
+    for (;;) {
+        UINTN index;
+        EFI_EVENT wait_events[2];
+        wait_events[LISP_CTRL_WAIT_KEY_INDEX] = g_text_input_ex->WaitForKeyEx;
+        wait_events[LISP_CTRL_WAIT_TIMER_INDEX] = timer_event;
+        if (bs->WaitForEvent(2, wait_events, &index) != 0) {
+            lisp_panic(L"double-ctrl: failed to wait for second key/timer event");
+        }
+        if (index == LISP_CTRL_WAIT_TIMER_INDEX) {
+            matched = 0;
+            break;
+        }
+        EFI_KEY_DATA key_data;
+        if (g_text_input_ex->ReadKeyStrokeEx(g_text_input_ex, &key_data) != 0) {
+            continue;
+        }
+        if (lisp_ctrl_wait_classify(index, &key_data) == LISP_CTRL_WAIT_OUTCOME_MATCH) {
+            matched = 1;
+            break;
+        }
+        // DISCARD: Ctrl以外の鍵イベントだったので待ち続ける(timer_eventはまだ未消費)
+    }
+    bs->CloseEvent(timer_event);
+    return matched;
+}
+
 // milestone 41: lisp/stdlib.lispがコメントを含めて8192byteを超えたため、無警告で
 // 末尾が読み捨てられる(truncateされてもlisp_load_eval_buffer側はEOFとして正常終了する
 // ため検知できない)事故を防ぐ目的で32768byteへ拡張した。milestone46でstdlib.lispが

@@ -121,6 +121,16 @@ static void lisp_key_state_selftest_run(EFI_SYSTEM_TABLE *SystemTable) {
     }
 }
 
+// --- Ctrl2回連続押下判定ロジック自己テスト (milestone 117) ---
+static void lisp_ctrl_wait_classify_selftest_run(EFI_SYSTEM_TABLE *SystemTable) {
+    if (lisp_ctrl_wait_classify_selftest()) {
+        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"Ctrl double-press classify self-test: PASS\r\n");
+    } else {
+        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"Ctrl double-press classify self-test: FAIL\r\n");
+        for (;;) {}
+    }
+}
+
 // --- ビルトインexport自己テスト (milestone 101) ---
 static void lisp_reader_builtin_export_selftest_run(EFI_SYSTEM_TABLE *SystemTable) {
     if (lisp_reader_builtin_export_selftest()) {
@@ -569,6 +579,9 @@ static EFI_STATUS EFIAPI EfiMainImpl(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *S
 
     lisp_key_state_selftest_run(SystemTable); // milestone 116: Ctrl単体押下判定ロジック自己テスト
                                                // (実機キー入力に依存しない純粋な判定ロジックのみ検証)
+    lisp_ctrl_wait_classify_selftest_run(SystemTable); // milestone 117: Ctrl2回連続押下判定の
+                                                        // 分類ロジック自己テスト(同様に実機キー
+                                                        // 入力に依存しない)
     lisp_input_ex_init(); // milestone 116: EFI_SIMPLE_TEXT_INPUT_EX_PROTOCOLをLocateProtocolで
                            // 取得する(見つからなければg_text_input_exはNULLのまま、panicしない)
     if (g_text_input_ex != (void *)0) {

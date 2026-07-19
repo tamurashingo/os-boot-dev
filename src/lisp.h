@@ -506,4 +506,37 @@ int lisp_key_state_is_lone_ctrl(const EFI_KEY_DATA *key_data);
 // 手組みのEFI_KEY_DATA値で検証する自己テスト。真なら成功
 int lisp_key_state_selftest(void);
 
+// --- Ctrl2回連続押下判定 (milestone 117) ---
+//
+// lisp_wait_for_double_ctrlのWaitForEventループが「どちらのイベントが発火したか
+// (fired_index。鍵イベント側の配列添字がLISP_CTRL_WAIT_KEY_INDEX、タイマー側が
+// LISP_CTRL_WAIT_TIMER_INDEX)」と「鍵イベントだった場合その内容」から、タイムアウト
+// (2回目が来る前にウィンドウが尽きた)／マッチ(Ctrl単体の2回目)／無視して待ち続ける
+// (Ctrl以外の鍵イベント)のいずれかへ分類する。実際のUEFI呼び出しに依存しない部分だけを
+// 切り出しており、単独で自己テスト可能
+#define LISP_CTRL_WAIT_KEY_INDEX 0
+#define LISP_CTRL_WAIT_TIMER_INDEX 1
+
+typedef enum {
+    LISP_CTRL_WAIT_OUTCOME_MATCH,
+    LISP_CTRL_WAIT_OUTCOME_DISCARD,
+    LISP_CTRL_WAIT_OUTCOME_TIMEOUT
+} LispCtrlWaitOutcome;
+
+LispCtrlWaitOutcome lisp_ctrl_wait_classify(UINTN fired_index, const EFI_KEY_DATA *key_data);
+
+// lisp_ctrl_wait_classifyを、実機・ファームウェアのキー入力に依存しない手組みの
+// (fired_index, EFI_KEY_DATA)組み合わせで検証する自己テスト。真なら成功
+int lisp_ctrl_wait_classify_selftest(void);
+
+// g_text_input_exのWaitForKeyExイベントとCreateEvent(EVT_TIMER)/SetTimer(TimerRelative)
+// で作った使い捨てタイマーイベントをWaitForEventへ同時に渡し(lisp_builtin_sleep、
+// milestone25と同型のCreateEvent/SetTimer/WaitForEvent/CloseEventパターンを複数イベント
+// 同時待ちへ拡張したもの)、1回目のCtrl単体押下を無期限に待った後、2回目のCtrl単体押下が
+// window_100ns(UEFIネイティブ単位=100ns)以内に来たかを判定する。真(1)なら2回目が
+// ウィンドウ内に来た、偽(0)ならタイムアウトした、またはg_text_input_exが未検出(NULL)で
+// そもそも判定不能。実機のキー入力配信に依存するため、make testのヘッドレスQEMU環境では
+// 呼び出されない(milestone116同様の既知の限界)
+int lisp_wait_for_double_ctrl(UINT64 window_100ns);
+
 #endif // OS_BOOT_DEV_LISP_H
