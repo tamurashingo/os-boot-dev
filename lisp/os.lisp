@@ -226,6 +226,25 @@
 ; os:process-resumeはブロッキングであり、選択したプロセスがsuspendするか実行を終えるまで
 ; この関数自体が戻らない。つまり呼び出しが戻ってきた時点で制御がこのREPL(呼び出し元プロセス)
 ; に戻ったことを意味し、これが「アクティブなREPLを選択したプロセスへ切り替える」の実体になる
+; milestone 129: カーソル制御・画面ダブルバッファリングロードマップの最終マイルストーン。
+; フェーズI〜K(119〜128)でCビルトイン%set-cursor-position/%get-screen-size/%clear-screen
+; (画面ダブルバッファ・VM命令ディスパッチループ経由のflush込み)まで整備済みなので、ここでは
+; ユーザーが元々提示していたコード例どおりの薄いLispラッパーのみを追加する。
+;
+; os:goto-xyは%set-cursor-position(col row、0始まり、milestone120/126)への1対1の委譲
+(defun os:goto-xy (x y) (%set-cursor-position x y))
+
+; os:clear-screenは%clear-screen(milestone120/126)への1対1の委譲
+(defun os:clear-screen () (%clear-screen))
+
+; os:print-atはos:goto-xyでカーソルを移動した後、write-string(milestone98)で文字列を
+; 出力する。defun本体は単一form限定という既存の制約(milestone21のprogn gotcha)に従い、
+; 2つの呼び出しを明示的なprognでまとめる
+(defun os:print-at (x y string)
+  (progn
+    (os:goto-xy x y)
+    (write-string string)))
+
 (defun os:switch-process ()
   (let ((processes (os:get-all-processes)))
     (if (null processes)

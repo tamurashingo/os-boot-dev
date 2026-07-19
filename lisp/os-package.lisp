@@ -12,4 +12,6 @@
            "process-resume" "process-suspend" "process-local-variable"
            "process-package" "process-function-definitions"
            "process-lexical-variables" "inspect-process" "revert-function"
-           "switch-process"))
+           "switch-process"
+           ; milestone 129: カーソル制御・画面バッファのLispラッパー
+           "goto-xy" "print-at" "clear-screen"))

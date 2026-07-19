@@ -106,7 +106,7 @@
 
 | # | マイルストーン | 状態 | 主な内容 |
 |---|---|---|---|
-| 129 | `os:goto-xy`/`os:print-at`/`os:clear-screen` | 未着手 | `lisp/os.lisp`にユーザー提示のコード例どおりのラッパーを追加する。`test-console.lisp`にエラーにならないことの確認を追加し、本ドキュメントを確定稿にする。 |
+| 129 | `os:goto-xy`/`os:print-at`/`os:clear-screen` | 完了 | `lisp/os.lisp`に`os:goto-xy`(`%set-cursor-position`への1対1委譲)/`os:clear-screen`(`%clear-screen`への1対1委譲)/`os:print-at`(`os:goto-xy`でカーソル移動後`write-string`で文字列出力、defun本体は単一form限定という既存制約(milestone21の「progn gotcha」)に従い明示的な`progn`で2呼び出しをまとめた)を追加した。`lisp/os-package.lisp`の`:export`句へ`"goto-xy"`/`"print-at"`/`"clear-screen"`を追加した。`test/lisp/test-console.lisp`へ`run-test-console-os-goto-xy`/`run-test-console-os-clear-screen`/`run-test-console-os-print-at`を追加し集約`run-test-console`に組み込んだ。**バグ修正**: `run-test-console-os-print-at`の初版`(eq (os:print-at 0 0 "x") t)`は`make test-console`が`TIMEOUT`する回帰を引いた。原因は`os:print-at`が文字`"x"`を実際に画面バッファへ書き込む一方、後ろに実`"\r\n"`が続かないため、直後に自動生成テストランナーが出力する`RESULT console PASS`行がその途切れた行末に連結され`xRESULT console PASS`という壊れた行になり、`scripts/run_test.py`の行検出が機能しなかったこと(milestone125と同型の問題)。`let`(milestone87以降、複数formの本体を`progn`相当で評価できる)で`eq`判定結果を保持した上で明示的に`(write-line "")`を挟んでから返す形へ修正し解決した。`make build`/`make test`(29ファイル全PASS)で回帰が無いことを確認した。本マイルストーンの完了により`documents/lisp_console_buffer.md`のマイルストーン119〜129(フェーズI〜L)が全て完了した。 |
 
 ## スコープ外として明記する項目
 
