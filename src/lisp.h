@@ -100,7 +100,15 @@ void lisp_panic_fatal(CHAR16 *message);
 // 拡張・将来のプロセス終了時解放で使う、この段階では記録のみ）。pending_entry/pending_argは
 // このコンテキストへの最初のlisp_context_switch呼び出しで一度だけ使われるトランポリン引数。
 // startedは既に一度でも実行開始済みかを示す（2回目以降のswitchは偽装rip/rspを使わず、
-// 前回lisp_context_switchが保存した本物の再開点を使う）
+// 前回lisp_context_switchが保存した本物の再開点を使う）。
+//
+// vm_stack/vm_sp/active_trapはmilestone105で追加した「CPUレジスタ以外のper-processレジスタ」
+// (VMのデータスタック本体・現在使用中の深さ・panic復帰先トラップ)の退避領域。lisp.c側の同名の
+// グローバル(vm_stack/vm_sp/lisp_active_trap)は常に「今実際に実行中のプロセス」のものを指す
+// 単一の作業領域のままとし、lisp_context_switchがそことの間でコピー/入替を行う（lisp_vm_run
+// 等の既存コード自体は無変更。VM_STACK_SIZEはlisp_vm_push等と共有するため.cから.hへ移した）
+#define VM_STACK_SIZE 1024
+
 typedef struct {
     lisp_jmp_buf regs;
     EFI_PHYSICAL_ADDRESS stack_base;
@@ -108,12 +116,16 @@ typedef struct {
     void (*pending_entry)(void *);
     void *pending_arg;
     int started;
+    LispObject vm_stack[VM_STACK_SIZE];
+    UINTN vm_sp;
+    lisp_jmp_buf *active_trap;
 } LispProcessStack;
 
 // stack_pages*4KBの新規スタック領域をAllocatePages経由で確保し、outをそのスタック上で
 // entry(arg)を開始する「未開始」コンテキストとして初期化する（まだ実行は始まらない。
 // 実際に開始するのは最初にこのコンテキストをtoとしてlisp_context_switchを呼んだ時）。
-// 確保に失敗した場合はlisp_panicする
+// vm_sp/active_trapは0/NULLで初期化する（空のVMデータスタック・トラップ未設置の状態で開始する）。
+// 確保に失敗した場合はlisp_panic_fatalする
 void lisp_process_stack_create(LispProcessStack *out, UINTN stack_pages,
                                 void (*entry)(void *), void *arg);
 
@@ -122,12 +134,21 @@ void lisp_process_stack_create(LispProcessStack *out, UINTN stack_pages,
 // が新規に開始される。既に開始済みなら、toが最後に他のプロセスへlisp_context_switchで
 // 制御を渡した地点（このtoをfromとして呼んだ直後）から再開する。
 // fromは呼び出し元が保持している既存のLispProcessStack（起動直後の「メイン」コンテキスト
-// の場合はstack_base/stack_pagesは未使用のまま、regsのみが後続の切り替えで使われる）を指す
+// の場合はstack_base/stack_pagesは未使用のまま、regs等が後続の切り替えで使われる）を指す。
+// CPUレジスタ切替(lisp_setjmp/lisp_longjmp)に加え、milestone105でvm_stack[0..vm_sp)・
+// active_trapもfrom/to間でコピー/入替する（現在実行中のグローバルvm_stack/vm_sp/
+// lisp_active_trapをfromへ退避したうえで、toに保存されていた値をそこへ復元する）
 void lisp_context_switch(LispProcessStack *from, LispProcessStack *to);
 
 // mainコンテキストと新規に確保した別スタック上のコンテキストの間を3往復し、両側で
 // カウンタが期待どおりに増えることを確認する自己テスト。真なら成功
 int lisp_context_switch_selftest(void);
+
+// --- per-process vm_stack/vm_sp/lisp_active_trap分離自己テスト (milestone 105) ---
+// mainが積んだ値・設置したトラップが別スタック上のコンテキストの開始直後に一切見えない
+// こと、逆にそのコンテキストが自分専用に積んだ値・設置したトラップがmain側の実行によって
+// 書き換えられないこと、再開後も自分の状態がそのまま残っていることを確認する。真なら成功
+int lisp_process_vm_state_selftest(void);
 
 // --- マーク＆スイープGC (milestone 33) ---
 // ヒープのバンプ側残り容量が総量の20%未満なら真を返す。EfiMainのREPLループが

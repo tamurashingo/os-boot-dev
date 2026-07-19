@@ -2039,7 +2039,8 @@ static LispObject lisp_gc_extra_root = LISP_NIL;
 // 外側にある生配列。関数呼び出し前後のスタックフレームやOP_CALLの呼び出し規約もmilestone37以降
 // ここに積む想定）。vm_spは次に値を積む位置（スタック上の要素数）を指し、vm_stack[0..vm_sp)が
 // 現在有効な要素
-#define VM_STACK_SIZE 1024
+// VM_STACK_SIZEはmilestone105でsrc/lisp.hへ移した（LispProcessStackのvm_stackフィールドと
+// 同じ定数を共有するため）
 static LispObject vm_stack[VM_STACK_SIZE];
 static UINTN vm_sp = 0;
 
@@ -6054,6 +6055,8 @@ void lisp_process_stack_create(LispProcessStack *out, UINTN stack_pages, void (*
     out->pending_entry = entry;
     out->pending_arg = arg;
     out->started = 0;
+    out->vm_sp = 0; // milestone105: 空のVMデータスタックで開始する
+    out->active_trap = (void *)0; // milestone105: トラップ未設置で開始する
     out->regs.rbx = 0;
     out->regs.rbp = 0;
     out->regs.rdi = 0;
@@ -6066,7 +6069,23 @@ void lisp_process_stack_create(LispProcessStack *out, UINTN stack_pages, void (*
     out->regs.rip = (UINT64)lisp_process_trampoline;
 }
 
+// milestone105: グローバルなvm_stack/vm_sp/lisp_active_trapは常に「今実際に実行中の
+// プロセス」のものを指す単一の作業領域のまま(lisp_vm_run等の既存コードは無変更)とし、
+// ここでfrom/to間でコピー/入替する。CPUレジスタ(regs)の切替と同じ「今の状態をfromへ
+// 退避してからtoの状態を復元する」順序を守る
 void lisp_context_switch(LispProcessStack *from, LispProcessStack *to) {
+    for (UINTN i = 0; i < vm_sp; i++) {
+        from->vm_stack[i] = vm_stack[i];
+    }
+    from->vm_sp = vm_sp;
+    from->active_trap = lisp_active_trap;
+
+    for (UINTN i = 0; i < to->vm_sp; i++) {
+        vm_stack[i] = to->vm_stack[i];
+    }
+    vm_sp = to->vm_sp;
+    lisp_active_trap = to->active_trap;
+
     if (!to->started) {
         to->started = 1;
         lisp_pending_trampoline_entry = to->pending_entry;
@@ -6110,4 +6129,85 @@ int lisp_context_switch_selftest(void) {
         }
     }
     return 1;
+}
+
+// --- per-process vm_stack/vm_sp/lisp_active_trap分離自己テスト (milestone 105) ---
+//
+// bのentryは2段階に分けて検証する。1段目(開始直後)はmainが積んだ値・設置したトラップが
+// 一切見えていない(空のVMデータスタック・トラップ未設置のまま開始する)ことを確認し、その後
+// b専用の値をVMデータスタックへ積み・b専用のトラップを設置してmainへ戻る。2段目(mainからの
+// 再開後)はその「b専用の値・トラップ」が退避先(main側での実行)に一切書き換えられずそのまま
+// 残っていることを確認する。mainは各回の切替後、自分自身が積んだ値・設置したトラップが
+// bの実行によって書き換えられていないことを確認する
+static int lisp_process_vm_state_selftest_b_clean_start_ok = 0;
+static int lisp_process_vm_state_selftest_b_resumed_ok = 0;
+static lisp_jmp_buf lisp_process_vm_state_selftest_b_trap;
+static LispProcessStack *lisp_process_vm_state_selftest_main_ctx = 0;
+static LispProcessStack *lisp_process_vm_state_selftest_b_ctx = 0;
+
+static void lisp_process_vm_state_selftest_entry(void *arg) {
+    (void)arg;
+
+    lisp_process_vm_state_selftest_b_clean_start_ok =
+        (vm_sp == 0 && lisp_active_trap == (void *)0);
+
+    lisp_vm_push(lisp_make_fixnum(777));
+    lisp_setjmp(&lisp_process_vm_state_selftest_b_trap); // 戻り値は使わない: 実際にlongjmpされる
+                                                          // ことは無く、トラップとして設置するだけ
+    lisp_active_trap = &lisp_process_vm_state_selftest_b_trap;
+
+    lisp_context_switch(lisp_process_vm_state_selftest_b_ctx, lisp_process_vm_state_selftest_main_ctx);
+
+    lisp_process_vm_state_selftest_b_resumed_ok =
+        (vm_sp == 1 && vm_stack[0] == lisp_make_fixnum(777) &&
+         lisp_active_trap == &lisp_process_vm_state_selftest_b_trap);
+
+    // mainは2回bへ切替える(初期状態確認用・再開状態確認用)ので、bも2回mainへ切り戻す
+    // 必要がある(切替回数が対称でないと、mainの2回目の切替が戻ってこず永久にハングする)
+    lisp_context_switch(lisp_process_vm_state_selftest_b_ctx, lisp_process_vm_state_selftest_main_ctx);
+
+    for (;;) {}
+}
+
+int lisp_process_vm_state_selftest(void) {
+    LispProcessStack main_ctx;
+    LispProcessStack b_ctx;
+    lisp_process_vm_state_selftest_main_ctx = &main_ctx;
+    lisp_process_vm_state_selftest_b_ctx = &b_ctx;
+    lisp_process_vm_state_selftest_b_clean_start_ok = 0;
+    lisp_process_vm_state_selftest_b_resumed_ok = 0;
+
+    lisp_process_stack_create(&b_ctx, 4, lisp_process_vm_state_selftest_entry, 0);
+
+    // このセルフテストはlisp_active_trapがまだ一度も設置されていない(main.cがREPLループの
+    // トラップを設置するより前)起動シーケンス中に呼ばれる前提で、終了時にvm_sp==0・
+    // lisp_active_trap==NULLへ戻すだけでよい(呼び出し前の実際の値を汎用的に退避・復元する
+    // 必要は無い)
+    lisp_jmp_buf main_trap;
+
+    lisp_vm_reset_stack();
+    lisp_vm_push(lisp_make_fixnum(111));
+    lisp_vm_push(lisp_make_fixnum(222));
+    lisp_setjmp(&main_trap); // 同上、トラップとして設置するだけ
+    lisp_active_trap = &main_trap;
+
+    // 1回目の切替: bは開始直後の「空の状態」であることを確認したのち、自分専用の状態を
+    // 作ってmainへ戻る
+    lisp_context_switch(&main_ctx, &b_ctx);
+
+    int ok = lisp_process_vm_state_selftest_b_clean_start_ok;
+    ok = ok && (vm_sp == 2 && vm_stack[0] == lisp_make_fixnum(111) &&
+                vm_stack[1] == lisp_make_fixnum(222) && lisp_active_trap == &main_trap);
+
+    // 2回目の切替: bを再開させ、1回目でbが作った状態がそのまま残っていたことを確認させる
+    lisp_context_switch(&main_ctx, &b_ctx);
+
+    ok = ok && lisp_process_vm_state_selftest_b_resumed_ok;
+    ok = ok && (vm_sp == 2 && vm_stack[0] == lisp_make_fixnum(111) &&
+                vm_stack[1] == lisp_make_fixnum(222) && lisp_active_trap == &main_trap);
+
+    lisp_vm_reset_stack();
+    lisp_active_trap = (void *)0;
+
+    return ok;
 }
