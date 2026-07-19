@@ -2050,6 +2050,32 @@ LispProcessStack *lisp_vm_current_process = (void *)0;
 LispProcessStack *lisp_vm_yield_target = (void *)0;
 UINTN lisp_vm_yield_budget = (UINTN)-1;
 
+// milestone107: lisp_gc_mark_rootsが追加で走査すべき「中断中の他プロセス」のレジストリ。
+// 詳細な設計意図はsrc/lisp.h参照。固定長配列+件数で十分（今回のロードマップの想定プロセス数は
+// 少数であり、可変長にする必要はない）
+#define LISP_MAX_REGISTERED_PROCESS_STACKS 16
+static LispProcessStack *lisp_registered_process_stacks[LISP_MAX_REGISTERED_PROCESS_STACKS];
+static UINTN lisp_registered_process_stacks_count = 0;
+
+void lisp_process_stack_register(LispProcessStack *ps) {
+    if (lisp_registered_process_stacks_count >= LISP_MAX_REGISTERED_PROCESS_STACKS) {
+        lisp_panic_fatal(L"too many registered process stacks");
+    }
+    lisp_registered_process_stacks[lisp_registered_process_stacks_count] = ps;
+    lisp_registered_process_stacks_count++;
+}
+
+void lisp_process_stack_unregister(LispProcessStack *ps) {
+    for (UINTN i = 0; i < lisp_registered_process_stacks_count; i++) {
+        if (lisp_registered_process_stacks[i] == ps) {
+            lisp_registered_process_stacks_count--;
+            lisp_registered_process_stacks[i] =
+                lisp_registered_process_stacks[lisp_registered_process_stacks_count];
+            return;
+        }
+    }
+}
+
 // スタックへの積み下ろし。固定容量資源のため、溢れは(gc)等では解決できずlisp_panic_fatalとする
 // （ヒープ・シンボルテーブル等の他の固定容量資源の枯渇と同じ扱い）
 static inline void lisp_vm_push(LispObject value) {
@@ -2528,6 +2554,16 @@ static void lisp_gc_mark_roots(void) {
     for (UINTN i = 0; i < vm_sp; i++) {
         lisp_gc_mark(vm_stack[i]);
     }
+    // milestone107: lisp_process_stack_registerで登録された、中断中の他プロセスのvm_stackも
+    // 同様にルートとして走査する（そのプロセスが今実行中なら、その状態は既に上のグローバル
+    // vm_stack/vm_spが指しているので二重に辿るだけで安全。中断中ならLispProcessStack構造体側に
+    // 退避されたスナップショットがここでしか辿れない）
+    for (UINTN p = 0; p < lisp_registered_process_stacks_count; p++) {
+        LispProcessStack *ps = lisp_registered_process_stacks[p];
+        for (UINTN i = 0; i < ps->vm_sp; i++) {
+            lisp_gc_mark(ps->vm_stack[i]);
+        }
+    }
 }
 
 // lisp_all_objects_headを1回走査し、マーク済みは生存リストへ戻し（マークビットは次回に向けて
@@ -2588,6 +2624,56 @@ int lisp_vm_gc_root_selftest(void) {
         return 0;
     }
     return lisp_car(obj) == lisp_make_fixnum(111) && lisp_cdr(obj) == lisp_make_fixnum(222);
+}
+
+// --- 全プロセスGCルート登録自己テスト (milestone 107) ---
+// mainとは別スタック上のプロセスbを開始し、bだけがpush・かつb専用のvm_stackにのみ積んだ
+// consを、bからmainへ切り替えて中断させた（=lisp_context_switchがそのconsをb_ctx.vm_stackへ
+// 退避した）直後にmain側からlisp_gc()を実行して、lisp_process_stack_registerによる
+// ルート統合が正しく機能しているかを検証する。lisp_vm_gc_root_selftest（単一プロセス版）の
+// 複数プロセス拡張
+static LispProcessStack *lisp_process_gc_root_selftest_main_ctx = 0;
+static LispProcessStack *lisp_process_gc_root_selftest_b_ctx = 0;
+
+static void lisp_process_gc_root_selftest_entry(void *arg) {
+    (void)arg;
+    LispObject obj = lisp_cons(lisp_make_fixnum(333), lisp_make_fixnum(444));
+    vm_stack[0] = obj;
+    vm_sp = 1;
+    lisp_context_switch(lisp_process_gc_root_selftest_b_ctx, lisp_process_gc_root_selftest_main_ctx);
+    for (;;) {}
+}
+
+int lisp_process_gc_root_selftest(void) {
+    LispProcessStack main_ctx;
+    LispProcessStack b_ctx;
+    lisp_process_gc_root_selftest_main_ctx = &main_ctx;
+    lisp_process_gc_root_selftest_b_ctx = &b_ctx;
+
+    lisp_process_stack_create(&b_ctx, 4, lisp_process_gc_root_selftest_entry, 0);
+    lisp_process_stack_register(&b_ctx);
+
+    lisp_context_switch(&main_ctx, &b_ctx); // bが1個consをpushしてすぐmainへ切り替えて中断する
+
+    lisp_gc();
+
+    for (UINTN i = 0; i < 64; i++) {
+        lisp_cons(lisp_make_fixnum(0), lisp_make_fixnum(0));
+    }
+
+    lisp_process_stack_unregister(&b_ctx); // b_ctxはこの関数を抜けると無効になるため、必ず解除する
+
+    lisp_process_gc_root_selftest_main_ctx = (void *)0;
+    lisp_process_gc_root_selftest_b_ctx = (void *)0;
+
+    if (b_ctx.vm_sp != 1) {
+        return 0;
+    }
+    LispObject obj = b_ctx.vm_stack[0];
+    if (!lisp_is_cons(obj)) {
+        return 0;
+    }
+    return lisp_car(obj) == lisp_make_fixnum(333) && lisp_cdr(obj) == lisp_make_fixnum(444);
 }
 
 // symをvalueに束縛したペアをenvの先頭に追加した新しい環境を返す

@@ -178,6 +178,35 @@ extern UINTN lisp_vm_yield_budget;
 // 正しく保持されること）の両方を確認する。真なら成功
 int lisp_vm_yield_selftest(void);
 
+// --- 全プロセスGCルート登録 (milestone 107) ---
+// lisp_process_stack_create直後のLispProcessStackはまだ「ただの構造体」で、GCからは
+// 一切辿れない（vm_stack/vm_spはmilestone105でプロセス毎に分離済みだが、lisp_gc_mark_rootsは
+// 「今実際に実行中」のグローバルvm_stack/vm_spしか見ない）。他プロセスへlisp_context_switchで
+// 制御を渡し自分が中断される（=自分のvm_stack/vm_spがLispProcessStack構造体側へ退避される）
+// と、そのプロセスの操作対象オブジェクトはCローカル変数からもグローバルvm_stackからも
+// 到達不能になり、次のGCで回収されてしまう。lisp_gc_extra_root（一時的なCローカル退避先を
+// GCルートに加える既存の手動登録パターン）と同じ考え方で、「今後GCルートとして走査してほしい
+// LispProcessStack」を明示的に登録・解除できるようにする。
+//
+// GC発火条件について: 現状GCが実際に発火するのはlisp_heap_low()を見るREPLループ先頭、または
+// (gc)組み込み関数の呼び出し時のみであり、いずれも「今実行中の唯一のプロセス」自身の安全地点
+// でしか呼ばれない。他の全プロセスは（milestone106のyieldチェックが命令ディスパッチの
+// 先頭でのみ発生するため）中断中は常に「命令の境界」で止まっており、そのLispProcessStack.
+// vm_stack[0..vm_sp)は常に安全なスナップショットである。したがって「全プロセスが安全点にいる
+// 時のみGCを発火する」という要求は、新たな判定コードを追加しなくても現在のyieldチェック設計
+// によって既に満たされている（安全点以外で中断する経路が存在しない）
+void lisp_process_stack_register(LispProcessStack *ps);
+void lisp_process_stack_unregister(LispProcessStack *ps);
+
+// 別スタック上で中断中のプロセスのvm_stackが、lisp_process_stack_registerを通じて
+// lisp_gc_mark_rootsのルート集合に正しく含まれているかを検証する自己テスト
+// (milestone34のlisp_vm_gc_root_selftestの複数プロセス版)。新規プロセスbを開始し、b専用の
+// vm_stackにのみ積んだconsをbからmainへ切り替えて中断させた後、mainからlisp_gc()を実行し、
+// さらに複数のconsを確保してフリーリストの再利用を強制する。ルート統合が正しければbの
+// vm_stackに残ったconsの内容は上書きされず、誤っていれば再利用時に上書きされ検出できる。
+// 真なら成功
+int lisp_process_gc_root_selftest(void);
+
 // --- マーク＆スイープGC (milestone 33) ---
 // ヒープのバンプ側残り容量が総量の20%未満なら真を返す。EfiMainのREPLループが
 // 毎ループ先頭でこれを見て、真の場合のみlisp_gc()を呼ぶ（評価中には呼ばない——
