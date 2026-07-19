@@ -1375,18 +1375,23 @@ void lisp_read_line(EFI_SYSTEM_TABLE *SystemTable) {
     input_buffer[input_length] = '\0';
 }
 
-// milestone 24: 出力ストリームのコンソール実装。ASCII文字列(8bit char)をCHAR16に
-// 変換してコンソールへ出力する
+// milestone 24: 出力ストリームのコンソール実装。milestone125で画面ダブルバッファ
+// (milestone122〜124)経由に切り替えた。1文字ずつlisp_screen_putcへ書き込み、この
+// 関数の呼び出し単位でlisp_screen_flushする暫定実装(VM命令ディスパッチループへの
+// 1命令ごとflushフックはmilestone127で追加し、その時点でこの即時flushは削除する)。
+// 初回呼び出し時にバッファが未初期化ならここで自動的に初期化する(起動シーケンスへの
+// 明示的な統合はmilestone128で行う)
 static void lisp_console_stream_write(void *ctx, const char *str) {
-    EFI_SYSTEM_TABLE *SystemTable = (EFI_SYSTEM_TABLE *)ctx;
-    CHAR16 buf[LISP_INPUT_BUFFER_MAX];
+    (void)ctx;
+    if (!lisp_screen_buffer_is_initialized()) {
+        lisp_screen_buffer_init();
+    }
     UINTN i = 0;
-    while (str[i] != '\0' && i < LISP_INPUT_BUFFER_MAX - 1) {
-        buf[i] = (CHAR16)str[i];
+    while (str[i] != '\0') {
+        lisp_screen_putc(str[i]);
         i++;
     }
-    buf[i] = 0;
-    SystemTable->ConOut->OutputString(SystemTable->ConOut, buf);
+    lisp_screen_flush();
 }
 
 LispOutputStream lisp_make_console_stream(EFI_SYSTEM_TABLE *SystemTable) {
@@ -5760,6 +5765,12 @@ typedef struct {
     UINTN pending_newlines;
     int dirty;
     int initialized;
+    // milestone125で追加(バグ修正、詳細は下記lisp_screen_flushのコメント参照): 行ごとに
+    // 「この呼び出しで実際に書き込まれたセルの範囲」を記録する。row_touched[r]が真の間、
+    // [touched_min[r], touched_max[r]](両端含む)がその範囲
+    int row_touched[LISP_SCREEN_ROWS_MAX];
+    UINTN touched_min[LISP_SCREEN_ROWS_MAX];
+    UINTN touched_max[LISP_SCREEN_ROWS_MAX];
 } LispScreenBuffer;
 
 static LispScreenBuffer lisp_screen_buffer;
@@ -5795,7 +5806,17 @@ void lisp_screen_buffer_init(void) {
     lisp_screen_buffer.cursor_row = 0;
     lisp_screen_buffer.pending_newlines = 0;
     lisp_screen_buffer.dirty = 0;
+    for (UINTN r = 0; r < LISP_SCREEN_ROWS_MAX; r++) {
+        lisp_screen_buffer.row_touched[r] = 0;
+    }
     lisp_screen_buffer.initialized = 1;
+}
+
+// milestone125: lisp_console_stream_writeが未初期化時に自動初期化するかどうかを
+// 判断するためのアクセサ。lisp_screen_bufferはこのファイル内のstaticなので、
+// より前方(1380行付近)にあるlisp_console_stream_writeからも呼べるようにする
+int lisp_screen_buffer_is_initialized(void) {
+    return lisp_screen_buffer.initialized;
 }
 
 // milestone122: lisp_screen_buffer_initを実際に呼び、QueryModeが返した実際のcols/rowsが
@@ -5831,6 +5852,24 @@ int lisp_screen_buffer_selftest(void) {
     return 1;
 }
 
+// milestone125: 指定行の指定列が実際に書き込まれたことを記録する(バグ修正、詳細は
+// lisp_screen_flushのコメント参照)。1回目のtouchでmin/maxをそのcolに初期化し、
+// 以降は範囲を広げるだけ
+static void lisp_screen_touch_cell(UINTN row, UINTN col) {
+    if (!lisp_screen_buffer.row_touched[row]) {
+        lisp_screen_buffer.row_touched[row] = 1;
+        lisp_screen_buffer.touched_min[row] = col;
+        lisp_screen_buffer.touched_max[row] = col;
+        return;
+    }
+    if (col < lisp_screen_buffer.touched_min[row]) {
+        lisp_screen_buffer.touched_min[row] = col;
+    }
+    if (col > lisp_screen_buffer.touched_max[row]) {
+        lisp_screen_buffer.touched_max[row] = col;
+    }
+}
+
 // milestone123: back bufferへの1文字書き込み・改行・スクロールのみを行う純粋なバッファ
 // 操作関数(UEFI呼び出しを一切含まない)。改行('\n')はpending_newlinesを加算して
 // カーソルを次行の先頭へ移すのみで、実際の"\r\n"送出はlisp_screen_flush(milestone124)の
@@ -5846,7 +5885,10 @@ void lisp_screen_putc(char ch) {
         lisp_screen_buffer.cursor_col = 0;
         lisp_screen_buffer.cursor_row++;
     } else {
-        lisp_screen_buffer.back[lisp_screen_buffer.cursor_row][lisp_screen_buffer.cursor_col] = (CHAR16)ch;
+        UINTN row = lisp_screen_buffer.cursor_row;
+        UINTN col = lisp_screen_buffer.cursor_col;
+        lisp_screen_buffer.back[row][col] = (CHAR16)ch;
+        lisp_screen_touch_cell(row, col);
         lisp_screen_buffer.dirty = 1;
         lisp_screen_buffer.cursor_col++;
         if (lisp_screen_buffer.cursor_col >= lisp_screen_buffer.cols) {
@@ -5866,6 +5908,12 @@ void lisp_screen_putc(char ch) {
         }
         lisp_screen_buffer.cursor_row = lisp_screen_buffer.rows - 1;
         lisp_screen_buffer.dirty = 1;
+        // スクロールで全行の内容が動くため、範囲を絞らず全行を丸ごとtouchする
+        for (UINTN r = 0; r < lisp_screen_buffer.rows; r++) {
+            lisp_screen_buffer.row_touched[r] = 1;
+            lisp_screen_buffer.touched_min[r] = 0;
+            lisp_screen_buffer.touched_max[r] = lisp_screen_buffer.cols - 1;
+        }
     }
 }
 
@@ -5946,13 +5994,27 @@ int lisp_screen_putc_selftest(void) {
     return 1;
 }
 
-// milestone124: back/frontの差分のみを実際のConOutへ反映する。1行内で連続してback
-// がfrontと異なるセルの区間(run)ごとに1回のSetCursorPosition+OutputStringにまとめ、
-// 画面全体を毎回送り直すことを避ける。pending_newlines分の実"\r\n"はセル差分とは
-// 独立に送出する(milestone123で改行はセル差分として表現しないことにした設計上の
+// milestone124: 実際に書き込まれた(touchされた)セルのみを実際のConOutへ反映する。
+// 1行につきtouched_min[r]〜touched_max[r]の区間を1回のSetCursorPosition+OutputString
+// にまとめ、画面全体を毎回送り直すことを避ける。pending_newlines分の実"\r\n"はセル差分
+// とは独立に送出する(milestone123で改行はセル差分として表現しないことにした設計上の
 // 帰結。scripts/run_test.pyが行区切り検出に実際の改行バイトを要求するため、内容が
 // 変化していなくても改行だけは送出する必要がある)。最後にハードウェアカーソルを
 // 論理カーソル位置(cursor_col, cursor_row)へ合わせる。
+//
+// バグ修正(milestone125で発覚): 当初はback[r][c]!=front[r][c]の値比較でrunを決めて
+// いたが、これは「同じ文字が既に表示されている」場合に実際のOutputString呼び出し自体を
+// スキップしてしまう。実機の画面(VT100端末等)であれば見た目上は正しくても、
+// scripts/run_test.pyはシリアル上の生バイト列を素朴に行区切りで読むだけで、カーソル
+// 位置を伴う端末状態を再現しているわけではない。そのため、値が偶然一致するセルへの
+// 書き込みを黙って送出しないと、実際に送られるバイト列から文字(典型的には連続する
+// スペース)が欠落し、テスト用の出力行が破損する(例: "RESULT while PASS"が
+// "RESULTwhilePASS"になる)。この修正により、"書き込まれたかどうか"(touched_min/max、
+// lisp_screen_putc側で記録)を基準にrunを決めるようにし、値が変化していないセルも
+// touchされていれば必ず送出する。これにより見た目の再描画範囲は変わらない
+// (書き込まれていないセルは依然として送出しない)まま、実際に書いた内容が必ず
+// バイト列として現れることを保証する。
+//
 // C自己テストからUEFI呼び出し回数を検証できるよう、実ファームウェア呼び出し自体は
 // 差し替えず、本関数がSetCursorPosition/OutputStringを呼ぶと"決定"した回数を
 // 静的カウンタに記録する
@@ -5969,31 +6031,28 @@ void lisp_screen_flush(void) {
     }
 
     for (UINTN r = 0; r < lisp_screen_buffer.rows; r++) {
-        UINTN c = 0;
-        while (c < lisp_screen_buffer.cols) {
-            if (lisp_screen_buffer.back[r][c] == lisp_screen_buffer.front[r][c]) {
-                c++;
-                continue;
-            }
-            UINTN run_start = c;
-            UINTN run_len = 0;
-            while (c < lisp_screen_buffer.cols && lisp_screen_buffer.back[r][c] != lisp_screen_buffer.front[r][c]) {
-                lisp_screen_flush_run_buffer[run_len] = lisp_screen_buffer.back[r][c];
-                lisp_screen_buffer.front[r][c] = lisp_screen_buffer.back[r][c];
-                run_len++;
-                c++;
-            }
-            lisp_screen_flush_run_buffer[run_len] = 0;
-
-            if (out->SetCursorPosition(out, run_start, r) != 0) {
-                lisp_panic(L"lisp_screen_flush: SetCursorPosition failed");
-            }
-            lisp_screen_flush_set_cursor_count++;
-            if (out->OutputString(out, lisp_screen_flush_run_buffer) != 0) {
-                lisp_panic(L"lisp_screen_flush: OutputString failed");
-            }
-            lisp_screen_flush_cell_output_count++;
+        if (!lisp_screen_buffer.row_touched[r]) {
+            continue;
         }
+        UINTN start = lisp_screen_buffer.touched_min[r];
+        UINTN end = lisp_screen_buffer.touched_max[r];
+        UINTN run_len = 0;
+        for (UINTN c = start; c <= end; c++) {
+            lisp_screen_flush_run_buffer[run_len] = lisp_screen_buffer.back[r][c];
+            lisp_screen_buffer.front[r][c] = lisp_screen_buffer.back[r][c];
+            run_len++;
+        }
+        lisp_screen_flush_run_buffer[run_len] = 0;
+
+        if (out->SetCursorPosition(out, start, r) != 0) {
+            lisp_panic(L"lisp_screen_flush: SetCursorPosition failed");
+        }
+        lisp_screen_flush_set_cursor_count++;
+        if (out->OutputString(out, lisp_screen_flush_run_buffer) != 0) {
+            lisp_panic(L"lisp_screen_flush: OutputString failed");
+        }
+        lisp_screen_flush_cell_output_count++;
+        lisp_screen_buffer.row_touched[r] = 0;
     }
 
     for (UINTN i = 0; i < lisp_screen_buffer.pending_newlines; i++) {
@@ -6013,7 +6072,8 @@ void lisp_screen_flush(void) {
 }
 
 // milestone124: lisp_screen_flushが実際にSetCursorPosition/OutputStringを呼ぶと
-// 決定した回数を、既知のback/front差分パターンに対して検証する
+// 決定した回数を、既知のtouchパターン(milestone125でback/front値比較からtouch
+// 範囲ベースへ修正)に対して検証する
 int lisp_screen_flush_selftest(void) {
     // (1) 何も変化していなければ何も送出しない
     lisp_screen_buffer_init();
@@ -6057,8 +6117,10 @@ int lisp_screen_flush_selftest(void) {
     if (lisp_screen_flush_set_cursor_count != cursor0 + 2) return 0;
     if (lisp_screen_buffer.front[0][0] != L'A' || lisp_screen_buffer.front[0][1] != L'B') return 0;
 
-    // (4) 同じ行で離れた2文字(間はスペースでfrontの初期値と一致)は2つのrunに分かれる:
-    // cell_output+2、set_cursor+3
+    // (4) 同じ行でtouchされた4文字(間の2文字はスペースでfrontの初期値と偶然一致)は
+    // touched_min/maxベースでは1つのrunにまとまる: cell_output+1、set_cursor+2。
+    // 値が変化していないセル(間のスペース)もtouchされていれば必ず送出されることを、
+    // 実際のfront内容(A/スペース/スペース/B)で確認する
     lisp_screen_buffer_init();
     lisp_screen_putc('A');
     lisp_screen_putc(' ');
@@ -6067,8 +6129,10 @@ int lisp_screen_flush_selftest(void) {
     cell0 = lisp_screen_flush_cell_output_count;
     cursor0 = lisp_screen_flush_set_cursor_count;
     lisp_screen_flush();
-    if (lisp_screen_flush_cell_output_count != cell0 + 2) return 0;
-    if (lisp_screen_flush_set_cursor_count != cursor0 + 3) return 0;
+    if (lisp_screen_flush_cell_output_count != cell0 + 1) return 0;
+    if (lisp_screen_flush_set_cursor_count != cursor0 + 2) return 0;
+    if (lisp_screen_buffer.front[0][0] != L'A' || lisp_screen_buffer.front[0][1] != L' ') return 0;
+    if (lisp_screen_buffer.front[0][2] != L' ' || lisp_screen_buffer.front[0][3] != L'B') return 0;
 
     // (5) 改行のみ(セル内容は不変、dirtyも立たない)でもpending_newlines分の実"\r\n"は
     // 送出され、最終カーソル合わせの1回だけset_cursorが増える

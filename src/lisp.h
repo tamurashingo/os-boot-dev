@@ -566,4 +566,12 @@ int lisp_screen_putc_selftest(void);
 void lisp_screen_flush(void);
 int lisp_screen_flush_selftest(void);
 
+// milestone 125: lisp_console_stream_write(src/lisp.c内でこのヘッダの取り込みより
+// 前方に定義されている)が画面バッファ経由に切り替わったために必要な前方宣言。
+// 未初期化ならlisp_screen_buffer_initを呼び、1文字ずつlisp_screen_putcへ書き込み、
+// 呼び出し単位でlisp_screen_flushする(即時flushの暫定実装、milestone127で削除予定)
+void lisp_screen_buffer_init(void);
+int lisp_screen_buffer_is_initialized(void);
+void lisp_screen_putc(char ch);
+
 #endif // OS_BOOT_DEV_LISP_H
