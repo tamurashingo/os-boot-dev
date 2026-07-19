@@ -150,6 +150,34 @@ int lisp_context_switch_selftest(void);
 // 書き換えられないこと、再開後も自分の状態がそのまま残っていることを確認する。真なら成功
 int lisp_process_vm_state_selftest(void);
 
+// --- コルーチンyieldチェック (milestone 106) ---
+// lisp_vm_run（コンパイル済みbytecodeディスパッチループ）が毎命令ディスパッチ毎に安価に
+// チェックできる「他プロセスからの中断要求」フック。lisp_vm_current_process/
+// lisp_vm_yield_targetの両方が非NULLの時のみ「武装」され、武装中はlisp_vm_yield_budgetが
+// 1減るごとに0へ達した時点でlisp_vm_current_processからlisp_vm_yield_targetへ
+// lisp_context_switchする（milestone104/105のvm_stack/vm_sp/lisp_active_trap退避へ
+// そのまま相乗りするため、切替後に呼び出し元がbudgetを再設定してから改めて
+// lisp_vm_yield_targetからlisp_vm_current_processへlisp_context_switchすれば、
+// pc・オペランドスタック・ローカル変数を含む実行状態を一切壊さず続きから再開できる）。
+// デフォルトはどちらもNULL・budgetも実質無制限であり、明示的に武装しない限り既存の
+// ブート・REPL・全self-test/test-lisp fixtureの挙動は一切変化しない。
+//
+// スコープ: lisp_vm_run（コンパイル済みbytecode経路）内のみでチェックする。ツリーウォーク
+// 経路（lisp_eval/lisp_apply、defmacro本体・rest-arg形式defunで使われる）はyieldチェック
+// 対象外（真のプリエンプションを導入しない限り、この経路上の無限ループはyield不可能なまま
+// 残る既知の制約。documents/lisp_os_process.mdマイルストーン106に明記する）
+extern LispProcessStack *lisp_vm_current_process;
+extern LispProcessStack *lisp_vm_yield_target;
+extern UINTN lisp_vm_yield_budget;
+
+// lisp_vm_current_process/lisp_vm_yield_targetを武装したうえで、main（呼び出し元）とは
+// 別スタック上のコンテキストでVM bytecode（0からTARGETまで1ずつ数え上げるループ）を実行させ、
+// budgetの小さいquantumを使って複数回、命令ディスパッチの「途中」で実際にyield・resumeさせる。
+// 1回の切替では完了しないこと（真に複数回中断・再開されたこと）と、最終的にbytecodeが
+// 正しい結果まで数え上げを完了すること（pc・オペランドスタック・ローカル変数がyieldを跨いで
+// 正しく保持されること）の両方を確認する。真なら成功
+int lisp_vm_yield_selftest(void);
+
 // --- マーク＆スイープGC (milestone 33) ---
 // ヒープのバンプ側残り容量が総量の20%未満なら真を返す。EfiMainのREPLループが
 // 毎ループ先頭でこれを見て、真の場合のみlisp_gc()を呼ぶ（評価中には呼ばない——

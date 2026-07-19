@@ -2044,6 +2044,12 @@ static LispObject lisp_gc_extra_root = LISP_NIL;
 static LispObject vm_stack[VM_STACK_SIZE];
 static UINTN vm_sp = 0;
 
+// milestone106: コルーチンyieldチェック用フック本体。宣言・意味の詳細はsrc/lisp.h参照。
+// デフォルトはどちらもNULL（非武装）なので、既存のlisp_vm_run呼び出し経路は無変更のまま
+LispProcessStack *lisp_vm_current_process = (void *)0;
+LispProcessStack *lisp_vm_yield_target = (void *)0;
+UINTN lisp_vm_yield_budget = (UINTN)-1;
+
 // スタックへの積み下ろし。固定容量資源のため、溢れは(gc)等では解決できずlisp_panic_fatalとする
 // （ヒープ・シンボルテーブル等の他の固定容量資源の枯渇と同じ扱い）
 static inline void lisp_vm_push(LispObject value) {
@@ -2097,6 +2103,19 @@ static LispObject lisp_vm_run(LispClosure *cl, UINTN fp) {
     unsigned char *pc = cl->bytecode;
 
     for (;;) {
+        // milestone106: 他プロセスからの中断要求チェック。lisp_vm_current_process/
+        // lisp_vm_yield_targetの両方が武装(非NULL)されている場合のみ、budgetが0に達した
+        // 時点でlisp_vm_yield_targetへ制御を返す。復帰後はこの直後から通常どおり
+        // ディスパッチを継続するため、pc/fp等はCローカル変数としてそのまま保持される
+        // （このスコープはlisp_vm_run内のみ。ツリーウォーク経路(lisp_eval/lisp_apply)は
+        // 対象外）
+        if (lisp_vm_current_process != (void *)0 && lisp_vm_yield_target != (void *)0) {
+            if (lisp_vm_yield_budget == 0) {
+                lisp_context_switch(lisp_vm_current_process, lisp_vm_yield_target);
+            } else {
+                lisp_vm_yield_budget--;
+            }
+        }
         unsigned char op = *pc;
         pc++;
         switch (op) {
@@ -6208,6 +6227,98 @@ int lisp_process_vm_state_selftest(void) {
 
     lisp_vm_reset_stack();
     lisp_active_trap = (void *)0;
+
+    return ok;
+}
+
+// --- コルーチンyieldチェック自己テスト (milestone 106) ---
+//
+// lisp_vm_current_process/lisp_vm_yield_targetを武装したうえで、b専用スタック上でVM
+// bytecode（0からTARGETまで1ずつ数え上げるループ）を実行させる。budgetを小さいquantumに
+// 設定してから1回ずつlisp_context_switchでbへ制御を渡す、というのをbがdoneフラグを立てる
+// まで繰り返す。これにより、(1)1回の切替では完了せず、命令ディスパッチの「途中」で
+// 実際に複数回yield・resumeされること、(2)最終的にbytecodeが正しい結果(TARGET)まで
+// 数え上げを完了すること（pc・オペランドスタック・ローカル変数がyieldを跨いで正しく
+// 保持されること）の両方を確認できる。driverの`while (!done)`ループがyieldの回数に応じて
+// 動的に切替回数を合わせるため、milestone105の固定回数往復とは違い、切替回数の対称性を
+// 手動で数え合わせる必要が無い（bのentryは完了時に1回だけ明示的にmainへ戻ればよい）
+#define LISP_VM_YIELD_SELFTEST_TARGET 12
+#define LISP_VM_YIELD_SELFTEST_QUANTUM 3
+
+// 0からTARGETまで数え上げてTARGETを返すbytecode(手書き。局所変数slot0を数え上げカウンタに
+// 使う。定数0=初期値、定数1=増分、定数2=TARGET)
+static const unsigned char lisp_vm_yield_selftest_bytecode[] = {
+    OP_CONST,          0, 0,  // 0:  push constants[0] (=0)
+    OP_MAKE_LOCAL,     0, 0,  // 3:  local[0] := pop() (counter := 0)
+    OP_LOAD_LOCAL,     0, 0,  // 6:  (LOOP) push local[0]
+    OP_CONST,          1, 0,  // 9:  push constants[1] (=1)
+    OP_ADD,                   // 12: counter+1
+    OP_STORE_LOCAL,    0, 0,  // 13: local[0] := pop()
+    OP_LOAD_LOCAL,     0, 0,  // 16: push local[0]
+    OP_CONST,          2, 0,  // 19: push constants[2] (=TARGET)
+    OP_EQ,                    // 22: push (eq counter target)
+    OP_JUMP_IF_FALSE,  6, 0,  // 23: 未到達ならLOOPへ
+    OP_LOAD_LOCAL,     0, 0,  // 26: push local[0] (戻り値)
+    OP_RETURN,                // 29
+};
+
+static LispProcessStack *lisp_vm_yield_selftest_main_ctx = 0;
+static LispProcessStack *lisp_vm_yield_selftest_b_ctx = 0;
+static int lisp_vm_yield_selftest_done = 0;
+static LispObject lisp_vm_yield_selftest_result = LISP_NIL;
+
+static void lisp_vm_yield_selftest_entry(void *arg) {
+    (void)arg;
+
+    LispObject constants[3];
+    constants[0] = lisp_make_fixnum(0);
+    constants[1] = lisp_make_fixnum(1);
+    constants[2] = lisp_make_fixnum(LISP_VM_YIELD_SELFTEST_TARGET);
+    LispObject fn = lisp_make_compiled(lisp_vm_yield_selftest_bytecode,
+                                        sizeof(lisp_vm_yield_selftest_bytecode),
+                                        constants, 3, 0, 1);
+
+    LispObject result = lisp_vm_exec(fn); // この呼び出しの最中、lisp_vm_run内のyieldチェックが
+                                           // 複数回mainへ制御を返し、mainからの再開でここへ戻る
+
+    lisp_vm_yield_selftest_result = result;
+    lisp_vm_yield_selftest_done = 1;
+    lisp_context_switch(lisp_vm_yield_selftest_b_ctx, lisp_vm_yield_selftest_main_ctx);
+
+    for (;;) {}
+}
+
+int lisp_vm_yield_selftest(void) {
+    LispProcessStack main_ctx;
+    LispProcessStack b_ctx;
+    lisp_vm_yield_selftest_main_ctx = &main_ctx;
+    lisp_vm_yield_selftest_b_ctx = &b_ctx;
+    lisp_vm_yield_selftest_done = 0;
+    lisp_vm_yield_selftest_result = LISP_NIL;
+
+    lisp_process_stack_create(&b_ctx, 4, lisp_vm_yield_selftest_entry, 0);
+
+    lisp_vm_current_process = &b_ctx;
+    lisp_vm_yield_target = &main_ctx;
+
+    UINTN switch_count = 0;
+    while (!lisp_vm_yield_selftest_done && switch_count < 1000) {
+        lisp_vm_yield_budget = LISP_VM_YIELD_SELFTEST_QUANTUM;
+        lisp_context_switch(&main_ctx, &b_ctx);
+        switch_count++;
+    }
+
+    // 武装解除: main_ctx/b_ctxはこの関数のスタックローカル変数であり、この関数を抜けると
+    // 無効になる。以降のVM実行(この直後に続くcompiler.lisp/stdlib.lispのロード等)が
+    // ダングリングポインタへlisp_context_switchしてしまわないよう、成功・失敗どちらの
+    // 経路でも必ず武装解除してから返る
+    lisp_vm_current_process = (void *)0;
+    lisp_vm_yield_target = (void *)0;
+    lisp_vm_yield_budget = (UINTN)-1;
+
+    int ok = lisp_vm_yield_selftest_done;
+    ok = ok && (switch_count > 1); // 1回の切替では終わらず、実際に複数回yield・resumeしたこと
+    ok = ok && (lisp_vm_yield_selftest_result == lisp_make_fixnum(LISP_VM_YIELD_SELFTEST_TARGET));
 
     return ok;
 }
