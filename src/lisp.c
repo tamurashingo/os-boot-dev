@@ -6016,3 +6016,98 @@ __asm__(
     "    movq %r9, %rsp\n"          // スタックポインタを復元(この後はcall/ret前提のスタック操作は不可)
     "    jmpq *%r8\n"               // setjmp呼び出し箇所へ直接ジャンプ(retではなくjmp)
 );
+
+// --- per-processスタック領域とコンテキスト保存 (milestone 104) ---
+// トランポリン(lisp_process_trampoline)は「未開始」コンテキストへの最初のlisp_context_switch
+// でのみ実行される。単一実行コンテキストの協調的切替(スコープ外項目に明記済み: 真のプリエンプション
+// 無し)なので、実行開始待ちのentry/argを保持するグローバル変数は同時に1つで足りる
+static void (*lisp_pending_trampoline_entry)(void *) = 0;
+static void *lisp_pending_trampoline_arg = 0;
+
+static void lisp_process_trampoline(void) {
+    void (*entry)(void *) = lisp_pending_trampoline_entry;
+    void *arg = lisp_pending_trampoline_arg;
+    entry(arg);
+    // entryが戻ってきた場合(プロセスの終了・破棄はスコープ外のため未対応、documents/
+    // lisp_os_process.md参照)は安全のためhangする
+    for (;;) {}
+}
+
+void lisp_process_stack_create(LispProcessStack *out, UINTN stack_pages, void (*entry)(void *), void *arg) {
+    EFI_PHYSICAL_ADDRESS base = 0;
+    EFI_BOOT_SERVICES *bs = g_system_table->BootServices;
+    if (bs->AllocatePages(AllocateAnyPages, EfiLoaderData, stack_pages, &base) != 0) {
+        lisp_panic_fatal(L"lisp_process_stack_create: AllocatePages failed");
+    }
+
+    // milestone88のEfiMainと同じく16byte境界に揃えたうえで、call命令が積む戻り先アドレス
+    // 8byte分をあらかじめ差し引いておく(jmpq経由でlisp_process_trampolineへ直接飛び込む際、
+    // callされた直後であるかのようにrspを整えておく必要があるため。トランポリンは戻らない
+    // 前提なので、この位置に置く「戻り先」の値自体は使われない)
+    UINT64 top = (base + (UINT64)stack_pages * 4096) & ~(UINT64)0xF;
+    UINT64 *sp = (UINT64 *)top;
+    sp -= 1;
+    *sp = 0;
+
+    out->stack_base = base;
+    out->stack_pages = stack_pages;
+    out->pending_entry = entry;
+    out->pending_arg = arg;
+    out->started = 0;
+    out->regs.rbx = 0;
+    out->regs.rbp = 0;
+    out->regs.rdi = 0;
+    out->regs.rsi = 0;
+    out->regs.rsp = (UINT64)sp;
+    out->regs.r12 = 0;
+    out->regs.r13 = 0;
+    out->regs.r14 = 0;
+    out->regs.r15 = 0;
+    out->regs.rip = (UINT64)lisp_process_trampoline;
+}
+
+void lisp_context_switch(LispProcessStack *from, LispProcessStack *to) {
+    if (!to->started) {
+        to->started = 1;
+        lisp_pending_trampoline_entry = to->pending_entry;
+        lisp_pending_trampoline_arg = to->pending_arg;
+    }
+    if (lisp_setjmp(&from->regs) == 0) {
+        lisp_longjmp(&to->regs, 1);
+    }
+    // toが(あるいは別の誰かがtoを経由して)いつかlisp_context_switch(to, from)を呼ぶまでここで停止する
+}
+
+// mainコンテキスト<->別スタック上のコンテキストを3往復し、双方のカウンタが期待どおり
+// 増えることを確認する自己テストのentry。3回yieldしたあとは戻らない(プロセス終了は
+// スコープ外)ためhangするが、テスト側は3往復分の切り替えしか行わないので到達しない
+static UINTN lisp_context_switch_selftest_counter = 0;
+static LispProcessStack *lisp_context_switch_selftest_main_ctx = 0;
+static LispProcessStack *lisp_context_switch_selftest_b_ctx = 0;
+
+static void lisp_context_switch_selftest_entry(void *arg) {
+    (void)arg;
+    for (UINTN i = 0; i < 3; i++) {
+        lisp_context_switch_selftest_counter++;
+        lisp_context_switch(lisp_context_switch_selftest_b_ctx, lisp_context_switch_selftest_main_ctx);
+    }
+    for (;;) {}
+}
+
+int lisp_context_switch_selftest(void) {
+    LispProcessStack main_ctx;
+    LispProcessStack b_ctx;
+    lisp_context_switch_selftest_main_ctx = &main_ctx;
+    lisp_context_switch_selftest_b_ctx = &b_ctx;
+    lisp_context_switch_selftest_counter = 0;
+
+    lisp_process_stack_create(&b_ctx, 4, lisp_context_switch_selftest_entry, 0);
+
+    for (UINTN i = 0; i < 3; i++) {
+        lisp_context_switch(&main_ctx, &b_ctx);
+        if (lisp_context_switch_selftest_counter != i + 1) {
+            return 0;
+        }
+    }
+    return 1;
+}

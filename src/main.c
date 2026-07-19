@@ -121,6 +121,16 @@ static void lisp_reader_builtin_export_selftest_run(EFI_SYSTEM_TABLE *SystemTabl
     }
 }
 
+// --- per-processスタック領域とコンテキスト保存自己テスト (milestone 104) ---
+static void lisp_context_switch_selftest_run(EFI_SYSTEM_TABLE *SystemTable) {
+    if (lisp_context_switch_selftest()) {
+        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"Context switch self-test: PASS\r\n");
+    } else {
+        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"Context switch self-test: FAIL\r\n");
+        for (;;) {}
+    }
+}
+
 // --- VM最小実行ループ自己テスト (milestone 35) ---
 // OP_CONST 1, OP_CONST 2, OP_ADD, OP_RETURN相当を手動でバイトコード配列として構築し、
 // lisp_vm_execに渡して3が返ることを確認する。定数オブジェクトはlisp_make_fixnum相当の
@@ -574,6 +584,7 @@ static EFI_STATUS EFIAPI EfiMainImpl(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *S
             lisp_global_ref_package_identity_selftest_run(SystemTable); // milestone 81: グローバル参照とシンボル同一性の回帰自己テスト
             lisp_reader_special_form_export_selftest_run(SystemTable); // milestone 100: 特殊形式export自己テスト
             lisp_reader_builtin_export_selftest_run(SystemTable); // milestone 101: ビルトインexport自己テスト
+            lisp_context_switch_selftest_run(SystemTable); // milestone 104: per-processスタック領域とコンテキスト保存自己テスト
 
             lisp_load_boot_file("os-package.lisp"); // milestone 102: osパッケージ作成(別ファイルに分離、下記コメント参照)
             lisp_load_boot_file("os.lisp"); // milestone 102: processクラス・os:*all-processes*・os:get-all-processes

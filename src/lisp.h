@@ -86,6 +86,49 @@ extern lisp_jmp_buf *lisp_active_trap;
 // 常にfor(;;){}でハングし続ける（lisp_panicと違いlongjmpしない）
 void lisp_panic_fatal(CHAR16 *message);
 
+// --- per-processスタック領域とコンテキスト保存 (milestone 104) ---
+// main.cのEfiMain（milestone88）が起動時に1度だけ行っているAllocatePages+rsp切替
+// （呼び出し先が戻ってきたら元のrspへ復帰する「call型」の切替）を汎用化し、
+// 「戻ってこない・双方向に何度も切り替えられる」コルーチン型のコンテキストへ拡張したもの。
+// lisp_jmp_buf自体（rbx/rbp/rdi/rsi/rsp/r12-r15/rip）を「今どこで止まっているか」の
+// 保存領域としてそのまま再利用する。setjmp/longjmpは同一スタック上の巻き戻りにしか
+// 使えないが、rspフィールドを未開始プロセス用に手動で偽装した値へ書き換えてから
+// longjmpすることで、そのプロセス専用の別スタック上で新規に実行を開始させられる
+// （ucontext等が無い環境での一般的なコルーチン実装手法）。
+//
+// stack_base/stack_pagesはAllocatePagesで確保した領域そのもの（milestone107以降のGCルート
+// 拡張・将来のプロセス終了時解放で使う、この段階では記録のみ）。pending_entry/pending_argは
+// このコンテキストへの最初のlisp_context_switch呼び出しで一度だけ使われるトランポリン引数。
+// startedは既に一度でも実行開始済みかを示す（2回目以降のswitchは偽装rip/rspを使わず、
+// 前回lisp_context_switchが保存した本物の再開点を使う）
+typedef struct {
+    lisp_jmp_buf regs;
+    EFI_PHYSICAL_ADDRESS stack_base;
+    UINTN stack_pages;
+    void (*pending_entry)(void *);
+    void *pending_arg;
+    int started;
+} LispProcessStack;
+
+// stack_pages*4KBの新規スタック領域をAllocatePages経由で確保し、outをそのスタック上で
+// entry(arg)を開始する「未開始」コンテキストとして初期化する（まだ実行は始まらない。
+// 実際に開始するのは最初にこのコンテキストをtoとしてlisp_context_switchを呼んだ時）。
+// 確保に失敗した場合はlisp_panicする
+void lisp_process_stack_create(LispProcessStack *out, UINTN stack_pages,
+                                void (*entry)(void *), void *arg);
+
+// 現在の実行位置をfromへ保存し、toへ切り替える。toが未開始（lisp_process_stack_create
+// 直後でまだ一度もlisp_context_switchのtoになっていない）なら、そのスタック上でentry(arg)
+// が新規に開始される。既に開始済みなら、toが最後に他のプロセスへlisp_context_switchで
+// 制御を渡した地点（このtoをfromとして呼んだ直後）から再開する。
+// fromは呼び出し元が保持している既存のLispProcessStack（起動直後の「メイン」コンテキスト
+// の場合はstack_base/stack_pagesは未使用のまま、regsのみが後続の切り替えで使われる）を指す
+void lisp_context_switch(LispProcessStack *from, LispProcessStack *to);
+
+// mainコンテキストと新規に確保した別スタック上のコンテキストの間を3往復し、両側で
+// カウンタが期待どおりに増えることを確認する自己テスト。真なら成功
+int lisp_context_switch_selftest(void);
+
 // --- マーク＆スイープGC (milestone 33) ---
 // ヒープのバンプ側残り容量が総量の20%未満なら真を返す。EfiMainのREPLループが
 // 毎ループ先頭でこれを見て、真の場合のみlisp_gc()を呼ぶ（評価中には呼ばない——
