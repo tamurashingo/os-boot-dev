@@ -5709,44 +5709,6 @@ LispObject lisp_builtin_read_console_expr(LispObject args) {
     }
 }
 
-// milestone120: documents/lisp_console_buffer.mdフェーズJ、カーソル制御ビルトインの
-// 暫定実装(バッファ無し、直接ConOutを叩く)。フェーズK(122〜128)でダブルバッファリング化
-// する際にこの2関数の内部実装だけを差し替える想定で、Lisp側の呼び出し形は変えない
-LispObject lisp_builtin_clear_screen(LispObject args) {
-    EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL *out = g_system_table->ConOut;
-    if (out->ClearScreen(out) != 0) {
-        lisp_panic(L"%clear-screen: ClearScreen failed");
-    }
-    return lisp_sym_t;
-}
-
-// (%set-cursor-position col row): col/rowはfixnum必須(0始まり、UEFI仕様と同じ)
-LispObject lisp_builtin_set_cursor_position(LispObject args) {
-    LispObject col_obj = lisp_car(args);
-    LispObject row_obj = lisp_car(lisp_cdr(args));
-    lisp_assert_fixnum(col_obj);
-    lisp_assert_fixnum(row_obj);
-
-    EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL *out = g_system_table->ConOut;
-    if (out->SetCursorPosition(out, (UINTN)lisp_fixnum_value(col_obj), (UINTN)lisp_fixnum_value(row_obj)) != 0) {
-        lisp_panic(L"%set-cursor-position: SetCursorPosition failed");
-    }
-    return lisp_sym_t;
-}
-
-// milestone121: (%get-screen-size) -> (cons cols rows)。lisp_console_output_mode_selftest
-// (milestone119)と同じQueryMode(ConOut, ConOut->Mode->Mode, &cols, &rows)呼び出しを、
-// Lispから呼べるビルトインとして公開する
-LispObject lisp_builtin_get_screen_size(LispObject args) {
-    EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL *out = g_system_table->ConOut;
-    UINTN cols = 0;
-    UINTN rows = 0;
-    if (out->QueryMode(out, out->Mode->Mode, &cols, &rows) != 0) {
-        lisp_panic(L"%get-screen-size: QueryMode failed");
-    }
-    return lisp_cons(lisp_make_fixnum((long long)cols), lisp_make_fixnum((long long)rows));
-}
-
 // --- 画面ダブルバッファリング (milestone 122〜) ---
 // documents/lisp_console_buffer.mdフェーズK。単一プロセスのみが実行中というコルーチン方式
 // (milestone100〜118)の前提により、プロセス毎ではなく単一の共有グローバルとする。
@@ -6149,6 +6111,93 @@ int lisp_screen_flush_selftest(void) {
     if (lisp_screen_buffer.pending_newlines != 0) return 0;
 
     return 1;
+}
+
+// milestone126: %clear-screenのバッファ経由実装。QueryModeは起動時に1回だけ呼ぶという
+// 設計方針(documents/lisp_console_buffer.mdのスコープ外事項)を保つため、cols/rowsは
+// 再取得しない。未初期化ならlisp_screen_buffer_init(実ClearScreenを含む)に委ねて終わり、
+// 初期化済みなら実ClearScreenを呼んだ上でback/front/カーソル/touch状態を初期化直後と
+// 同じ状態(全面スペース・カーソル(0,0)・pending_newlines無し)に戻す
+void lisp_screen_clear(void) {
+    if (!lisp_screen_buffer.initialized) {
+        lisp_screen_buffer_init();
+        return;
+    }
+
+    EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL *out = g_system_table->ConOut;
+    if (out->ClearScreen(out) != 0) {
+        lisp_panic(L"lisp_screen_clear: ClearScreen failed");
+    }
+    for (UINTN r = 0; r < lisp_screen_buffer.rows; r++) {
+        for (UINTN c = 0; c < lisp_screen_buffer.cols; c++) {
+            lisp_screen_buffer.back[r][c] = L' ';
+            lisp_screen_buffer.front[r][c] = L' ';
+        }
+        lisp_screen_buffer.row_touched[r] = 0;
+    }
+    lisp_screen_buffer.cursor_col = 0;
+    lisp_screen_buffer.cursor_row = 0;
+    lisp_screen_buffer.pending_newlines = 0;
+    lisp_screen_buffer.dirty = 0;
+}
+
+// milestone126: %set-cursor-positionのバッファ経由実装。カーソル移動はlisp_screen_flushの
+// dirty/pending_newlinesゲート(何も描画内容が変わっていなければ何もしない)とは無関係に、
+// 呼ばれたら必ず即座にハードウェアカーソルへ反映する必要があるため、専用の実SetCursorPosition
+// 発行経路として分離する(flush本体の既存の呼び出し回数の自己テストには影響しない)
+void lisp_screen_move_cursor(UINTN col, UINTN row) {
+    if (!lisp_screen_buffer.initialized) {
+        lisp_screen_buffer_init();
+    }
+    if (col >= lisp_screen_buffer.cols || row >= lisp_screen_buffer.rows) {
+        lisp_panic(L"lisp_screen_move_cursor: position out of range");
+    }
+    lisp_screen_buffer.cursor_col = col;
+    lisp_screen_buffer.cursor_row = row;
+
+    EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL *out = g_system_table->ConOut;
+    if (out->SetCursorPosition(out, col, row) != 0) {
+        lisp_panic(L"lisp_screen_move_cursor: SetCursorPosition failed");
+    }
+    lisp_screen_flush_set_cursor_count++;
+}
+
+// milestone126: %get-screen-sizeのバッファ経由実装。cols/rowsは起動時のlisp_screen_buffer_init
+// (QueryMode)で確定済みの値をそのまま返す(実行時の画面サイズ変更は非対応、スコープ外)
+void lisp_screen_get_size(UINTN *cols, UINTN *rows) {
+    if (!lisp_screen_buffer.initialized) {
+        lisp_screen_buffer_init();
+    }
+    *cols = lisp_screen_buffer.cols;
+    *rows = lisp_screen_buffer.rows;
+}
+
+// milestone120で暫定実装、milestone126でバッファ経由(lisp_screen_clear)へ切り替え
+LispObject lisp_builtin_clear_screen(LispObject args) {
+    (void)args;
+    lisp_screen_clear();
+    return lisp_sym_t;
+}
+
+// (%set-cursor-position col row): col/rowはfixnum必須(0始まり、UEFI仕様と同じ)。
+// milestone120で暫定実装、milestone126でバッファ経由(lisp_screen_move_cursor)へ切り替え
+LispObject lisp_builtin_set_cursor_position(LispObject args) {
+    LispObject col_obj = lisp_car(args);
+    LispObject row_obj = lisp_car(lisp_cdr(args));
+    lisp_assert_fixnum(col_obj);
+    lisp_assert_fixnum(row_obj);
+    lisp_screen_move_cursor((UINTN)lisp_fixnum_value(col_obj), (UINTN)lisp_fixnum_value(row_obj));
+    return lisp_sym_t;
+}
+
+// milestone121で暫定実装、milestone126でバッファ経由(lisp_screen_get_size)へ切り替え。
+// (%get-screen-size) -> (cons cols rows)
+LispObject lisp_builtin_get_screen_size(LispObject args) {
+    (void)args;
+    UINTN cols = 0;
+    UINTN rows = 0;
+    lisp_screen_get_size(&cols, &rows);
+    return lisp_cons(lisp_make_fixnum((long long)cols), lisp_make_fixnum((long long)rows));
 }
 
 // milestone 29: EfiMainが起動時に標準ライブラリファイルを読み込むための入口。
