@@ -88,7 +88,7 @@
 | # | マイルストーン | 状態 | 主な内容 |
 |---|---|---|---|
 | 120 | `%clear-screen`/`%set-cursor-position`(直接ConOut) | 完了 | Cビルトイン`lisp_builtin_clear_screen`/`lisp_builtin_set_cursor_position`(`src/lisp.c`、`lisp_console_output_mode_selftest`と同じ`g_system_table->ConOut`を直接叩く暫定実装)を追加し、`%clear-screen`/`%set-cursor-position`として`lisp_builtins_init`へ登録した。`%set-cursor-position`は col/row を`lisp_assert_fixnum`で必須fixnum検証する。新規`test/lisp/test-console.lisp`(`run-test-console-clear-screen`/`run-test-console-set-cursor-position`/集約`run-test-console`)を追加し、両ビルトインがpanicせず`t`を返すことを確認した。`make build`/`make test`(29ファイル全PASS)で既存フィクスチャへの回帰が無いことを確認した。 |
-| 121 | `%get-screen-size`(QueryMode経由) | 未着手 | `QueryMode(ConOut, ConOut->Mode->Mode, &cols, &rows)`の結果を`(cons cols rows)`として返す。`test-console.lisp`に戻り値の型検証を追加する。 |
+| 121 | `%get-screen-size`(QueryMode経由) | 完了 | Cビルトイン`lisp_builtin_get_screen_size`(`src/lisp.c`、`lisp_console_output_mode_selftest`と同じ`QueryMode(ConOut, ConOut->Mode->Mode, &cols, &rows)`呼び出し)を追加し、`%get-screen-size`として登録した。戻り値は`(cons cols rows)`(fixnum2個)。`test-console.lisp`に`run-test-console-get-screen-size`を追加し、戻り値がcons(atomでない)であること・car/cdrがともに0より大きく1000未満のfixnumであることを確認した(`consp`/`not`はこの処理系に存在しないため、`atom`+`eq`で代用)。`make build`/`make test`(29ファイル全PASS)で回帰が無いことを確認した。 |
 
 ### フェーズK: ダブルバッファリング化
 

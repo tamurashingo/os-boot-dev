@@ -5729,6 +5729,19 @@ LispObject lisp_builtin_set_cursor_position(LispObject args) {
     return lisp_sym_t;
 }
 
+// milestone121: (%get-screen-size) -> (cons cols rows)。lisp_console_output_mode_selftest
+// (milestone119)と同じQueryMode(ConOut, ConOut->Mode->Mode, &cols, &rows)呼び出しを、
+// Lispから呼べるビルトインとして公開する
+LispObject lisp_builtin_get_screen_size(LispObject args) {
+    EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL *out = g_system_table->ConOut;
+    UINTN cols = 0;
+    UINTN rows = 0;
+    if (out->QueryMode(out, out->Mode->Mode, &cols, &rows) != 0) {
+        lisp_panic(L"%get-screen-size: QueryMode failed");
+    }
+    return lisp_cons(lisp_make_fixnum((long long)cols), lisp_make_fixnum((long long)rows));
+}
+
 // milestone 29: EfiMainが起動時に標準ライブラリファイルを読み込むための入口。
 // lisp_builtin_loadはLisp文字列オブジェクトの引数リストを要求するので、
 // Cの文字列リテラルからそれを組み立てるだけの薄いラッパー
@@ -6739,6 +6752,7 @@ void lisp_builtins_init(void) {
     // milestone120: カーソル制御ビルトイン(暫定実装、直接ConOut)
     LISP_REGISTER_BUILTIN("%clear-screen", lisp_builtin_clear_screen);
     LISP_REGISTER_BUILTIN("%set-cursor-position", lisp_builtin_set_cursor_position);
+    LISP_REGISTER_BUILTIN("%get-screen-size", lisp_builtin_get_screen_size);
     LISP_REGISTER_BUILTIN("sleep", lisp_builtin_sleep);
     LISP_REGISTER_BUILTIN("gensym", lisp_builtin_gensym);
     LISP_REGISTER_BUILTIN("gc", lisp_builtin_gc);

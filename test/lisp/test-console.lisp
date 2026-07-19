@@ -9,6 +9,17 @@
        (eq (%set-cursor-position 1 1) t)
        (eq (%set-cursor-position 0 0) t)))
 
+; milestone121: %get-screen-size(QueryMode経由)の戻り値が(cons cols rows)で、
+; cols/rowsがともに妥当な範囲(0より大きく1000未満)のfixnumであることを確認する
+(defun run-test-console-get-screen-size ()
+  (let ((size (%get-screen-size)))
+    (and (eq (atom size) nil)
+         (< 0 (car size))
+         (< (car size) 1000)
+         (< 0 (cdr size))
+         (< (cdr size) 1000))))
+
 (defun run-test-console ()
   (and (run-test-console-clear-screen)
-       (run-test-console-set-cursor-position)))
+       (run-test-console-set-cursor-position)
+       (run-test-console-get-screen-size)))
