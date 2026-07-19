@@ -53,9 +53,53 @@
            (eq (car os:*all-processes*) p)
            (eq (cdr os:*all-processes*) before)))))
 
+; milestone 108: make-processが生成する隔離パッケージ(packageスロット)の検証
+(defun run-test-os-make-process-fork-package ()
+  (let ((p1 (os:make-process))
+        (p2 (os:make-process)))
+    (let ((pkg1 (slot-value p1 'package))
+          (pkg2 (slot-value p2 'package)))
+      (and (not (eq pkg1 nil))
+           (not (eq pkg2 nil))
+           (not (eq pkg1 pkg2))
+           (eq (intern "car" pkg1) (intern "car"))
+           (eq (intern "car" pkg2) (intern "car"))))))
+
+; milestone 109: fork側でのローカル関数再定義(shadow+defunによる委譲上書き)。
+;
+; 実際の運用手順は「in-packageでfork先パッケージへ切替→shadowでベースと同名の別シンボルを
+; 確保→そのシンボルへdefun」という3ステップだが、これはREPL/loadが1トップレベルフォームずつ
+; read→evalを繰り返すことに依存する。この関数1つの本体の中に文字通り(defun car ...)と書いても、
+; 本体全体がcommon-lisp-userのまま1度に読み切られてしまうため、内側の"car"は結局
+; common-lisp-userのcarとして読まれてしまい検証にならない(milestone79/81で確認したreader
+; 可視性制約と対称の問題)。そのためこのテストでは、実際の再定義そのものは
+; %set-symbol-function(milestone93、シンボルオブジェクトを直接受け取る)を使い、shadowで
+; 確保したシンボルをintern(文字列引数、*package*に対してランタイムに解決される)経由で取得して
+; 結び付ける。in-package/shadow自体は実際の運用手順どおりに実行する
+(defun run-test-os-make-process-fork-redefine ()
+  (let* ((p (os:make-process))
+         (fork-pkg (slot-value p 'package))
+         (fork-pkg-name (package-name fork-pkg))
+         (base-car-sym (intern "car"))
+         (base-result (car (cons 1 2))))
+    (in-package fork-pkg-name)
+    (shadow "car")
+    (let ((fork-car-sym (intern "car")))
+      (%set-symbol-function fork-car-sym (lambda (x) 'shadowed-car))
+      (let ((fork-result (funcall (symbol-function fork-car-sym) (cons 1 2))))
+        (in-package "common-lisp-user")
+        (and (not (eq fork-car-sym base-car-sym))
+             (eq fork-result 'shadowed-car)
+             (eq base-result 1)
+             (eq (car (cons 1 2)) 1)
+             (eq (intern "car") base-car-sym)
+             (eq (intern "car" fork-pkg) fork-car-sym))))))
+
 (defun run-test-os ()
   (and (run-test-os-process-class-exists)
        (run-test-os-process-slots)
        (run-test-os-all-processes-registry)
        (run-test-os-make-process-auto-name)
-       (run-test-os-make-process-named)))
+       (run-test-os-make-process-named)
+       (run-test-os-make-process-fork-package)
+       (run-test-os-make-process-fork-redefine)))
