@@ -173,6 +173,18 @@ static void lisp_process_fork_package_selftest_run(EFI_SYSTEM_TABLE *SystemTable
     }
 }
 
+// --- process-suspend/process-resume自己テスト (milestone 112) ---
+// os:process/os.lisp読み込み後にのみ実行できるため、lisp_process_fork_package_selftest_run
+// と同じ箇所(os.lisp読み込み後)から呼ぶ
+static void lisp_process_suspend_resume_selftest_run(EFI_SYSTEM_TABLE *SystemTable) {
+    if (lisp_process_suspend_resume_selftest()) {
+        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"Process suspend/resume self-test: PASS\r\n");
+    } else {
+        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"Process suspend/resume self-test: FAIL\r\n");
+        for (;;) {}
+    }
+}
+
 // --- VM最小実行ループ自己テスト (milestone 35) ---
 // OP_CONST 1, OP_CONST 2, OP_ADD, OP_RETURN相当を手動でバイトコード配列として構築し、
 // lisp_vm_execに渡して3が返ることを確認する。定数オブジェクトはlisp_make_fixnum相当の
@@ -635,6 +647,7 @@ static EFI_STATUS EFIAPI EfiMainImpl(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *S
             lisp_load_boot_file("os.lisp"); // milestone 102: processクラス・os:*all-processes*・os:get-all-processes
 
             lisp_process_fork_package_selftest_run(SystemTable); // milestone 108: fork時の一意パッケージ生成自己テスト
+            lisp_process_suspend_resume_selftest_run(SystemTable); // milestone 112: process-suspend/process-resume自己テスト
 
             lisp_lock_cl_user_package(); // milestone 111: 起動処理完了後にcommon-lisp-userをデフォルトでロックする
 

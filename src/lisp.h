@@ -110,7 +110,7 @@ void lisp_panic_fatal(CHAR16 *message);
 // 等の既存コード自体は無変更。VM_STACK_SIZEはlisp_vm_push等と共有するため.cから.hへ移した）
 #define VM_STACK_SIZE 1024
 
-typedef struct {
+typedef struct LispProcessStack {
     lisp_jmp_buf regs;
     EFI_PHYSICAL_ADDRESS stack_base;
     UINTN stack_pages;
@@ -120,6 +120,10 @@ typedef struct {
     LispObject vm_stack[VM_STACK_SIZE];
     UINTN vm_sp;
     lisp_jmp_buf *active_trap;
+    // milestone112: このコンテキストをlisp_context_switchのtoとして呼び出した側（=resume時に
+    // 実行中だったコンテキスト）。process-suspendが「戻る先」を、process-resumeが「finished後に
+    // 戻る先」を判断するために使う。lisp_process_stack_create直後はNULL（resume時に設定される）
+    struct LispProcessStack *resumer;
 } LispProcessStack;
 
 // stack_pages*4KBの新規スタック領域をAllocatePages経由で確保し、outをそのスタック上で
@@ -218,6 +222,46 @@ int lisp_process_gc_root_selftest(void);
 // "car"シンボルと同一オブジェクト(eq)に解決されること(ベースパッケージへの委譲が実際に
 // 機能していること)を確認する。真なら成功
 int lisp_process_fork_package_selftest(void);
+
+// --- process-suspend/process-resume (milestone 112) ---
+// os:processインスタンス（stackframe/statusスロット）とフェーズCのlisp_context_switch機構を
+// 結び付け、指定したプロセスの実行を実際に一時停止・再開する。lisp/os.lispのos:process-resume/
+// os:process-suspendラッパーから呼ばれるCビルトイン%process-resume/%process-suspendの実体は
+// src/lisp.cにある（詳細な設計判断はdocuments/lisp_os_process.mdマイルストーン112参照）。
+//
+// %process-resumeがos:process未起動（stackframeスロットがnil）のプロセスに対して呼ばれた場合、
+// 第2引数（0引数のLisp関数）を新規に確保したper-processコンテキスト上でlisp_apply経由で開始する
+// （このコンテキストが最初に呼んだprocess-resumeの呼び出し元へ「resumer」として記録される）。
+// 起動済み（stackframeスロットがfixnumのプールindex）のプロセスに対して呼ばれた場合は、直前の
+// process-suspendの中断点から再開する。いずれの場合も呼び出し元は自分自身のコンテキストへ
+// 戻ってくるまでブロックする（lisp_context_switchが「戻ってくる」まで、という既存の意味論どおり）。
+//
+// %process-suspendは「今実際に実行中のコンテキスト＝引数のプロセス自身」の場合のみ許可される
+// （自分自身をsuspendする、という設計。他プロセスを外部から強制停止する機能ではない。単一
+// 実行コンテキストの協調的切替という既存のスコープ外項目と整合させるための意図的な制約）。
+// resumerフィールドへ記録済みの「自分をresumeした側」へlisp_context_switchで戻る。
+//
+// 単一実行コンテキストの協調的切替(スコープ外項目)である以上、あるプロセスが:activeの間は
+// 他の誰も実行されていない。従って%process-resumeの呼び出し元がその呼び出しから戻ってきた
+// 時点で観測できるstatusは常に:suspendedか:finishedのいずれかであり、:activeを外部から観測する
+// ことは原理的にできない(自分自身のstatusを自分の実行中に読む場合を除く)。
+//
+// 既知の制約: milestone106のyieldチェックはコンパイル済みbytecode経路(lisp_vm_run)のみを
+// 対象にしており、ツリーウォーク経路(lisp_eval/lisp_apply)のC呼び出しスタック上に生きている
+// LispObjectのC局所変数はmilestone107のvm_stack拡張同様のGCルートとして辿られない。
+// process-suspendはツリーウォーク経路の途中（lisp_apply呼び出しの奥）からも呼び出せるため、
+// 中断中に他プロセスが(gc)を誘発すると、この未追跡のC局所変数が指すオブジェクトが理論上
+// 回収され得るという制約が残る（本マイルストーンではこの解消は行わず、既知のリスクとして
+// documents/lisp_os_process.mdに明記するのみとする）。
+//
+// 自己テスト: mainからos:make-process相当の空プロセスをC内で直接生成し、(1)%process-resumeで
+// 0引数の閉包（ダイナミック変数をインクリメントしてから自分自身に対し%process-suspendを1回・
+// さらに2回目のインクリメント後に返る、という単純な閉包）を開始し1回目の%process-suspend
+// 直後まで実行が進むこと、(2)その時点でprocess-resumeの呼び出し元へ制御が戻ってきており
+// statusスロットが:suspendedであること、(3)再度%process-resumeで中断点から再開し2回目の
+// インクリメント後に閉包が正常に戻りstatusスロットが:finishedになること、(4)2回のインクリメント
+// の結果が期待どおりであることを確認する。真なら成功
+int lisp_process_suspend_resume_selftest(void);
 
 // --- マーク＆スイープGC (milestone 33) ---
 // ヒープのバンプ側残り容量が総量の20%未満なら真を返す。EfiMainのREPLループが

@@ -95,6 +95,36 @@
              (eq (intern "car") base-car-sym)
              (eq (intern "car" fork-pkg) fork-car-sym))))))
 
+; milestone 112: process-suspend/process-resume(実際の実行機構)の検証。
+;
+; thunkはlambdaでcounter/pの両方をレキシカルに捕捉する通常のクロージャなので、C側selftest
+; (lisp_process_suspend_resume_selftest、ダイナミック変数経由)と異なりダイナミック変数は
+; 不要。単一実行コンテキストの協調的切替である以上、os:process-resumeの呼び出し元(この
+; テスト自身)が制御を取り戻した時点でそのプロセス自身が:activeであることは原理的に無いため、
+; 自分自身をos:process-suspendした直後まで進んだ状態(1回目のインクリメント後)ではstatusは
+; :suspendedであることを検証する。再度os:process-resumeした後に閉包が正常に戻った状態
+; (2回目のインクリメント後、statusが:finished)も検証する。プロセスを外部から強制停止する
+; 誤用シナリオ(自分自身以外へのprocess-suspend)は検証方針どおりmake testでは検証せず、
+; 個別のQEMU対話セッションで確認する
+(defun run-test-os-process-suspend-resume ()
+  (let ((p (os:make-process))
+        (counter 0))
+    ; defun/lambdaの本体は単一formのみ(milestone21で確認済みのprogn gotcha)なので、
+    ; 複数formを実行するには明示的にprognで束ねる必要がある
+    (let ((thunk (lambda ()
+                   (progn
+                     (setq counter (+ counter 1))
+                     (os:process-suspend p)
+                     (setq counter (+ counter 1))))))
+      (os:process-resume p thunk)
+      (let ((status-after-suspend (slot-value p 'status))
+            (counter-after-suspend counter))
+        (os:process-resume p)
+        (and (eq status-after-suspend :suspended)
+             (eq counter-after-suspend 1)
+             (eq (slot-value p 'status) :finished)
+             (eq counter 2))))))
+
 (defun run-test-os ()
   (and (run-test-os-process-class-exists)
        (run-test-os-process-slots)
@@ -102,4 +132,5 @@
        (run-test-os-make-process-auto-name)
        (run-test-os-make-process-named)
        (run-test-os-make-process-fork-package)
-       (run-test-os-make-process-fork-redefine)))
+       (run-test-os-make-process-fork-redefine)
+       (run-test-os-process-suspend-resume)))

@@ -15,10 +15,12 @@
 ;   package    - fork時に生成する隔離パッケージ(milestone108の%make-processが生成・格納する。
 ;                一意名で新規作成され、common-lisp-userをuse-packageしているため、fork側で
 ;                ベースの関数・変数へ無修飾のままアクセスできる)
-;   stackframe - per-processコンテキスト保存領域(milestone104以降で使用、この段階ではnil)
+;   stackframe - per-processコンテキスト保存領域。未起動ならnil、起動後はコンテキストプールの
+;                indexを表すfixnum(milestone112の%process-resumeが設定する)
 ;   env        - make-process時点のレキシカル環境(milestone113のprocess-local-variableで使用)
-;   status     - プロセスの実行状態を表すキーワード(この段階では値を設定しない、milestone112以降で
-;                :active/:suspendedを使う)
+;   status     - プロセスの実行状態を表すキーワード。未起動ならnil、実行中は:active、
+;                process-suspend後は:suspended、thunkが戻って終了した後は:finished
+;                (milestone112の%process-resume/%process-suspendが設定する)
 (defclass os:process () (name package stackframe env status))
 
 (defvar os:*all-processes* nil)
@@ -41,3 +43,20 @@
 ; 拡張された(パッケージ名生成はプロセス名生成と別カウンタ・別接頭辞"FORK-PKG-<N>"を使うため、
 ; 互いに衝突する余地は無い)。この段階ではまだfork実行・スタック確保は行わない
 (defun os:make-process (&optional name) (%make-process name))
+
+; milestone 112: process-suspend/process-resume(実際の実行機構)。
+;
+; 実体はC組み込み関数%process-resume/%process-suspend(src/lisp.c)にあり、ここでは
+; make-process/%make-processと同じ「薄いラッパー」パターンを踏襲する。
+;
+; os:process-resumeは、対象プロセスが未起動(stackframeスロットがnil)なら第2引数thunk
+; (0引数のLisp関数、例: (lambda () ...))を新規コンテキストで開始し、起動済みなら直前の
+; os:process-suspendの中断点から再開する。いずれの場合も、そのプロセスが次にsuspendするか
+; 実行を終えるまで呼び出し元をブロックする。
+;
+; os:process-suspendは「今実際に実行中のプロセス自身」からのみ呼べる(自分自身をsuspendする、
+; という設計。他プロセスの強制停止はできない)。中断中に他プロセスが(gc)を誘発すると、
+; ツリーウォーク経路のC局所変数が未追跡である既知の制約が残る(documents/lisp_os_process.md
+; マイルストーン112参照)
+(defun os:process-resume (p &optional thunk) (%process-resume p thunk))
+(defun os:process-suspend (p) (%process-suspend p))

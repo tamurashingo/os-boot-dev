@@ -5914,6 +5914,184 @@ int lisp_process_fork_package_selftest(void) {
     return 1;
 }
 
+// --- process-suspend/process-resume (milestone 112) ---
+// os:processインスタンスに実際の実行機構を与える。詳細な設計判断はsrc/lisp.h・
+// documents/lisp_os_process.md参照。stackframeスロットには「lisp_process_context_pool内の
+// どのスロットを使っているか」をfixnumで格納する(未起動ならnil)。プールは固定長配列のみ
+// (本処理系には汎用ヒープアロケータが無いため)
+#define LISP_MAX_PROCESS_CONTEXTS 16
+#define LISP_PROCESS_STACK_PAGES 256 // 1プロセスあたり1MiB
+
+static LispProcessStack lisp_process_context_pool[LISP_MAX_PROCESS_CONTEXTS];
+static int lisp_process_context_pool_used[LISP_MAX_PROCESS_CONTEXTS];
+
+static UINTN lisp_process_context_pool_alloc(void) {
+    for (UINTN i = 0; i < LISP_MAX_PROCESS_CONTEXTS; i++) {
+        if (!lisp_process_context_pool_used[i]) {
+            lisp_process_context_pool_used[i] = 1;
+            return i;
+        }
+    }
+    lisp_panic(L"process-resume: too many started processes");
+    return 0; // 到達しない
+}
+
+// 起動直後のブート処理そのもの(EfiMain経由のREPLループ)を表す「メイン」コンテキスト。
+// プールとは別に静的に確保する(mainは他のプロセスと同じ一時的な確保・回収対象ではないため)
+static LispProcessStack lisp_process_main_context;
+static LispProcessStack *lisp_current_process_stack = &lisp_process_main_context;
+
+// lisp_process_thunk_entryがlisp_apply完了後にセットし、%process-resume側がlisp_context_switch
+// から戻った直後にチェックしてstatusスロットを:finishedへ更新するために使う一時フラグ
+static int lisp_process_thunk_finished = 0;
+
+static void lisp_process_thunk_entry(void *arg) {
+    LispObject closure = (LispObject)(UINT64)(UINTN)arg;
+    lisp_apply(closure, LISP_NIL);
+    lisp_process_thunk_finished = 1;
+    lisp_context_switch(lisp_current_process_stack, lisp_current_process_stack->resumer);
+    // entryが戻ってきた場合と同様、プロセス終了後の破棄はスコープ外なので安全のためhangする
+    for (;;) {}
+}
+
+// (%process-resume process &optional thunk): processのstackframeスロットがnilなら
+// thunk(0引数のLisp関数)を新規コンテキストで開始し、fixnumのプールindexならそのコンテキストを
+// 直前のprocess-suspendの中断点から再開する。いずれの場合も呼び出し元のコンテキストへ
+// lisp_context_switchが戻ってくるまでブロックする。
+// statusを:activeに設定するのはlisp_context_switchで実際に制御を渡す直前であり、単一実行
+// コンテキストの協調的切替である以上、この呼び出しが戻ってきた時点で外部から:activeを
+// 観測することは原理的にできない(戻ってきた時点のstatusは常に:suspendedか:finished)
+LispObject lisp_builtin_process_resume(LispObject args) {
+    LispObject p = lisp_car(args);
+    LispObject thunk = lisp_is_cons(lisp_cdr(args)) ? lisp_car(lisp_cdr(args)) : LISP_NIL;
+    lisp_assert_instance(p);
+
+    UINTN stackframe_index = lisp_instance_slot_index(p, lisp_intern("stackframe"));
+    UINTN status_index = lisp_instance_slot_index(p, lisp_intern("status"));
+    LispObject *slots = lisp_closure_cell(lisp_closure_cell(p)->inst_slots)->vec_data;
+
+    LispProcessStack *target;
+    if (slots[stackframe_index] == LISP_NIL) {
+        if (thunk == LISP_NIL) {
+            lisp_panic(L"process-resume: process has not started and no thunk was given");
+        }
+        UINTN pool_index = lisp_process_context_pool_alloc();
+        target = &lisp_process_context_pool[pool_index];
+        lisp_process_stack_create(target, LISP_PROCESS_STACK_PAGES, lisp_process_thunk_entry,
+            (void *)(UINTN)(UINT64)thunk);
+        slots[stackframe_index] = lisp_make_fixnum((long long)pool_index);
+    } else {
+        lisp_assert_fixnum(slots[stackframe_index]);
+        UINTN pool_index = (UINTN)lisp_fixnum_value(slots[stackframe_index]);
+        target = &lisp_process_context_pool[pool_index];
+        lisp_process_stack_unregister(target); // milestone107のGCルート登録から外す(自走再開)
+    }
+
+    target->resumer = lisp_current_process_stack;
+    LispProcessStack *caller = lisp_current_process_stack;
+    lisp_current_process_stack = target;
+    slots[status_index] = lisp_intern_keyword("active");
+
+    lisp_process_thunk_finished = 0;
+    lisp_context_switch(caller, target);
+
+    lisp_current_process_stack = caller;
+    if (lisp_process_thunk_finished) {
+        lisp_process_thunk_finished = 0;
+        slots[status_index] = lisp_intern_keyword("finished");
+    }
+    return p;
+}
+
+// (%process-suspend process): processが「今実際に実行中のコンテキスト自身」である場合のみ
+// 許可される(自分自身をsuspendする)。resumerフィールドに記録済みの、自分をresumeした側へ
+// lisp_context_switchで戻る。他プロセスのvm_stackをGCルートとして登録してから中断するため、
+// suspend中もそのプロセスのVMデータスタック上のオブジェクトは回収されない(milestone107)。
+// ただしツリーウォーク経路(lisp_eval/lisp_apply)のC局所変数はこのルート集合の対象外であり、
+// 中断中に他プロセスが(gc)を誘発した場合の既知の未解消リスクがある(src/lisp.h参照)
+LispObject lisp_builtin_process_suspend(LispObject args) {
+    LispObject p = lisp_car(args);
+    lisp_assert_instance(p);
+
+    UINTN stackframe_index = lisp_instance_slot_index(p, lisp_intern("stackframe"));
+    UINTN status_index = lisp_instance_slot_index(p, lisp_intern("status"));
+    LispObject *slots = lisp_closure_cell(lisp_closure_cell(p)->inst_slots)->vec_data;
+
+    if (slots[stackframe_index] == LISP_NIL) {
+        lisp_panic(L"process-suspend: process has not started");
+    }
+    lisp_assert_fixnum(slots[stackframe_index]);
+    UINTN pool_index = (UINTN)lisp_fixnum_value(slots[stackframe_index]);
+    LispProcessStack *target = &lisp_process_context_pool[pool_index];
+
+    if (target != lisp_current_process_stack) {
+        lisp_panic(L"process-suspend: process is not currently running");
+    }
+
+    slots[status_index] = lisp_intern_keyword("suspended");
+    lisp_process_stack_register(target); // milestone107: 中断中はGCルートとして走査対象にする
+    LispProcessStack *resumer = target->resumer;
+    lisp_current_process_stack = resumer;
+    lisp_context_switch(target, resumer);
+
+    // ここに戻ってくるのは、後で誰かが%process-resumeでこのプロセスを再開した時
+    return p;
+}
+
+// --- process-suspend/process-resume自己テスト (milestone 112) ---
+// 0引数の閉包(ダイナミック変数m112-counterをインクリメント→自分自身に対しprocess-suspend→
+// 再度インクリメント)を新規プロセスに対して開始し、(1)1回目のインクリメント後、suspend直後で
+// 実行が呼び出し元(このセルフテスト自身)へ返ってくること・statusが:suspendedであること
+// (単一実行コンテキストの協調的切替である以上、呼び出し元が制御を取り戻した時点でこの
+// プロセス自身が:activeであることはあり得ない)、(2)再度resumeすると2回目のインクリメント後に
+// 閉包が正常に戻り、statusが:finishedになること、(3)2回のインクリメントの結果が2であることを
+// 確認する
+int lisp_process_suspend_resume_selftest(void) {
+    LispObject os_pkg = lisp_find_package("os");
+    LispObject cls = lisp_find_class(lisp_intern_in_package(os_pkg, "process"));
+    LispObject p = lisp_make_instance(cls);
+
+    lisp_eval(lisp_read_from_buffer("(defparameter m112-counter 0)"), global_env);
+    // defun/lambdaの本体は単一formのみ(milestone21で確認済みのprogn gotcha)なので、
+    // 複数formを実行するには明示的にprognで束ねる必要がある
+    lisp_eval(lisp_read_from_buffer(
+        "(defun m112-thunk () (progn (setq m112-counter (+ m112-counter 1)) "
+        "(%process-suspend m112-proc) (setq m112-counter (+ m112-counter 1))))"),
+        global_env);
+
+    LispObject proc_sym = lisp_intern("m112-proc");
+    LispSymbol *proc_cell = lisp_symbol_cell(proc_sym);
+    proc_cell->is_special = 1;
+    proc_cell->value = p;
+
+    LispObject thunk = lisp_symbol_cell(lisp_intern("m112-thunk"))->fn;
+
+    lisp_builtin_process_resume(lisp_cons(p, lisp_cons(thunk, LISP_NIL)));
+
+    UINTN status_index = lisp_instance_slot_index(p, lisp_intern("status"));
+    LispObject status_after_suspend =
+        lisp_closure_cell(lisp_closure_cell(p)->inst_slots)->vec_data[status_index];
+    if (status_after_suspend != lisp_intern_keyword("suspended")) {
+        return 0;
+    }
+    if (lisp_eval(lisp_read_from_buffer("m112-counter"), global_env) != lisp_make_fixnum(1)) {
+        return 0;
+    }
+
+    lisp_builtin_process_resume(lisp_cons(p, LISP_NIL));
+
+    LispObject status_after_finish =
+        lisp_closure_cell(lisp_closure_cell(p)->inst_slots)->vec_data[status_index];
+    if (status_after_finish != lisp_intern_keyword("finished")) {
+        return 0;
+    }
+    if (lisp_eval(lisp_read_from_buffer("m112-counter"), global_env) != lisp_make_fixnum(2)) {
+        return 0;
+    }
+
+    return 1;
+}
+
 // milestone98: print-objectの既定method。m96/97時点の#<name instance>相当の表示を、
 // defmethodでオーバーライド可能な総称関数の1メソッドとして提供する。lisp_method_applicable
 // は無指定specializerを引数の型を問わず適用可能と判定するため、instance以外が渡された
@@ -6243,6 +6421,8 @@ void lisp_builtins_init(void) {
     LISP_REGISTER_BUILTIN("set-slot-value", lisp_builtin_set_slot_value);
     LISP_REGISTER_BUILTIN("class-of", lisp_builtin_class_of);
     LISP_REGISTER_BUILTIN("%make-process", lisp_builtin_make_process);
+    LISP_REGISTER_BUILTIN("%process-resume", lisp_builtin_process_resume);
+    LISP_REGISTER_BUILTIN("%process-suspend", lisp_builtin_process_suspend);
 
     // milestone97: defmethod・総称関数・多重ディスパッチ
     LISP_REGISTER_BUILTIN("%ensure-generic-function", lisp_builtin_ensure_generic_function);
@@ -6360,6 +6540,7 @@ void lisp_process_stack_create(LispProcessStack *out, UINTN stack_pages, void (*
     out->started = 0;
     out->vm_sp = 0; // milestone105: 空のVMデータスタックで開始する
     out->active_trap = (void *)0; // milestone105: トラップ未設置で開始する
+    out->resumer = (void *)0; // milestone112: resume時に設定される
     out->regs.rbx = 0;
     out->regs.rbp = 0;
     out->regs.rdi = 0;
