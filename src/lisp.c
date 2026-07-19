@@ -83,6 +83,9 @@ typedef struct LispClosure {
     int pkg_is_keyword;     // 真なら自己評価し印字時に":"を前置する特別なパッケージ
     LispObject pkg_nicknames; // milestone91: 別名文字列のconsリスト
     LispObject pkg_shadowing_symbols; // milestone92: shadow/shadowing-importで登録されたローカルシンボルのconsリスト（eq基準）
+    int pkg_locked; // milestone110: 真ならlock-package済み。defun/setq等の書込サイトはmilestone111で
+                     // このフラグを見てpanicする（読み取り専用操作・shadow/export/use-package等の
+                     // メタ操作はロック対象外、CommonLispのpackage lockと同様の切り分け）
     LispObject class_name;         // milestone96: NILならclassではない。非NILならクラス名symbol
     LispObject class_superclass;   // 直接の親クラスオブジェクト（単一継承、無ければNIL）
     LispObject class_direct_slots; // このクラス自身が直接宣言したスロット名symbolのリスト
@@ -376,6 +379,7 @@ LispObject lisp_make_closure(LispObject params, LispObject body, LispObject env)
     closure->pkg_is_keyword = 0;
     closure->pkg_nicknames = LISP_NIL;
     closure->pkg_shadowing_symbols = LISP_NIL;
+    closure->pkg_locked = 0;
     closure->class_name = LISP_NIL;
     closure->class_superclass = LISP_NIL;
     closure->class_direct_slots = LISP_NIL;
@@ -418,6 +422,7 @@ LispObject lisp_make_builtin(LispBuiltinFn fn) {
     closure->pkg_is_keyword = 0;
     closure->pkg_nicknames = LISP_NIL;
     closure->pkg_shadowing_symbols = LISP_NIL;
+    closure->pkg_locked = 0;
     closure->class_name = LISP_NIL;
     closure->class_superclass = LISP_NIL;
     closure->class_direct_slots = LISP_NIL;
@@ -462,6 +467,7 @@ LispObject lisp_make_macro(LispObject params, LispObject body, LispObject env) {
     closure->pkg_is_keyword = 0;
     closure->pkg_nicknames = LISP_NIL;
     closure->pkg_shadowing_symbols = LISP_NIL;
+    closure->pkg_locked = 0;
     closure->class_name = LISP_NIL;
     closure->class_superclass = LISP_NIL;
     closure->class_direct_slots = LISP_NIL;
@@ -513,6 +519,7 @@ LispObject lisp_make_string(const char *chars, UINTN len) {
     closure->pkg_is_keyword = 0;
     closure->pkg_nicknames = LISP_NIL;
     closure->pkg_shadowing_symbols = LISP_NIL;
+    closure->pkg_locked = 0;
     closure->class_name = LISP_NIL;
     closure->class_superclass = LISP_NIL;
     closure->class_direct_slots = LISP_NIL;
@@ -558,6 +565,7 @@ LispObject lisp_make_float(double value) {
     closure->pkg_is_keyword = 0;
     closure->pkg_nicknames = LISP_NIL;
     closure->pkg_shadowing_symbols = LISP_NIL;
+    closure->pkg_locked = 0;
     closure->class_name = LISP_NIL;
     closure->class_superclass = LISP_NIL;
     closure->class_direct_slots = LISP_NIL;
@@ -608,6 +616,7 @@ LispObject lisp_make_bignum(const UINT32 *digits, UINTN len, int negative) {
     closure->pkg_is_keyword = 0;
     closure->pkg_nicknames = LISP_NIL;
     closure->pkg_shadowing_symbols = LISP_NIL;
+    closure->pkg_locked = 0;
     closure->class_name = LISP_NIL;
     closure->class_superclass = LISP_NIL;
     closure->class_direct_slots = LISP_NIL;
@@ -659,6 +668,7 @@ LispObject lisp_make_vector(UINTN len, LispObject fill) {
     closure->pkg_is_keyword = 0;
     closure->pkg_nicknames = LISP_NIL;
     closure->pkg_shadowing_symbols = LISP_NIL;
+    closure->pkg_locked = 0;
     closure->class_name = LISP_NIL;
     closure->class_superclass = LISP_NIL;
     closure->class_direct_slots = LISP_NIL;
@@ -716,6 +726,7 @@ LispObject lisp_make_compiled(const unsigned char *bytecode, UINTN bytecode_len,
     closure->pkg_is_keyword = 0;
     closure->pkg_nicknames = LISP_NIL;
     closure->pkg_shadowing_symbols = LISP_NIL;
+    closure->pkg_locked = 0;
     closure->class_name = LISP_NIL;
     closure->class_superclass = LISP_NIL;
     closure->class_direct_slots = LISP_NIL;
@@ -1007,6 +1018,7 @@ static LispObject lisp_make_package_object(const char *name, int is_keyword_pack
     closure->pkg_is_keyword = is_keyword_package;
     closure->pkg_nicknames = LISP_NIL;
     closure->pkg_shadowing_symbols = LISP_NIL;
+    closure->pkg_locked = 0;
     closure->class_name = LISP_NIL;
     closure->class_superclass = LISP_NIL;
     closure->class_direct_slots = LISP_NIL;
@@ -2321,6 +2333,7 @@ static LispObject lisp_vm_run(LispClosure *cl, UINTN fp) {
                 instance->pkg_is_keyword = 0;
                 instance->pkg_nicknames = LISP_NIL;
                 instance->pkg_shadowing_symbols = LISP_NIL;
+                instance->pkg_locked = 0;
                 instance->class_name = LISP_NIL;
                 instance->class_superclass = LISP_NIL;
                 instance->class_direct_slots = LISP_NIL;
@@ -4255,6 +4268,27 @@ LispObject lisp_builtin_shadowing_import(LispObject args) {
     return lisp_sym_t;
 }
 
+// (lock-package designator): pkg_lockedを真にする（milestone110）。milestone111で書込サイト
+// (defun/setq/defvar等)がこのフラグを見てpanicするようになる。何度呼んでも冪等
+LispObject lisp_builtin_lock_package(LispObject args) {
+    LispObject pkg = lisp_resolve_package_designator(lisp_car(args));
+    lisp_closure_cell(pkg)->pkg_locked = 1;
+    return lisp_sym_t;
+}
+
+// (unlock-package designator): pkg_lockedを偽にする（milestone110）
+LispObject lisp_builtin_unlock_package(LispObject args) {
+    LispObject pkg = lisp_resolve_package_designator(lisp_car(args));
+    lisp_closure_cell(pkg)->pkg_locked = 0;
+    return lisp_sym_t;
+}
+
+// (package-locked-p designator): pkg_lockedの現在値を真偽値として返す（milestone110）
+LispObject lisp_builtin_package_locked_p(LispObject args) {
+    LispObject pkg = lisp_resolve_package_designator(lisp_car(args));
+    return lisp_closure_cell(pkg)->pkg_locked ? lisp_sym_t : LISP_NIL;
+}
+
 // (delete-package designator): global_packagesからeqで除去し、他の全パッケージのpkg_usesから
 // もこのパッケージを除去する。対象が現在の*package*自身ならpanicする（CLと同様、カレント
 // パッケージは削除できない）
@@ -5515,6 +5549,7 @@ static LispObject lisp_make_class(LispObject name, LispObject superclass, LispOb
     closure->pkg_is_keyword = 0;
     closure->pkg_nicknames = LISP_NIL;
     closure->pkg_shadowing_symbols = LISP_NIL;
+    closure->pkg_locked = 0;
     closure->class_name = name;
     closure->class_superclass = superclass;
     closure->class_direct_slots = direct_slots;
@@ -5560,6 +5595,7 @@ static LispObject lisp_make_instance(LispObject cls) {
     closure->pkg_is_keyword = 0;
     closure->pkg_nicknames = LISP_NIL;
     closure->pkg_shadowing_symbols = LISP_NIL;
+    closure->pkg_locked = 0;
     closure->class_name = LISP_NIL;
     closure->class_superclass = LISP_NIL;
     closure->class_direct_slots = LISP_NIL;
@@ -5875,6 +5911,7 @@ static LispObject lisp_make_generic_function(LispObject name) {
     closure->pkg_is_keyword = 0;
     closure->pkg_nicknames = LISP_NIL;
     closure->pkg_shadowing_symbols = LISP_NIL;
+    closure->pkg_locked = 0;
     closure->class_name = LISP_NIL;
     closure->class_superclass = LISP_NIL;
     closure->class_direct_slots = LISP_NIL;
@@ -6107,6 +6144,9 @@ void lisp_builtins_init(void) {
     LISP_REGISTER_BUILTIN("shadowing-import", lisp_builtin_shadowing_import);
     LISP_REGISTER_BUILTIN("delete-package", lisp_builtin_delete_package);
     LISP_REGISTER_BUILTIN("rename-package", lisp_builtin_rename_package);
+    LISP_REGISTER_BUILTIN("lock-package", lisp_builtin_lock_package);
+    LISP_REGISTER_BUILTIN("unlock-package", lisp_builtin_unlock_package);
+    LISP_REGISTER_BUILTIN("package-locked-p", lisp_builtin_package_locked_p);
     LISP_REGISTER_BUILTIN("rplaca", lisp_builtin_rplaca);
     LISP_REGISTER_BUILTIN("rplacd", lisp_builtin_rplacd);
     LISP_REGISTER_BUILTIN("hash-code", lisp_builtin_hash_code);

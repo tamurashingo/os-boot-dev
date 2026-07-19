@@ -364,6 +364,16 @@
                  (:use "test-pkg92-dpsifother"))))
       (eq (intern "dpsif-sym-92" pkg) src-sym))))
 
+; milestone110: lock-package/unlock-package/package-locked-pの検証。書込サイトへのチェック
+; 追加自体はmilestone111のスコープであり、ここではフラグの読み書きのみを確認する
+(defun run-test-package-lock ()
+  (let ((pkg (make-package "test-pkg110-lock")))
+    (and (eq (package-locked-p pkg) nil)
+         (eq (lock-package pkg) t)
+         (eq (package-locked-p pkg) t)
+         (eq (unlock-package pkg) t)
+         (eq (package-locked-p pkg) nil))))
+
 (defun run-test-package ()
   (and (run-test-package-keyword-identity)
        (run-test-package-namespace-separation)
@@ -397,4 +407,5 @@
        (run-test-package-rename-package)
        (run-test-package-defpackage-shadow)
        (run-test-package-defpackage-import-from)
-       (run-test-package-defpackage-shadowing-import-from)))
+       (run-test-package-defpackage-shadowing-import-from)
+       (run-test-package-lock)))
