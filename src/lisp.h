@@ -546,4 +546,10 @@ int lisp_wait_for_double_ctrl(UINT64 window_100ns);
 // ヘッドレスQEMU/OVMF環境のmake testでも実行できる
 int lisp_console_output_mode_selftest(void);
 
+// milestone 122: lisp_screen_buffer_init(QueryModeでcols/rows確定、ClearScreenで実画面
+// 初期化、back/frontをスペースで埋めカーソル/pending_newlines/dirtyを0に戻す)を実際に
+// 呼び、初期化直後の状態が全て期待通りであることを確認する。この時点では既存の出力経路
+// からは未接続で、単体で状態を保持するだけの段階
+int lisp_screen_buffer_selftest(void);
+
 #endif // OS_BOOT_DEV_LISP_H

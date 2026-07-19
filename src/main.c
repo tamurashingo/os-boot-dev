@@ -141,6 +141,16 @@ static void lisp_console_output_mode_selftest_run(EFI_SYSTEM_TABLE *SystemTable)
     }
 }
 
+// --- 画面バッファ初期化自己テスト (milestone 122) ---
+static void lisp_screen_buffer_selftest_run(EFI_SYSTEM_TABLE *SystemTable) {
+    if (lisp_screen_buffer_selftest()) {
+        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"Screen buffer init self-test: PASS\r\n");
+    } else {
+        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"Screen buffer init self-test: FAIL\r\n");
+        for (;;) {}
+    }
+}
+
 // --- ビルトインexport自己テスト (milestone 101) ---
 static void lisp_reader_builtin_export_selftest_run(EFI_SYSTEM_TABLE *SystemTable) {
     if (lisp_reader_builtin_export_selftest()) {
@@ -595,6 +605,9 @@ static EFI_STATUS EFIAPI EfiMainImpl(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *S
     lisp_console_output_mode_selftest_run(SystemTable); // milestone 119: 実際のConOut->QueryMode/
                                                          // SetCursorPositionを呼び戻り値・
                                                          // Cols/Rows・カーソル位置反映を確認する
+    lisp_screen_buffer_selftest_run(SystemTable); // milestone 122: LispScreenBuffer(back/front/
+                                                   // カーソル/dirty)の初期化状態を確認する。
+                                                   // 既存の出力経路には未接続の単体テスト
     lisp_input_ex_init(); // milestone 116: EFI_SIMPLE_TEXT_INPUT_EX_PROTOCOLをLocateProtocolで
                            // 取得する(見つからなければg_text_input_exはNULLのまま、panicしない)
     if (g_text_input_ex != (void *)0) {

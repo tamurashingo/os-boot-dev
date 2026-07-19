@@ -5742,6 +5742,95 @@ LispObject lisp_builtin_get_screen_size(LispObject args) {
     return lisp_cons(lisp_make_fixnum((long long)cols), lisp_make_fixnum((long long)rows));
 }
 
+// --- 画面ダブルバッファリング (milestone 122〜) ---
+// documents/lisp_console_buffer.mdフェーズK。単一プロセスのみが実行中というコルーチン方式
+// (milestone100〜118)の前提により、プロセス毎ではなく単一の共有グローバルとする。
+// UEFIの標準テキストコンソールで現実的に出現するモード(80x25〜128x40程度)を十分に
+// 上回る固定上限で静的に確保する(CLAUDE.mdの方針通り、この段階ではヒープ確保をしない)
+#define LISP_SCREEN_COLS_MAX 200
+#define LISP_SCREEN_ROWS_MAX 80
+
+typedef struct {
+    UINTN cols;
+    UINTN rows;
+    CHAR16 back[LISP_SCREEN_ROWS_MAX][LISP_SCREEN_COLS_MAX];
+    CHAR16 front[LISP_SCREEN_ROWS_MAX][LISP_SCREEN_COLS_MAX];
+    UINTN cursor_col;
+    UINTN cursor_row;
+    UINTN pending_newlines;
+    int dirty;
+    int initialized;
+} LispScreenBuffer;
+
+static LispScreenBuffer lisp_screen_buffer;
+
+// QueryModeで実際のcols/rowsを確定し(上限を超えていればpanic)、ClearScreenで実画面を
+// クリアしてから、back/front両方をスペースで埋めカーソル/pending_newlines/dirtyを0に
+// 戻す。milestone122の時点では既存の出力経路(lisp_console_stream_write等)からは
+// 一切呼ばれず、単体で状態を保持するだけの段階
+void lisp_screen_buffer_init(void) {
+    EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL *out = g_system_table->ConOut;
+
+    UINTN cols = 0;
+    UINTN rows = 0;
+    if (out->QueryMode(out, out->Mode->Mode, &cols, &rows) != 0) {
+        lisp_panic(L"lisp_screen_buffer_init: QueryMode failed");
+    }
+    if (cols == 0 || cols > LISP_SCREEN_COLS_MAX || rows == 0 || rows > LISP_SCREEN_ROWS_MAX) {
+        lisp_panic(L"lisp_screen_buffer_init: screen size out of supported range");
+    }
+    if (out->ClearScreen(out) != 0) {
+        lisp_panic(L"lisp_screen_buffer_init: ClearScreen failed");
+    }
+
+    lisp_screen_buffer.cols = cols;
+    lisp_screen_buffer.rows = rows;
+    for (UINTN r = 0; r < rows; r++) {
+        for (UINTN c = 0; c < cols; c++) {
+            lisp_screen_buffer.back[r][c] = L' ';
+            lisp_screen_buffer.front[r][c] = L' ';
+        }
+    }
+    lisp_screen_buffer.cursor_col = 0;
+    lisp_screen_buffer.cursor_row = 0;
+    lisp_screen_buffer.pending_newlines = 0;
+    lisp_screen_buffer.dirty = 0;
+    lisp_screen_buffer.initialized = 1;
+}
+
+// milestone122: lisp_screen_buffer_initを実際に呼び、QueryModeが返した実際のcols/rowsが
+// 妥当な範囲であること・初期化直後のカーソル/pending_newlines/dirtyが全て0であること・
+// back/front両方の全セルが実際にスペースで埋まっていることを確認する
+int lisp_screen_buffer_selftest(void) {
+    lisp_screen_buffer_init();
+
+    if (lisp_screen_buffer.cols == 0 || lisp_screen_buffer.cols > LISP_SCREEN_COLS_MAX) {
+        return 0;
+    }
+    if (lisp_screen_buffer.rows == 0 || lisp_screen_buffer.rows > LISP_SCREEN_ROWS_MAX) {
+        return 0;
+    }
+    if (lisp_screen_buffer.initialized != 1) {
+        return 0;
+    }
+    if (lisp_screen_buffer.cursor_col != 0 || lisp_screen_buffer.cursor_row != 0) {
+        return 0;
+    }
+    if (lisp_screen_buffer.pending_newlines != 0 || lisp_screen_buffer.dirty != 0) {
+        return 0;
+    }
+
+    for (UINTN r = 0; r < lisp_screen_buffer.rows; r++) {
+        for (UINTN c = 0; c < lisp_screen_buffer.cols; c++) {
+            if (lisp_screen_buffer.back[r][c] != L' ' || lisp_screen_buffer.front[r][c] != L' ') {
+                return 0;
+            }
+        }
+    }
+
+    return 1;
+}
+
 // milestone 29: EfiMainが起動時に標準ライブラリファイルを読み込むための入口。
 // lisp_builtin_loadはLisp文字列オブジェクトの引数リストを要求するので、
 // Cの文字列リテラルからそれを組み立てるだけの薄いラッパー

@@ -94,7 +94,7 @@
 
 | # | マイルストーン | 状態 | 主な内容 |
 |---|---|---|---|
-| 122 | `LispScreenBuffer`構造体新設・初期化 | 未着手 | back/front/カーソル/dirtyを持つ構造体と`lisp_screen_buffer_init`(QueryModeでcols/rows確定、ClearScreenで実画面初期化)を追加する。既存経路には未接続。C自己テストで初期値を確認する。 |
+| 122 | `LispScreenBuffer`構造体新設・初期化 | 完了 | `src/lisp.c`に`LispScreenBuffer`構造体(`cols`/`rows`/固定上限`LISP_SCREEN_COLS_MAX`(200)×`LISP_SCREEN_ROWS_MAX`(80)の`back`/`front`2次元`CHAR16`配列/`cursor_col`/`cursor_row`/`pending_newlines`/`dirty`/`initialized`)と単一の共有グローバル`lisp_screen_buffer`を追加した。`lisp_screen_buffer_init`は`QueryMode`で実際のcols/rowsを確定(上限超過はpanic)し`ClearScreen`で実画面をクリアした後、back/front両方をスペースで埋めカーソル/`pending_newlines`/`dirty`を0に戻す。C自己テスト`lisp_screen_buffer_selftest`(`src/lisp.c`/`src/lisp.h`、`main.c`の起動シーケンス・milestone119自己テスト直後に組み込み)で初期化直後の状態を確認した。既存の出力経路(`lisp_console_stream_write`等)には未接続で、単体で状態を保持するだけの段階。`make build`/`make test`(29ファイル全PASS、新規自己テストのPASSログを含む)で回帰が無いことを確認した。 |
 | 123 | `lisp_screen_putc`(1文字書き込み・改行・スクロール) | 未着手 | UEFI呼び出しを含まない純粋なバッファ操作関数。改行時は`pending_newlines`加算、画面末尾到達時は1行shiftでスクロールする。C自己テストで検証する。 |
 | 124 | `lisp_screen_flush`(back/front差分反映) | 未着手 | 変化したセルのみ`SetCursorPosition`+`OutputString`で反映、`pending_newlines`分の実`"\r\n"`を送出、最後にハードウェアカーソルを論理カーソルへ合わせる。C自己テストで呼び出し回数を検証する。 |
 | 125 | `lisp_console_stream_write`のバッファ化(暫定: 呼び出し毎flush) | 未着手 | `write-string`/`write-line`/`princ`をバッファ経由+即時flushへ切り替える中間段階。`make test`で既存28+フィクスチャの回帰無しを確認する(改行の実バイト再現性の実質検証)。 |
