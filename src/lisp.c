@@ -5704,6 +5704,31 @@ LispObject lisp_builtin_read_console_expr(LispObject args) {
     }
 }
 
+// milestone120: documents/lisp_console_buffer.mdフェーズJ、カーソル制御ビルトインの
+// 暫定実装(バッファ無し、直接ConOutを叩く)。フェーズK(122〜128)でダブルバッファリング化
+// する際にこの2関数の内部実装だけを差し替える想定で、Lisp側の呼び出し形は変えない
+LispObject lisp_builtin_clear_screen(LispObject args) {
+    EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL *out = g_system_table->ConOut;
+    if (out->ClearScreen(out) != 0) {
+        lisp_panic(L"%clear-screen: ClearScreen failed");
+    }
+    return lisp_sym_t;
+}
+
+// (%set-cursor-position col row): col/rowはfixnum必須(0始まり、UEFI仕様と同じ)
+LispObject lisp_builtin_set_cursor_position(LispObject args) {
+    LispObject col_obj = lisp_car(args);
+    LispObject row_obj = lisp_car(lisp_cdr(args));
+    lisp_assert_fixnum(col_obj);
+    lisp_assert_fixnum(row_obj);
+
+    EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL *out = g_system_table->ConOut;
+    if (out->SetCursorPosition(out, (UINTN)lisp_fixnum_value(col_obj), (UINTN)lisp_fixnum_value(row_obj)) != 0) {
+        lisp_panic(L"%set-cursor-position: SetCursorPosition failed");
+    }
+    return lisp_sym_t;
+}
+
 // milestone 29: EfiMainが起動時に標準ライブラリファイルを読み込むための入口。
 // lisp_builtin_loadはLisp文字列オブジェクトの引数リストを要求するので、
 // Cの文字列リテラルからそれを組み立てるだけの薄いラッパー
@@ -6711,6 +6736,9 @@ void lisp_builtins_init(void) {
     LISP_REGISTER_BUILTIN("write-string", lisp_builtin_write_string);
     LISP_REGISTER_BUILTIN("princ", lisp_builtin_princ);
     LISP_REGISTER_BUILTIN("%read-console-expr", lisp_builtin_read_console_expr);
+    // milestone120: カーソル制御ビルトイン(暫定実装、直接ConOut)
+    LISP_REGISTER_BUILTIN("%clear-screen", lisp_builtin_clear_screen);
+    LISP_REGISTER_BUILTIN("%set-cursor-position", lisp_builtin_set_cursor_position);
     LISP_REGISTER_BUILTIN("sleep", lisp_builtin_sleep);
     LISP_REGISTER_BUILTIN("gensym", lisp_builtin_gensym);
     LISP_REGISTER_BUILTIN("gc", lisp_builtin_gc);
