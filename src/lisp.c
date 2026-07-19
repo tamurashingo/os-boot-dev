@@ -5831,6 +5831,121 @@ int lisp_screen_buffer_selftest(void) {
     return 1;
 }
 
+// milestone123: back bufferへの1文字書き込み・改行・スクロールのみを行う純粋なバッファ
+// 操作関数(UEFI呼び出しを一切含まない)。改行('\n')はpending_newlinesを加算して
+// カーソルを次行の先頭へ移すのみで、実際の"\r\n"送出はlisp_screen_flush(milestone124)の
+// 責務とする。行末に達した通常文字は次行の先頭へ折り返り、画面最下行を超えた場合は
+// 1行分shiftしてスクロールし、最下行をスペースで初期化する
+void lisp_screen_putc(char ch) {
+    if (!lisp_screen_buffer.initialized) {
+        lisp_panic(L"lisp_screen_putc: screen buffer not initialized");
+    }
+
+    if (ch == '\n') {
+        lisp_screen_buffer.pending_newlines++;
+        lisp_screen_buffer.cursor_col = 0;
+        lisp_screen_buffer.cursor_row++;
+    } else {
+        lisp_screen_buffer.back[lisp_screen_buffer.cursor_row][lisp_screen_buffer.cursor_col] = (CHAR16)ch;
+        lisp_screen_buffer.dirty = 1;
+        lisp_screen_buffer.cursor_col++;
+        if (lisp_screen_buffer.cursor_col >= lisp_screen_buffer.cols) {
+            lisp_screen_buffer.cursor_col = 0;
+            lisp_screen_buffer.cursor_row++;
+        }
+    }
+
+    if (lisp_screen_buffer.cursor_row >= lisp_screen_buffer.rows) {
+        for (UINTN r = 1; r < lisp_screen_buffer.rows; r++) {
+            for (UINTN c = 0; c < lisp_screen_buffer.cols; c++) {
+                lisp_screen_buffer.back[r - 1][c] = lisp_screen_buffer.back[r][c];
+            }
+        }
+        for (UINTN c = 0; c < lisp_screen_buffer.cols; c++) {
+            lisp_screen_buffer.back[lisp_screen_buffer.rows - 1][c] = L' ';
+        }
+        lisp_screen_buffer.cursor_row = lisp_screen_buffer.rows - 1;
+        lisp_screen_buffer.dirty = 1;
+    }
+}
+
+// milestone123: lisp_screen_putcの基本文字書き込み・改行・行末折り返し・スクロールを、
+// 都度lisp_screen_buffer_initで初期状態へリセットしてからそれぞれ独立に検証する
+int lisp_screen_putc_selftest(void) {
+    // (1) 基本の1文字書き込み: 指定位置へ反映され、カーソルが1つ進みdirtyが立つ
+    lisp_screen_buffer_init();
+    lisp_screen_putc('A');
+    if (lisp_screen_buffer.back[0][0] != L'A') {
+        return 0;
+    }
+    if (lisp_screen_buffer.cursor_row != 0 || lisp_screen_buffer.cursor_col != 1) {
+        return 0;
+    }
+    if (lisp_screen_buffer.dirty != 1) {
+        return 0;
+    }
+
+    // (2) 改行: pending_newlinesが増え、カーソルが次行の先頭に移動する。セル内容は不変
+    UINTN pending_before = lisp_screen_buffer.pending_newlines;
+    lisp_screen_putc('\n');
+    if (lisp_screen_buffer.pending_newlines != pending_before + 1) {
+        return 0;
+    }
+    if (lisp_screen_buffer.cursor_col != 0 || lisp_screen_buffer.cursor_row != 1) {
+        return 0;
+    }
+    if (lisp_screen_buffer.back[0][0] != L'A') {
+        return 0;
+    }
+
+    // (3) 行末での折り返し: cols文字書き込むとカーソルが次行の先頭へ折り返る
+    lisp_screen_buffer_init();
+    UINTN cols = lisp_screen_buffer.cols;
+    for (UINTN i = 0; i < cols; i++) {
+        lisp_screen_putc('x');
+    }
+    if (lisp_screen_buffer.cursor_row != 1 || lisp_screen_buffer.cursor_col != 0) {
+        return 0;
+    }
+    if (lisp_screen_buffer.back[0][cols - 1] != L'x') {
+        return 0;
+    }
+
+    // (4) スクロール: 改行のみでカーソルを最下行まで進め、目印を置いた行がさらに
+    // 1行shiftされることを確認する(lisp_console_output_mode_selftest(milestone119)で
+    // 実機のQueryModeがrows>=1の妥当な値を返すことは確認済みだが、3行未満では
+    // このスクロール検証自体が成立しないため、その場合のみ明示的に失敗とする)
+    lisp_screen_buffer_init();
+    UINTN rows = lisp_screen_buffer.rows;
+    if (rows < 3) {
+        return 0;
+    }
+    lisp_screen_putc('\n'); // row0 -> row1
+    lisp_screen_putc('M');  // row1のcol0に目印
+    for (UINTN r = 1; r < rows - 1; r++) {
+        lisp_screen_putc('\n'); // row(rows-1)まで進める
+    }
+    lisp_screen_putc('N'); // row(rows-1)のcol0に目印
+    lisp_screen_putc('\n'); // スクロール発生
+
+    if (lisp_screen_buffer.cursor_row != rows - 1 || lisp_screen_buffer.cursor_col != 0) {
+        return 0;
+    }
+    if (lisp_screen_buffer.back[0][0] != L'M') {
+        return 0;
+    }
+    if (lisp_screen_buffer.back[rows - 2][0] != L'N') {
+        return 0;
+    }
+    for (UINTN c = 0; c < lisp_screen_buffer.cols; c++) {
+        if (lisp_screen_buffer.back[rows - 1][c] != L' ') {
+            return 0;
+        }
+    }
+
+    return 1;
+}
+
 // milestone 29: EfiMainが起動時に標準ライブラリファイルを読み込むための入口。
 // lisp_builtin_loadはLisp文字列オブジェクトの引数リストを要求するので、
 // Cの文字列リテラルからそれを組み立てるだけの薄いラッパー

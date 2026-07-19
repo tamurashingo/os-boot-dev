@@ -151,6 +151,16 @@ static void lisp_screen_buffer_selftest_run(EFI_SYSTEM_TABLE *SystemTable) {
     }
 }
 
+// --- 画面バッファ1文字書き込み自己テスト (milestone 123) ---
+static void lisp_screen_putc_selftest_run(EFI_SYSTEM_TABLE *SystemTable) {
+    if (lisp_screen_putc_selftest()) {
+        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"Screen putc self-test: PASS\r\n");
+    } else {
+        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"Screen putc self-test: FAIL\r\n");
+        for (;;) {}
+    }
+}
+
 // --- ビルトインexport自己テスト (milestone 101) ---
 static void lisp_reader_builtin_export_selftest_run(EFI_SYSTEM_TABLE *SystemTable) {
     if (lisp_reader_builtin_export_selftest()) {
@@ -608,6 +618,8 @@ static EFI_STATUS EFIAPI EfiMainImpl(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *S
     lisp_screen_buffer_selftest_run(SystemTable); // milestone 122: LispScreenBuffer(back/front/
                                                    // カーソル/dirty)の初期化状態を確認する。
                                                    // 既存の出力経路には未接続の単体テスト
+    lisp_screen_putc_selftest_run(SystemTable); // milestone 123: 1文字書き込み・改行・
+                                                 // 行末折り返し・スクロールを確認する
     lisp_input_ex_init(); // milestone 116: EFI_SIMPLE_TEXT_INPUT_EX_PROTOCOLをLocateProtocolで
                            // 取得する(見つからなければg_text_input_exはNULLのまま、panicしない)
     if (g_text_input_ex != (void *)0) {

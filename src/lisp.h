@@ -552,4 +552,10 @@ int lisp_console_output_mode_selftest(void);
 // からは未接続で、単体で状態を保持するだけの段階
 int lisp_screen_buffer_selftest(void);
 
+// milestone 123: lisp_screen_putc(back bufferへの1文字書き込み・改行・スクロールのみを
+// 行う純粋なバッファ操作関数、UEFI呼び出しを一切含まない)の基本文字書き込み・改行・
+// 行末折り返し・スクロールを、都度lisp_screen_buffer_initで初期状態へリセットしてから
+// それぞれ独立に検証する
+int lisp_screen_putc_selftest(void);
+
 #endif // OS_BOOT_DEV_LISP_H
