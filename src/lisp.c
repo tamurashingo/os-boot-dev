@@ -193,7 +193,13 @@ lisp_jmp_buf *lisp_active_trap = (void *)0;
 // エラーメッセージを出力する。トラップが設置されていればそこへlisp_longjmpで
 // 復帰し、REPLの次のプロンプトから継続できる。トラップ未設置（起動処理中など）
 // の場合は従来通りfor(;;){}でハングする
+// milestone 128: パニックメッセージ自体は従来通り直接ConOutへ書くが、その前に
+// 画面バッファに溜まっている未flush分(VM命令ディスパッチループへ戻る前にツリー
+// ウォーク経路(lisp_eval/lisp_apply)で書かれた内容等)を先にflushする。これにより
+// panicメッセージが既存の出力より先に表示されてしまう順序崩れを防ぐ(未初期化なら
+// lisp_screen_flush自身がdirty/pending_newlinesとも0のため何もせず即戻る)
 void lisp_panic(CHAR16 *message) {
+    lisp_screen_flush();
     g_system_table->ConOut->OutputString(g_system_table->ConOut, L"Lisp panic: ");
     g_system_table->ConOut->OutputString(g_system_table->ConOut, message);
     g_system_table->ConOut->OutputString(g_system_table->ConOut, L"\r\n");
@@ -205,7 +211,9 @@ void lisp_panic(CHAR16 *message) {
 
 // milestone 31: 固定容量資源の枯渇など、REPLに復帰しても安全に継続できない
 // 致命的エラー用。トラップの有無に関わらず常にfor(;;){}でハングし続ける
+// milestone 128: lisp_panicと同様、直接ConOutへ書く前に未flush分を先に反映する
 void lisp_panic_fatal(CHAR16 *message) {
+    lisp_screen_flush();
     g_system_table->ConOut->OutputString(g_system_table->ConOut, L"Lisp fatal panic: ");
     g_system_table->ConOut->OutputString(g_system_table->ConOut, message);
     g_system_table->ConOut->OutputString(g_system_table->ConOut, L"\r\n");

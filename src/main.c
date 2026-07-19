@@ -653,7 +653,10 @@ static EFI_STATUS EFIAPI EfiMainImpl(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *S
     }
 
     // clear screen
-    SystemTable->ConOut->ClearScreen(SystemTable->ConOut);
+    // milestone 128: 直接ClearScreenを呼ぶのではなく、lisp_screen_buffer_initへ統合する
+    // (QueryModeでcols/rows確定・実ClearScreen・back/front初期化を1回で済ませる。
+    // Lisp heapへは触れないためlisp_heap_init前のこの位置でも安全)
+    lisp_screen_buffer_init();
     SystemTable->ConOut->OutputString(SystemTable->ConOut, L"Hello World!\r\n");
 
     SystemTable->ConOut->OutputString(SystemTable->ConOut, L"Memory cheking....\r\n");
@@ -782,7 +785,10 @@ static EFI_STATUS EFIAPI EfiMainImpl(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *S
                                         // ここ（評価と評価の合間）以外では呼ばない
                     lisp_gc();
                 }
-                SystemTable->ConOut->OutputString(SystemTable->ConOut, L"> ");
+                // milestone 128: プロンプトもバッファ経由にし、lisp_read_line(ブロッキング
+                // なキー入力待ち)の直前に明示的flushして実際に表示されるようにする
+                lisp_print_ascii(&console_stream, "> ");
+                lisp_screen_flush();
                 lisp_read_line(SystemTable);
                 if (input_length == 0) {
                     continue;
@@ -790,7 +796,8 @@ static EFI_STATUS EFIAPI EfiMainImpl(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *S
                 LispObject expr = lisp_read_from_buffer(input_buffer);
                 LispObject result = lisp_eval_toplevel(expr);
                 lisp_print(&console_stream, result);
-                SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\n");
+                lisp_print_ascii(&console_stream, "\r\n");
+                lisp_screen_flush(); // 次のプロンプト表示前に結果を確実に反映する
             }
         } else {
             CHAR16 hex_status[20];

@@ -51,6 +51,9 @@ typedef struct {
 LispOutputStream lisp_make_console_stream(EFI_SYSTEM_TABLE *SystemTable);
 
 void lisp_print(LispOutputStream *stream, LispObject obj);
+// milestone 128: main.cのREPLループがプロンプト等の生ASCII文字列をコンソール
+// バッファ経由(lisp_screen_flushでの明示的flushと組み合わせる)で出すために公開する
+void lisp_print_ascii(LispOutputStream *stream, const char *str);
 
 // --- 大脱出機構 (milestone 30) ---
 // 呼び出し時のレジスタ状態を保持する。フィールド順とoffsetはsrc/lisp.cの
