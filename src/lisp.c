@@ -201,13 +201,11 @@ lisp_jmp_buf *lisp_active_trap = (void *)0;
 void lisp_panic(CHAR16 *message) {
     lisp_screen_flush();
     g_system_table->ConOut->OutputString(g_system_table->ConOut, L"Lisp panic: ");
+    lisp_screen_track_echoed_wstring(L"Lisp panic: ");
     g_system_table->ConOut->OutputString(g_system_table->ConOut, message);
+    lisp_screen_track_echoed_wstring(message);
     g_system_table->ConOut->OutputString(g_system_table->ConOut, L"\r\n");
-    // バグ修正: パニックメッセージも直接ConOutへ書くため論理カーソルを更新しない。
-    // longjmp復帰後のREPLループが次のプロンプトをバッファ経由で描画する前に、
-    // このメッセージの直後の実ハードウェアカーソル位置へ論理カーソルを同期しておく
-    // (lisp_read_line直後の同期(main.c)と同根の問題)
-    lisp_screen_sync_cursor_from_hardware();
+    lisp_screen_track_echoed_wstring(L"\r\n");
     if (lisp_active_trap != (void *)0) {
         lisp_longjmp(lisp_active_trap, 1);
     }
@@ -1361,6 +1359,7 @@ void lisp_read_line(EFI_SYSTEM_TABLE *SystemTable) {
 
         if (key.UnicodeChar == L'\r') {
             SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\n");
+            lisp_screen_track_echoed_wstring(L"\r\n");
             break;
         }
 
@@ -1368,6 +1367,7 @@ void lisp_read_line(EFI_SYSTEM_TABLE *SystemTable) {
             if (input_length > 0) {
                 input_length--;
                 SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\b \b");
+                lisp_screen_track_echoed_wstring(L"\b \b");
             }
             continue;
         }
@@ -1382,6 +1382,7 @@ void lisp_read_line(EFI_SYSTEM_TABLE *SystemTable) {
 
             CHAR16 echo[2] = { key.UnicodeChar, 0 };
             SystemTable->ConOut->OutputString(SystemTable->ConOut, echo);
+            lisp_screen_track_echoed_wstring(echo);
         }
     }
 
@@ -6065,30 +6066,49 @@ void lisp_screen_flush(void) {
 // 直接ConOutへ出力)は論理カーソル(cursor_col/cursor_row)を一切更新しない。そのため
 // 入力行の途中や改行後にlisp_screen_flushを呼ぶと、実ハードウェアカーソルが
 // 古い論理カーソル位置(プロンプト表示直後の位置)へ戻されてしまい、次のプロンプトが
-// 入力後の実際の行ではなく同じ行に描画される(バグ修正: main.cのREPLループで
-// lisp_read_line呼び出し直後に本関数を呼び、ConOut->Mode->CursorColumn/CursorRow
-// (ファームウェアが直接ConOut出力に追従して更新する実際のハードウェアカーソル位置)を
-// 論理カーソルへ書き戻すことで解決する)
-void lisp_screen_sync_cursor_from_hardware(void) {
+// 入力後の実際の行ではなく同じ行に描画される。
+//
+// バグ修正(第2報): 当初はConOut->Mode->CursorColumn/CursorRowを読み戻して論理カーソルへ
+// 書き戻す方式で対処したが、これはSetCursorPositionの明示呼び出し以外ではMode
+// が更新されないコンソールドライバ実装(実機での対話操作時に踏んだ)では機能せず、
+// 常に直前のSetCursorPosition位置(プロンプト直後の位置)を読み戻すだけになっていた。
+// これにより結果がプロンプト直後の位置に上書きされる・空入力でのEnterが同じ行の
+// 右側にしか進まないという症状が再現する。ファームウェアの状態へ問い合わせず、
+// 直接ConOutへ出力した文字列そのもの(内容はこちらが把握している)から論理カーソル
+// 位置を計算して直接更新する方式に置き換える。back/front/dirty/touchedは一切
+// 変更しない(実際に描画された内容はConOutへ直接出力済みであり、バッファ経由の
+// 再描画対象ではないため)
+static void lisp_screen_track_echoed_char(char ch) {
     if (!lisp_screen_buffer.initialized) {
         return;
     }
-    EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL *out = g_system_table->ConOut;
-    INT32 col = out->Mode->CursorColumn;
-    INT32 row = out->Mode->CursorRow;
-    if (col < 0) {
-        col = 0;
+    if (ch == '\r') {
+        return; // "\r\n"の\r自体は列を変えない。改行effectは'\n'側でのみ処理する
     }
-    if (row < 0) {
-        row = 0;
-    }
-    lisp_screen_buffer.cursor_col = (UINTN)col;
-    lisp_screen_buffer.cursor_row = (UINTN)row;
-    if (lisp_screen_buffer.cursor_col >= lisp_screen_buffer.cols) {
-        lisp_screen_buffer.cursor_col = lisp_screen_buffer.cols - 1;
+    if (ch == '\n') {
+        lisp_screen_buffer.cursor_col = 0;
+        lisp_screen_buffer.cursor_row++;
+    } else if (ch == 8) { // Backspace
+        if (lisp_screen_buffer.cursor_col > 0) {
+            lisp_screen_buffer.cursor_col--;
+        }
+    } else {
+        lisp_screen_buffer.cursor_col++;
+        if (lisp_screen_buffer.cursor_col >= lisp_screen_buffer.cols) {
+            lisp_screen_buffer.cursor_col = 0;
+            lisp_screen_buffer.cursor_row++;
+        }
     }
     if (lisp_screen_buffer.cursor_row >= lisp_screen_buffer.rows) {
+        // 実画面はスクロールして最下行に留まるはずだが、backへは反映していないため
+        // 内容の追従はできない。カーソル位置だけは最下行へ留める
         lisp_screen_buffer.cursor_row = lisp_screen_buffer.rows - 1;
+    }
+}
+
+void lisp_screen_track_echoed_wstring(CHAR16 *str) {
+    for (UINTN i = 0; str[i] != 0; i++) {
+        lisp_screen_track_echoed_char((char)str[i]);
     }
 }
 

@@ -137,6 +137,44 @@ CursorColumn`/`CursorRow`(ファームウェア自身が直接ConOut出力に追
 確認した。正常な式評価の繰り返し、および未定義関数呼び出しによるpanic発生からのREPL復帰の
 両方で、プロンプトが正しく新しい行に描画されることを確認した。
 
+### 続報: 上記修正でも実機の対話操作では再現した(`lisp_screen_sync_cursor_from_hardware`方式の欠陥)
+
+上記の`lisp_screen_sync_cursor_from_hardware`による修正は、ヘッドレスのシリアルソケット
+キー入力注入テストでは正しく動作することを確認できたが、実際にQEMUをGUI付きで起動して
+キーボードから対話的に入力した際には症状が再現した: `(+ 1 2)`と入力すると結果が入力行の
+先頭`(`の位置へ上書きされる形で表示され(`3+ 1 2)`のように見える)、空入力のまま`Enter`を
+押しても次のプロンプトが改行されず同じ行の右側に描画され続けた(`> >`)。
+
+原因は`ConOut->Mode->CursorColumn`/`CursorRow`が、`SetCursorPosition`の明示呼び出し時のみ
+更新され、通常の`OutputString`による出力には追従しないコンソールドライバ実装が存在すること
+だった。ヘッドレスの`-serial unix:...`検証で使われるシリアル/ターミナル系のドライバでは
+（自身の行送り・スクロール処理のために）`OutputString`でも`Mode`が追従して更新されていた
+一方、実機のGUI表示を伴う対話操作で使われるコンソールドライバ実装ではこの追従が行われず、
+`lisp_screen_sync_cursor_from_hardware`が読み取る値は常に直前の`SetCursorPosition`呼び出し
+(=プロンプト`"> "`を描画した直後の位置)のまま変化しなかった。これは症状(結果がプロンプト
+直後の位置に上書きされる、空入力Enterが同じ行の右側にしか進まない)と正確に一致する。
+milestone119の自己テスト`lisp_console_output_mode_selftest`は`SetCursorPosition`呼び出し後の
+`Mode`の値しか検証しておらず、`OutputString`後の`Mode`追従は一度も検証されていなかった。
+
+`lisp_screen_sync_cursor_from_hardware`(ファームウェアの`Mode`を問い合わせる方式)を撤廃し、
+`lisp_screen_track_echoed_wstring`(`src/lisp.c`)に置き換えた。ファームウェアの状態を問い合わせず、
+`lisp_read_line`/`lisp_panic`が直接`ConOut->OutputString`へ渡した文字列そのもの(内容は
+呼び出し側が把握している既知の値)を1文字ずつ解釈し、通常文字は列を1つ進め(行末で次行頭へ
+折り返り)、`'\n'`は次行頭へ、Backspace(`8`)は列を1つ戻すという`lisp_screen_putc`と同種の
+カーソル位置計算をそのまま`LispScreenBuffer`の論理カーソルへ適用する。back/front/dirty/touched
+などの内容側は一切変更しない(実際の描画はConOutへ直接出力済みで、バッファ経由の再描画対象
+ではないため)。`lisp_read_line`の各エコー呼び出し(通常文字・Backspace・Enter)、および
+`lisp_panic`の3回の`OutputString`呼び出しの直後にそれぞれ呼び出すようにした。`src/main.c`の
+REPLループにあった`lisp_read_line`直後の呼び出しは、`lisp_read_line`内部でエコーの都度
+追従するようになったため削除した。
+
+この方式はファームウェアの`Mode`追従実装に依存しないため、上記のヘッドレス/実機の差異
+そのものを踏まない。検証は`make test`(29ファイル全PASS、回帰無し)に加え、ヘッドレスの
+CUPエスケープ解析(通常の式評価の繰り返し、panic発生からの復帰、空入力Enterの連続入力の
+3パターン)で行番号が期待通り単調に増加することを確認した。実機GUI環境での対話確認は
+上記検証方針に明記済みの既知のギャップ(ヘッドレス`make test`では検証できない領域)のため、
+ユーザー側での目視確認に委ねる。
+
 ## スコープ外として明記する項目
 
 - マルチカーソル/複数ウィンドウ・プロセス毎の独立ウィンドウ合成(単一共有バッファ方式の帰結)

@@ -790,10 +790,6 @@ static EFI_STATUS EFIAPI EfiMainImpl(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *S
                 lisp_print_ascii(&console_stream, "> ");
                 lisp_screen_flush();
                 lisp_read_line(SystemTable);
-                // バグ修正: lisp_read_lineのキー入力エコーは直接ConOutで論理カーソルを
-                // 更新しないため、これを呼ばないと次のlisp_screen_flushが実カーソルを
-                // 入力前の古い位置へ戻し、プロンプトが同じ行に描画され続けてしまう
-                lisp_screen_sync_cursor_from_hardware();
                 if (input_length == 0) {
                     continue;
                 }
