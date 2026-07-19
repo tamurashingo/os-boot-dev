@@ -96,26 +96,26 @@
 
 ### フェーズM: OS予約行(先頭行)の導入
 
-| # | マイルストーン | 内容 |
-|---|---|---|
-| 130 | 先頭行を予約領域化 | `LISP_SCREEN_STATUS_ROWS`導入。`lisp_screen_putc`の折り返し・スクロール、`lisp_screen_buffer_init`の初期カーソル位置を行1始まりに変更(行0は通常経路の対象外)。C自己テストで、通常の書き込み・スクロールが行0を一切変更しないことを確認。 |
-| 131 | `%set-status-line`ビルトイン | 行0へ直接書き込み(padding/truncate込み)・touched化する新規Cビルトインを追加。`test/lisp/test-console.lisp`にエラーなく呼べることの確認を追加。 |
+| # | マイルストーン | 状態 | 主な内容 |
+|---|---|---|---|
+| 130 | 先頭行を予約領域化 | 完了 | `LISP_SCREEN_STATUS_ROWS`導入。`lisp_screen_putc`の折り返し・スクロール、`lisp_screen_buffer_init`の初期カーソル位置を行1始まりに変更(行0は通常経路の対象外)。C自己テストで、通常の書き込み・スクロールが行0を一切変更しないことを確認。 |
+| 131 | `%set-status-line`ビルトイン | 未着手 | 行0へ直接書き込み(padding/truncate込み)・touched化する新規Cビルトインを追加。`test/lisp/test-console.lisp`にエラーなく呼べることの確認を追加。 |
 
 ### フェーズN: プロセス毎画面バッファ化
 
-| # | マイルストーン | 内容 |
-|---|---|---|
-| 132 | `force_full_redraw`フラグ | `LispScreenBuffer`に追加し、`lisp_screen_flush`冒頭でフラグが立っていれば全セルをtouched化してから通常のdiff処理に入るようにする(単一グローバルバッファのままC自己テストで検証)。 |
-| 133 | `LispProcessStack`へ画面バッファ埋め込み | mainコンテキスト・プール各要素に`LispScreenBuffer screen`を追加。`lisp_context_switch`のvm_stack入替と同じ場所で退避/復元し、復元後`force_full_redraw`を立てる。未初期化(新規プロセス初回resume時)は`lisp_screen_buffer_init`相当の初期化を行う。新規C自己テストで「プロセスAが書いた内容はB実行中は見えず、Aに戻ると復元される」ことをback内容比較で確認する。既存のContext switch/Process suspend/resume系セルフテストの回帰が無いことも確認。 |
-| 134 | 状態行とプロセス切替の連動 | mainの初期化時に固定文字列(例"REPL")で`%set-status-line`。`os:process-resume`/`os:process-suspend`の実行箇所(`lisp/os.lisp`)で、切替直前に対象/mainの名前を`%set-status-line`する。`make test`回帰確認に加え、既存`os:switch-process`を使ったQEMU対話で実際に画面内容・1行目表示が切り替わることを目視確認する(ヘッドレスでは視覚確認不可、既存フェーズC/H/続報と同方針)。 |
+| # | マイルストーン | 状態 | 主な内容 |
+|---|---|---|---|
+| 132 | `force_full_redraw`フラグ | 未着手 | `LispScreenBuffer`に追加し、`lisp_screen_flush`冒頭でフラグが立っていれば全セルをtouched化してから通常のdiff処理に入るようにする(単一グローバルバッファのままC自己テストで検証)。 |
+| 133 | `LispProcessStack`へ画面バッファ埋め込み | 未着手 | mainコンテキスト・プール各要素に`LispScreenBuffer screen`を追加。`lisp_context_switch`のvm_stack入替と同じ場所で退避/復元し、復元後`force_full_redraw`を立てる。未初期化(新規プロセス初回resume時)は`lisp_screen_buffer_init`相当の初期化を行う。新規C自己テストで「プロセスAが書いた内容はB実行中は見えず、Aに戻ると復元される」ことをback内容比較で確認する。既存のContext switch/Process suspend/resume系セルフテストの回帰が無いことも確認。 |
+| 134 | 状態行とプロセス切替の連動 | 未着手 | mainの初期化時に固定文字列(例"REPL")で`%set-status-line`。`os:process-resume`/`os:process-suspend`の実行箇所(`lisp/os.lisp`)で、切替直前に対象/mainの名前を`%set-status-line`する。`make test`回帰確認に加え、既存`os:switch-process`を使ったQEMU対話で実際に画面内容・1行目表示が切り替わることを目視確認する(ヘッドレスでは視覚確認不可、既存フェーズC/H/続報と同方針)。 |
 
 ### フェーズO: Ctrl2回押下によるライブなプロセス切替ダイアログ
 
-| # | マイルストーン | 内容 |
-|---|---|---|
-| 135 | `lisp_read_line`のEx protocol一本化 | `g_text_input_ex`経由の`ReadKeyStrokeEx`で読み取るよう変更(未検出時は既存`ConIn`経路へフォールバック)。通常文字/Backspace/Enterの挙動は変えない。`make test`で既存フィクスチャ全部の回帰が無いことを確認。Ctrl検知はまだ組み込まない。 |
-| 136 | ライブなCtrl2回検知とシグナル化 | 135の読み取りループ内でCtrl単体押下を判定し、ウィンドウ内2回検知で入力行を破棄してワンショットのグローバルフラグを立てる。`%read-console-expr`側はこのフラグを見て単純にキャンセル(nil)扱いする。`make test`回帰確認(ヘッドレスではCtrl自体を送出できないため、この部分の実挙動確認はQEMU対話/実機に委ねる。milestone118と同じく検証できないリスクであることを明記する)。 |
-| 137 | メインREPLループでのダイアログ起動 | `main.c`のREPLループが136のフラグを検知したら、現在の入力表示を後始末した上で`os:switch-process`相当のLisp呼び出しを行い、選択されたプロセスへ実際に切り替わることを確認する(133/134の画面切替・状態行更新が実際に発生する)。既存の`os:switch-process`コマンドも残し、Ctrl2回はその起動手段が1つ増える形にする。QEMU対話/実機での目視確認に委ねる。 |
+| # | マイルストーン | 状態 | 主な内容 |
+|---|---|---|---|
+| 135 | `lisp_read_line`のEx protocol一本化 | 未着手 | `g_text_input_ex`経由の`ReadKeyStrokeEx`で読み取るよう変更(未検出時は既存`ConIn`経路へフォールバック)。通常文字/Backspace/Enterの挙動は変えない。`make test`で既存フィクスチャ全部の回帰が無いことを確認。Ctrl検知はまだ組み込まない。 |
+| 136 | ライブなCtrl2回検知とシグナル化 | 未着手 | 135の読み取りループ内でCtrl単体押下を判定し、ウィンドウ内2回検知で入力行を破棄してワンショットのグローバルフラグを立てる。`%read-console-expr`側はこのフラグを見て単純にキャンセル(nil)扱いする。`make test`回帰確認(ヘッドレスではCtrl自体を送出できないため、この部分の実挙動確認はQEMU対話/実機に委ねる。milestone118と同じく検証できないリスクであることを明記する)。 |
+| 137 | メインREPLループでのダイアログ起動 | 未着手 | `main.c`のREPLループが136のフラグを検知したら、現在の入力表示を後始末した上で`os:switch-process`相当のLisp呼び出しを行い、選択されたプロセスへ実際に切り替わることを確認する(133/134の画面切替・状態行更新が実際に発生する)。既存の`os:switch-process`コマンドも残し、Ctrl2回はその起動手段が1つ増える形にする。QEMU対話/実機での目視確認に委ねる。 |
 
 ## スコープ外として明記する項目
 

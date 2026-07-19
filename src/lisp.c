@@ -5746,6 +5746,14 @@ LispObject lisp_builtin_read_console_expr(LispObject args) {
 #define LISP_SCREEN_COLS_MAX 200
 #define LISP_SCREEN_ROWS_MAX 80
 
+// milestone130: documents/lisp_process_screen_switch.mdフェーズM。先頭LISP_SCREEN_STATUS_ROWS行を
+// OSが使う予約領域とし、通常のlisp_screen_putc(折り返し・スクロール)・lisp_screen_buffer_init/
+// lisp_screen_clearの初期カーソル位置からは対象外にする(カーソルは常にこの行数以降でのみ
+// 増減する)。予約行への書き込みは新規ビルトイン(milestone131の%set-status-line)が専用の
+// 経路で直接行う想定で、%set-cursor-position(os:goto-xy)による明示的な位置指定自体は
+// 引き続き許可する(通常の逐次書き込み・スクロールから保護することのみが本milestoneの範囲)
+#define LISP_SCREEN_STATUS_ROWS 1
+
 typedef struct {
     UINTN cols;
     UINTN rows;
@@ -5781,6 +5789,11 @@ void lisp_screen_buffer_init(void) {
     if (cols == 0 || cols > LISP_SCREEN_COLS_MAX || rows == 0 || rows > LISP_SCREEN_ROWS_MAX) {
         lisp_panic(L"lisp_screen_buffer_init: screen size out of supported range");
     }
+    // milestone130: 先頭LISP_SCREEN_STATUS_ROWS行をOS予約行として確保するため、
+    // 通常の文字書き込み用領域が最低1行残ることを保証する
+    if (rows <= LISP_SCREEN_STATUS_ROWS) {
+        lisp_panic(L"lisp_screen_buffer_init: screen too small for status row");
+    }
     if (out->ClearScreen(out) != 0) {
         lisp_panic(L"lisp_screen_buffer_init: ClearScreen failed");
     }
@@ -5794,7 +5807,7 @@ void lisp_screen_buffer_init(void) {
         }
     }
     lisp_screen_buffer.cursor_col = 0;
-    lisp_screen_buffer.cursor_row = 0;
+    lisp_screen_buffer.cursor_row = LISP_SCREEN_STATUS_ROWS;
     lisp_screen_buffer.pending_newlines = 0;
     lisp_screen_buffer.dirty = 0;
     for (UINTN r = 0; r < LISP_SCREEN_ROWS_MAX; r++) {
@@ -5825,7 +5838,7 @@ int lisp_screen_buffer_selftest(void) {
     if (lisp_screen_buffer.initialized != 1) {
         return 0;
     }
-    if (lisp_screen_buffer.cursor_col != 0 || lisp_screen_buffer.cursor_row != 0) {
+    if (lisp_screen_buffer.cursor_col != 0 || lisp_screen_buffer.cursor_row != LISP_SCREEN_STATUS_ROWS) {
         return 0;
     }
     if (lisp_screen_buffer.pending_newlines != 0 || lisp_screen_buffer.dirty != 0) {
@@ -5889,7 +5902,9 @@ void lisp_screen_putc(char ch) {
     }
 
     if (lisp_screen_buffer.cursor_row >= lisp_screen_buffer.rows) {
-        for (UINTN r = 1; r < lisp_screen_buffer.rows; r++) {
+        // milestone130: 先頭LISP_SCREEN_STATUS_ROWS行はOS予約行のため、shift元・shift先の
+        // どちらにもこの範囲を含めない(行0は常にスクロールの影響を受けない)
+        for (UINTN r = LISP_SCREEN_STATUS_ROWS + 1; r < lisp_screen_buffer.rows; r++) {
             for (UINTN c = 0; c < lisp_screen_buffer.cols; c++) {
                 lisp_screen_buffer.back[r - 1][c] = lisp_screen_buffer.back[r][c];
             }
@@ -5900,7 +5915,8 @@ void lisp_screen_putc(char ch) {
         lisp_screen_buffer.cursor_row = lisp_screen_buffer.rows - 1;
         lisp_screen_buffer.dirty = 1;
         // スクロールで全行の内容が動くため、範囲を絞らず全行を丸ごとtouchする
-        for (UINTN r = 0; r < lisp_screen_buffer.rows; r++) {
+        // (ただしOS予約行(行0)はスクロールで変化しないためtouch対象から除外する)
+        for (UINTN r = LISP_SCREEN_STATUS_ROWS; r < lisp_screen_buffer.rows; r++) {
             lisp_screen_buffer.row_touched[r] = 1;
             lisp_screen_buffer.touched_min[r] = 0;
             lisp_screen_buffer.touched_max[r] = lisp_screen_buffer.cols - 1;
@@ -5912,15 +5928,20 @@ void lisp_screen_putc(char ch) {
 // 都度lisp_screen_buffer_initで初期状態へリセットしてからそれぞれ独立に検証する
 int lisp_screen_putc_selftest(void) {
     // (1) 基本の1文字書き込み: 指定位置へ反映され、カーソルが1つ進みdirtyが立つ
+    // (milestone130: 書き込みは常にLISP_SCREEN_STATUS_ROWS行目以降で行われる)
     lisp_screen_buffer_init();
     lisp_screen_putc('A');
-    if (lisp_screen_buffer.back[0][0] != L'A') {
+    if (lisp_screen_buffer.back[LISP_SCREEN_STATUS_ROWS][0] != L'A') {
         return 0;
     }
-    if (lisp_screen_buffer.cursor_row != 0 || lisp_screen_buffer.cursor_col != 1) {
+    if (lisp_screen_buffer.cursor_row != LISP_SCREEN_STATUS_ROWS || lisp_screen_buffer.cursor_col != 1) {
         return 0;
     }
     if (lisp_screen_buffer.dirty != 1) {
+        return 0;
+    }
+    // milestone130: 先頭行(OS予約行)は通常の書き込みでは一切変化しない
+    if (lisp_screen_buffer.row_touched[0] != 0) {
         return 0;
     }
 
@@ -5930,10 +5951,10 @@ int lisp_screen_putc_selftest(void) {
     if (lisp_screen_buffer.pending_newlines != pending_before + 1) {
         return 0;
     }
-    if (lisp_screen_buffer.cursor_col != 0 || lisp_screen_buffer.cursor_row != 1) {
+    if (lisp_screen_buffer.cursor_col != 0 || lisp_screen_buffer.cursor_row != LISP_SCREEN_STATUS_ROWS + 1) {
         return 0;
     }
-    if (lisp_screen_buffer.back[0][0] != L'A') {
+    if (lisp_screen_buffer.back[LISP_SCREEN_STATUS_ROWS][0] != L'A') {
         return 0;
     }
 
@@ -5943,25 +5964,26 @@ int lisp_screen_putc_selftest(void) {
     for (UINTN i = 0; i < cols; i++) {
         lisp_screen_putc('x');
     }
-    if (lisp_screen_buffer.cursor_row != 1 || lisp_screen_buffer.cursor_col != 0) {
+    if (lisp_screen_buffer.cursor_row != LISP_SCREEN_STATUS_ROWS + 1 || lisp_screen_buffer.cursor_col != 0) {
         return 0;
     }
-    if (lisp_screen_buffer.back[0][cols - 1] != L'x') {
+    if (lisp_screen_buffer.back[LISP_SCREEN_STATUS_ROWS][cols - 1] != L'x') {
         return 0;
     }
 
     // (4) スクロール: 改行のみでカーソルを最下行まで進め、目印を置いた行がさらに
     // 1行shiftされることを確認する(lisp_console_output_mode_selftest(milestone119)で
-    // 実機のQueryModeがrows>=1の妥当な値を返すことは確認済みだが、3行未満では
-    // このスクロール検証自体が成立しないため、その場合のみ明示的に失敗とする)
+    // 実機のQueryModeがrows>=1の妥当な値を返すことは確認済みだが、OS予約行を除いた
+    // 内容領域が3行未満では、このスクロール検証自体が成立しないため、その場合のみ
+    // 明示的に失敗とする)
     lisp_screen_buffer_init();
     UINTN rows = lisp_screen_buffer.rows;
-    if (rows < 3) {
+    if (rows - LISP_SCREEN_STATUS_ROWS < 3) {
         return 0;
     }
-    lisp_screen_putc('\n'); // row0 -> row1
-    lisp_screen_putc('M');  // row1のcol0に目印
-    for (UINTN r = 1; r < rows - 1; r++) {
+    lisp_screen_putc('\n'); // 内容領域の先頭行 -> 次行
+    lisp_screen_putc('M');  // 目印
+    for (UINTN r = LISP_SCREEN_STATUS_ROWS + 1; r < rows - 1; r++) {
         lisp_screen_putc('\n'); // row(rows-1)まで進める
     }
     lisp_screen_putc('N'); // row(rows-1)のcol0に目印
@@ -5970,7 +5992,7 @@ int lisp_screen_putc_selftest(void) {
     if (lisp_screen_buffer.cursor_row != rows - 1 || lisp_screen_buffer.cursor_col != 0) {
         return 0;
     }
-    if (lisp_screen_buffer.back[0][0] != L'M') {
+    if (lisp_screen_buffer.back[LISP_SCREEN_STATUS_ROWS][0] != L'M') {
         return 0;
     }
     if (lisp_screen_buffer.back[rows - 2][0] != L'N') {
@@ -5980,6 +6002,17 @@ int lisp_screen_putc_selftest(void) {
         if (lisp_screen_buffer.back[rows - 1][c] != L' ') {
             return 0;
         }
+    }
+
+    // (5) milestone130の中心的な検証項目: (1)〜(4)の書き込み・スクロールを経ても
+    // 先頭行(OS予約行、行0)の内容・touched状態は一切変化していない
+    for (UINTN c = 0; c < lisp_screen_buffer.cols; c++) {
+        if (lisp_screen_buffer.back[0][c] != L' ') {
+            return 0;
+        }
+    }
+    if (lisp_screen_buffer.row_touched[0] != 0) {
+        return 0;
     }
 
     return 1;
@@ -6137,7 +6170,7 @@ int lisp_screen_flush_selftest(void) {
     if (lisp_screen_flush_cell_output_count != cell0 + 1) return 0;
     if (lisp_screen_flush_set_cursor_count != cursor0 + 2) return 0;
     if (lisp_screen_flush_newline_output_count != nl0) return 0;
-    if (lisp_screen_buffer.front[0][0] != L'A') return 0;
+    if (lisp_screen_buffer.front[LISP_SCREEN_STATUS_ROWS][0] != L'A') return 0;
     if (lisp_screen_buffer.dirty != 0) return 0;
 
     // front/backが同期済みの直後にもう一度flushしても追加送出は発生しない
@@ -6156,7 +6189,7 @@ int lisp_screen_flush_selftest(void) {
     lisp_screen_flush();
     if (lisp_screen_flush_cell_output_count != cell0 + 1) return 0;
     if (lisp_screen_flush_set_cursor_count != cursor0 + 2) return 0;
-    if (lisp_screen_buffer.front[0][0] != L'A' || lisp_screen_buffer.front[0][1] != L'B') return 0;
+    if (lisp_screen_buffer.front[LISP_SCREEN_STATUS_ROWS][0] != L'A' || lisp_screen_buffer.front[LISP_SCREEN_STATUS_ROWS][1] != L'B') return 0;
 
     // (4) 同じ行でtouchされた4文字(間の2文字はスペースでfrontの初期値と偶然一致)は
     // touched_min/maxベースでは1つのrunにまとまる: cell_output+1、set_cursor+2。
@@ -6172,8 +6205,8 @@ int lisp_screen_flush_selftest(void) {
     lisp_screen_flush();
     if (lisp_screen_flush_cell_output_count != cell0 + 1) return 0;
     if (lisp_screen_flush_set_cursor_count != cursor0 + 2) return 0;
-    if (lisp_screen_buffer.front[0][0] != L'A' || lisp_screen_buffer.front[0][1] != L' ') return 0;
-    if (lisp_screen_buffer.front[0][2] != L' ' || lisp_screen_buffer.front[0][3] != L'B') return 0;
+    if (lisp_screen_buffer.front[LISP_SCREEN_STATUS_ROWS][0] != L'A' || lisp_screen_buffer.front[LISP_SCREEN_STATUS_ROWS][1] != L' ') return 0;
+    if (lisp_screen_buffer.front[LISP_SCREEN_STATUS_ROWS][2] != L' ' || lisp_screen_buffer.front[LISP_SCREEN_STATUS_ROWS][3] != L'B') return 0;
 
     // (5) 改行のみ(セル内容は不変、dirtyも立たない)でもpending_newlines分の実"\r\n"は
     // 送出され、最終カーソル合わせの1回だけset_cursorが増える
@@ -6215,7 +6248,9 @@ void lisp_screen_clear(void) {
         lisp_screen_buffer.row_touched[r] = 0;
     }
     lisp_screen_buffer.cursor_col = 0;
-    lisp_screen_buffer.cursor_row = 0;
+    // milestone130: 先頭行はOS予約行のため、通常書き込み用カーソルの初期位置は
+    // lisp_screen_buffer_initと同様にLISP_SCREEN_STATUS_ROWS行目にする
+    lisp_screen_buffer.cursor_row = LISP_SCREEN_STATUS_ROWS;
     lisp_screen_buffer.pending_newlines = 0;
     lisp_screen_buffer.dirty = 0;
 }
@@ -6300,7 +6335,7 @@ static const unsigned char lisp_vm_flush_hook_selftest_bytecode[] = {
 int lisp_vm_flush_hook_selftest(void) {
     lisp_screen_buffer_init();
     if (lisp_screen_buffer.dirty != 0) return 0;
-    if (lisp_screen_buffer.row_touched[0] != 0) return 0;
+    if (lisp_screen_buffer.row_touched[LISP_SCREEN_STATUS_ROWS] != 0) return 0;
 
     LispObject constants[1];
     constants[0] = lisp_make_builtin(lisp_vm_flush_hook_selftest_write_x);
@@ -6313,9 +6348,9 @@ int lisp_vm_flush_hook_selftest(void) {
 
     // lisp_vm_run自身が(OP_RETURNをフェッチする直前に)flushしたはずなので、
     // 呼び出し元でlisp_screen_flushを一切呼んでいないにもかかわらずfrontへ反映されている
-    if (lisp_screen_buffer.front[0][0] != L'X') return 0;
+    if (lisp_screen_buffer.front[LISP_SCREEN_STATUS_ROWS][0] != L'X') return 0;
     if (lisp_screen_buffer.dirty != 0) return 0;
-    if (lisp_screen_buffer.row_touched[0] != 0) return 0;
+    if (lisp_screen_buffer.row_touched[LISP_SCREEN_STATUS_ROWS] != 0) return 0;
 
     return 1;
 }
