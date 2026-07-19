@@ -1063,6 +1063,19 @@ static LispObject lisp_make_package(const char *name, int is_keyword_package) {
     return pkg;
 }
 
+// milestone108: lisp_make_packageと違い、同名パッケージが既に存在する場合は黙って既存を
+// 返さずpanicする。fork時の隔離パッケージ生成は「必ず新規の別オブジェクトである」ことが
+// プロセス分離の前提そのものであり、黙った共有はその前提を静かに破壊してしまうため専用の
+// 安全な作成経路を用意する
+static LispObject lisp_make_package_strict(const char *name, int is_keyword_package) {
+    if (lisp_find_package(name) != LISP_NIL) {
+        lisp_panic(L"make-process: fork package name collision");
+    }
+    LispObject pkg = lisp_make_package_object(name, is_keyword_package);
+    global_packages = lisp_cons(pkg, global_packages);
+    return pkg;
+}
+
 // 同じ名前でintern済みのシンボルがpkg内にあれば同一のLispObjectを返す（eqで比較可能にする）。
 // 無ければ新規に確保してpkgのconsリストへ追加する。比較・格納の両方で先にLISP_SYMBOL_NAME_MAX-1文字に
 // 切り詰めてから扱うことで、name自体を切り詰めずにlisp_streqへ渡すと「格納済みの切り詰め済み名」
@@ -5690,9 +5703,50 @@ static LispObject lisp_generate_process_name(LispObject os_pkg) {
     }
 }
 
+// milestone108: fork時に生成する隔離パッケージの一意名を"FORK-PKG-<N>"の形式で生成する
+// (gensym/lisp_generate_process_nameと同じカウンタ方式)。lisp_process_name_counterとは
+// 独立した別カウンタ・別接頭辞にすることで、プロセス名の一意性チェックと衝突する余地を
+// 最初から無くしている
+static UINTN lisp_fork_package_name_counter = 0;
+
+static LispObject lisp_generate_fork_package_name(void) {
+    for (;;) {
+        char name[LISP_SYMBOL_NAME_MAX];
+        UINTN i = 0;
+        const char *prefix = "FORK-PKG-";
+        while (prefix[i] != '\0') {
+            name[i] = prefix[i];
+            i++;
+        }
+        char digits[24];
+        UINTN dcount = 0;
+        UINTN n = lisp_fork_package_name_counter;
+        do {
+            digits[dcount] = '0' + (char)(n % 10);
+            dcount++;
+            n /= 10;
+        } while (n > 0);
+        while (dcount > 0 && i < LISP_SYMBOL_NAME_MAX - 1) {
+            dcount--;
+            name[i] = digits[dcount];
+            i++;
+        }
+        name[i] = '\0';
+        lisp_fork_package_name_counter++;
+        if (lisp_find_package(name) == LISP_NIL) {
+            return lisp_make_string(name, lisp_cstrlen(name));
+        }
+    }
+}
+
 // (%make-process name-or-nil): nameがnilなら自動生成した一意名を使う。文字列が指定されて
 // いれば、既存のos:*all-processes*内のいずれかのプロセス名と内容が一致する場合はpanicする
-// (make-instanceのみでは名前の一意性を保証できないため、この専用ビルトインが必要)
+// (make-instanceのみでは名前の一意性を保証できないため、この専用ビルトインが必要)。
+// milestone108: プロセス生成と同時に、一意名を持つ隔離パッケージをlisp_make_package_strict
+// (衝突時に黙って共有せずpanicする安全な作成経路)で新規作成し、ベースパッケージ
+// (common-lisp-user)をuse-packageした上でprocessインスタンスのpackageスロットへ格納する。
+// fork側が独自関数を定義したい場合、ベースパッケージのシンボルには一切触れず、この隔離
+// パッケージ内にshadowで新規シンボルを作ってdefunすればよい(milestone109)
 LispObject lisp_builtin_make_process(LispObject args) {
     LispObject os_pkg = lisp_find_package("os");
     LispObject name_arg = lisp_is_cons(args) ? lisp_car(args) : LISP_NIL;
@@ -5708,16 +5762,67 @@ LispObject lisp_builtin_make_process(LispObject args) {
         name_obj = name_arg;
     }
 
+    LispObject fork_pkg_name = lisp_generate_fork_package_name();
+    LispObject fork_pkg = lisp_make_package_strict(lisp_closure_cell(fork_pkg_name)->str_data, 0);
+    lisp_builtin_use_package(lisp_cons(lisp_cl_user_package, lisp_cons(fork_pkg, LISP_NIL)));
+
     LispObject cls = lisp_find_class(lisp_intern_in_package(os_pkg, "process"));
     LispObject instance = lisp_make_instance(cls);
     UINTN name_index = lisp_instance_slot_index(instance, lisp_intern("name"));
     lisp_closure_cell(lisp_closure_cell(instance)->inst_slots)->vec_data[name_index] = name_obj;
+    UINTN package_index = lisp_instance_slot_index(instance, lisp_intern("package"));
+    lisp_closure_cell(lisp_closure_cell(instance)->inst_slots)->vec_data[package_index] = fork_pkg;
 
     LispObject all_processes_sym = lisp_intern_in_package(os_pkg, "*all-processes*");
     LispSymbol *sym_cell = lisp_symbol_cell(all_processes_sym);
     sym_cell->value = lisp_cons(instance, sym_cell->value);
 
     return instance;
+}
+
+// --- fork時の一意パッケージ生成自己テスト (milestone 108) ---
+// lisp_builtin_make_processを2回呼び、生成された2つのprocessインスタンスのpackageスロットが
+// (1)いずれも非nilで(2)互いにeqでない別オブジェクトであること、(3)いずれもcommon-lisp-userを
+// use-packageしていること(pkg_usesにeqで含まれること)、(4)fork先パッケージ内で無修飾に"car"を
+// internしてもcommon-lisp-user内の"car"シンボルと同一オブジェクトに解決されること
+// (ベースパッケージへの委譲が実際に機能していること)を確認する
+int lisp_process_fork_package_selftest(void) {
+    LispObject package_sym = lisp_intern("package");
+
+    LispObject p1 = lisp_builtin_make_process(LISP_NIL);
+    LispObject p2 = lisp_builtin_make_process(LISP_NIL);
+
+    UINTN package_index = lisp_instance_slot_index(p1, package_sym);
+    LispObject pkg1 = lisp_closure_cell(lisp_closure_cell(p1)->inst_slots)->vec_data[package_index];
+    LispObject pkg2 = lisp_closure_cell(lisp_closure_cell(p2)->inst_slots)->vec_data[package_index];
+
+    if (pkg1 == LISP_NIL || pkg2 == LISP_NIL) {
+        return 0;
+    }
+    if (pkg1 == pkg2) {
+        return 0;
+    }
+    if (!lisp_is_package(pkg1) || !lisp_is_package(pkg2)) {
+        return 0;
+    }
+
+    int pkg1_uses_base = 0;
+    for (LispObject u = lisp_closure_cell(pkg1)->pkg_uses; u != LISP_NIL; u = lisp_cdr(u)) {
+        if (lisp_car(u) == lisp_cl_user_package) {
+            pkg1_uses_base = 1;
+        }
+    }
+    if (!pkg1_uses_base) {
+        return 0;
+    }
+
+    LispObject base_car = lisp_intern_in_package(lisp_cl_user_package, "car");
+    LispObject fork_car = lisp_intern_in_package(pkg1, "car");
+    if (base_car != fork_car) {
+        return 0;
+    }
+
+    return 1;
 }
 
 // milestone98: print-objectの既定method。m96/97時点の#<name instance>相当の表示を、

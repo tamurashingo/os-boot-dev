@@ -161,6 +161,18 @@ static void lisp_process_gc_root_selftest_run(EFI_SYSTEM_TABLE *SystemTable) {
     }
 }
 
+// --- fork時の一意パッケージ生成自己テスト (milestone 108) ---
+// os:process/os:*all-processes*(os.lisp、milestone102)がまだ定義されていない起動段階では
+// 実行できないため、os.lisp読み込み後の呼び出し箇所で呼ぶ
+static void lisp_process_fork_package_selftest_run(EFI_SYSTEM_TABLE *SystemTable) {
+    if (lisp_process_fork_package_selftest()) {
+        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"Process fork package self-test: PASS\r\n");
+    } else {
+        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"Process fork package self-test: FAIL\r\n");
+        for (;;) {}
+    }
+}
+
 // --- VM最小実行ループ自己テスト (milestone 35) ---
 // OP_CONST 1, OP_CONST 2, OP_ADD, OP_RETURN相当を手動でバイトコード配列として構築し、
 // lisp_vm_execに渡して3が返ることを確認する。定数オブジェクトはlisp_make_fixnum相当の
@@ -621,6 +633,8 @@ static EFI_STATUS EFIAPI EfiMainImpl(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *S
 
             lisp_load_boot_file("os-package.lisp"); // milestone 102: osパッケージ作成(別ファイルに分離、下記コメント参照)
             lisp_load_boot_file("os.lisp"); // milestone 102: processクラス・os:*all-processes*・os:get-all-processes
+
+            lisp_process_fork_package_selftest_run(SystemTable); // milestone 108: fork時の一意パッケージ生成自己テスト
 
             lisp_load_init_file(); // milestone 47: EFI/BOOT/init.lispがあれば読み込む(無ければ何もしない)
 

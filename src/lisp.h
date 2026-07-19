@@ -207,6 +207,17 @@ void lisp_process_stack_unregister(LispProcessStack *ps);
 // 真なら成功
 int lisp_process_gc_root_selftest(void);
 
+// --- fork時の一意パッケージ生成 (milestone 108) ---
+// os:make-process(実体はCビルトイン%make-process)が、プロセス生成と同時に一意名の隔離
+// パッケージを作成し、common-lisp-userをuse-packageした上でprocessインスタンスのpackage
+// スロットへ格納するようになったことを検証する自己テスト。2回os:make-process相当を実行して
+// 得られた2つのプロセスのpackageスロットが(1)いずれも非nilで(2)互いにeqでない別オブジェクトで
+// あること、(3)そのpackageがcommon-lisp-userをuse-packageしていること(pkg_usesにeqで含まれる
+// こと)、(4)その結果fork先パッケージ内で無修飾に"car"をinternしてもcommon-lisp-user内の
+// "car"シンボルと同一オブジェクト(eq)に解決されること(ベースパッケージへの委譲が実際に
+// 機能していること)を確認する。真なら成功
+int lisp_process_fork_package_selftest(void);
+
 // --- マーク＆スイープGC (milestone 33) ---
 // ヒープのバンプ側残り容量が総量の20%未満なら真を返す。EfiMainのREPLループが
 // 毎ループ先頭でこれを見て、真の場合のみlisp_gc()を呼ぶ（評価中には呼ばない——
