@@ -108,6 +108,35 @@
 |---|---|---|---|
 | 129 | `os:goto-xy`/`os:print-at`/`os:clear-screen` | 完了 | `lisp/os.lisp`に`os:goto-xy`(`%set-cursor-position`への1対1委譲)/`os:clear-screen`(`%clear-screen`への1対1委譲)/`os:print-at`(`os:goto-xy`でカーソル移動後`write-string`で文字列出力、defun本体は単一form限定という既存制約(milestone21の「progn gotcha」)に従い明示的な`progn`で2呼び出しをまとめた)を追加した。`lisp/os-package.lisp`の`:export`句へ`"goto-xy"`/`"print-at"`/`"clear-screen"`を追加した。`test/lisp/test-console.lisp`へ`run-test-console-os-goto-xy`/`run-test-console-os-clear-screen`/`run-test-console-os-print-at`を追加し集約`run-test-console`に組み込んだ。**バグ修正**: `run-test-console-os-print-at`の初版`(eq (os:print-at 0 0 "x") t)`は`make test-console`が`TIMEOUT`する回帰を引いた。原因は`os:print-at`が文字`"x"`を実際に画面バッファへ書き込む一方、後ろに実`"\r\n"`が続かないため、直後に自動生成テストランナーが出力する`RESULT console PASS`行がその途切れた行末に連結され`xRESULT console PASS`という壊れた行になり、`scripts/run_test.py`の行検出が機能しなかったこと(milestone125と同型の問題)。`let`(milestone87以降、複数formの本体を`progn`相当で評価できる)で`eq`判定結果を保持した上で明示的に`(write-line "")`を挟んでから返す形へ修正し解決した。`make build`/`make test`(29ファイル全PASS)で回帰が無いことを確認した。本マイルストーンの完了により`documents/lisp_console_buffer.md`のマイルストーン119〜129(フェーズI〜L)が全て完了した。 |
 
+## 完了後に発覚したバグ修正(milestone128設計の欠陥)
+
+マイルストーン119〜129完了後、実機QEMUで実際にキーボード入力しながらREPLを使う対話セッション
+(ヘッドレスの`make test`では検証できない領域、上記検証方針に明記済みの既知のギャップ)で、
+入力してEnterを押しても次のプロンプト`> `が改行されず同じ行に描画され続けるという表示崩れが
+発覚した。
+
+原因は`lisp_read_line`(`src/lisp.c`)のキー入力エコーが、milestone125/128の方針により意図的に
+画面バッファを経由せず直接`ConOut->OutputString`へ出力する(対話性優先の設計)ため、実際の
+ハードウェアカーソルは入力文字やEnterの実`"\r\n"`に応じて前進するが、`LispScreenBuffer`側の
+論理カーソル(`cursor_col`/`cursor_row`)は一切更新されず、プロンプト表示直後の位置のまま
+古くなっていたこと。次に`lisp_screen_flush`が呼ばれると、その古い論理カーソル位置へ
+`SetCursorPosition`で実カーソルを戻してから新しい内容を描画するため、入力によって進んだはずの
+行が無視され続ける。`lisp_panic`(`src/lisp.c`)のパニックメッセージも同様に直接ConOutへ書く
+経路のため、パニック発生時も同型の崩れが起きていた。
+
+`src/lisp.c`に新規関数`lisp_screen_sync_cursor_from_hardware`を追加した。`ConOut->Mode->
+CursorColumn`/`CursorRow`(ファームウェア自身が直接ConOut出力に追従して更新する実際の
+ハードウェアカーソル位置、milestone119で追加した`EFI_SIMPLE_TEXT_OUTPUT_MODE`のフィールド)を
+読み取り、`LispScreenBuffer`の論理カーソルへ書き戻す。`src/main.c`のREPLループで
+`lisp_read_line`直後に、`lisp_panic`(`src/lisp.c`)でパニックメッセージ出力直後・`longjmp`前に
+それぞれ呼び出すようにした。`src/lisp.h`に前方宣言を追加した。
+
+検証は`make test`(29ファイル全PASS、回帰無し)に加え、ヘッドレスQEMUのシリアルソケットへ
+直接キー入力バイト列を送り込み、応答に含まれる`SetCursorPosition`のANSI CUPエスケープ
+(`ESC[row;colH`)を解析して行番号が単調に増加すること(修正前は同じ行に固定され続けていた)を
+確認した。正常な式評価の繰り返し、および未定義関数呼び出しによるpanic発生からのREPL復帰の
+両方で、プロンプトが正しく新しい行に描画されることを確認した。
+
 ## スコープ外として明記する項目
 
 - マルチカーソル/複数ウィンドウ・プロセス毎の独立ウィンドウ合成(単一共有バッファ方式の帰結)

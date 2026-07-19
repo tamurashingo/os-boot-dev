@@ -569,6 +569,13 @@ int lisp_screen_putc_selftest(void);
 void lisp_screen_flush(void);
 int lisp_screen_flush_selftest(void);
 
+// バグ修正: lisp_read_lineのキー入力エコー(直接ConOut、論理カーソル非更新)の後にflush
+// すると実カーソルが古い論理位置へ戻されてしまう問題への対処。main.cのREPLループが
+// lisp_read_line直後に呼び、ConOut->Mode->CursorColumn/CursorRow(直接ConOut出力に
+// ファームウェア自身が追従して更新する実際のハードウェアカーソル位置)を論理カーソルへ
+// 書き戻す
+void lisp_screen_sync_cursor_from_hardware(void);
+
 // milestone 125: lisp_console_stream_write(src/lisp.c内でこのヘッダの取り込みより
 // 前方に定義されている)が画面バッファ経由に切り替わったために必要な前方宣言。
 // 未初期化ならlisp_screen_buffer_initを呼び、1文字ずつlisp_screen_putcへ書き込む

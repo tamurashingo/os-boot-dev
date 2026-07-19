@@ -203,6 +203,11 @@ void lisp_panic(CHAR16 *message) {
     g_system_table->ConOut->OutputString(g_system_table->ConOut, L"Lisp panic: ");
     g_system_table->ConOut->OutputString(g_system_table->ConOut, message);
     g_system_table->ConOut->OutputString(g_system_table->ConOut, L"\r\n");
+    // バグ修正: パニックメッセージも直接ConOutへ書くため論理カーソルを更新しない。
+    // longjmp復帰後のREPLループが次のプロンプトをバッファ経由で描画する前に、
+    // このメッセージの直後の実ハードウェアカーソル位置へ論理カーソルを同期しておく
+    // (lisp_read_line直後の同期(main.c)と同根の問題)
+    lisp_screen_sync_cursor_from_hardware();
     if (lisp_active_trap != (void *)0) {
         lisp_longjmp(lisp_active_trap, 1);
     }
@@ -6054,6 +6059,37 @@ void lisp_screen_flush(void) {
     lisp_screen_flush_set_cursor_count++;
 
     lisp_screen_buffer.dirty = 0;
+}
+
+// lisp_read_lineのキー入力エコー(milestone125〜128の方針により意図的にバッファ非経由、
+// 直接ConOutへ出力)は論理カーソル(cursor_col/cursor_row)を一切更新しない。そのため
+// 入力行の途中や改行後にlisp_screen_flushを呼ぶと、実ハードウェアカーソルが
+// 古い論理カーソル位置(プロンプト表示直後の位置)へ戻されてしまい、次のプロンプトが
+// 入力後の実際の行ではなく同じ行に描画される(バグ修正: main.cのREPLループで
+// lisp_read_line呼び出し直後に本関数を呼び、ConOut->Mode->CursorColumn/CursorRow
+// (ファームウェアが直接ConOut出力に追従して更新する実際のハードウェアカーソル位置)を
+// 論理カーソルへ書き戻すことで解決する)
+void lisp_screen_sync_cursor_from_hardware(void) {
+    if (!lisp_screen_buffer.initialized) {
+        return;
+    }
+    EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL *out = g_system_table->ConOut;
+    INT32 col = out->Mode->CursorColumn;
+    INT32 row = out->Mode->CursorRow;
+    if (col < 0) {
+        col = 0;
+    }
+    if (row < 0) {
+        row = 0;
+    }
+    lisp_screen_buffer.cursor_col = (UINTN)col;
+    lisp_screen_buffer.cursor_row = (UINTN)row;
+    if (lisp_screen_buffer.cursor_col >= lisp_screen_buffer.cols) {
+        lisp_screen_buffer.cursor_col = lisp_screen_buffer.cols - 1;
+    }
+    if (lisp_screen_buffer.cursor_row >= lisp_screen_buffer.rows) {
+        lisp_screen_buffer.cursor_row = lisp_screen_buffer.rows - 1;
+    }
 }
 
 // milestone124: lisp_screen_flushが実際にSetCursorPosition/OutputStringを呼ぶと
