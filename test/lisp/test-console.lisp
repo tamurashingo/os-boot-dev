@@ -39,10 +39,23 @@
     (write-line "")
     ok))
 
+; milestone131: %set-status-line(先頭行(OS予約行)への直接書き込み)の動作確認。
+; 実ConOutは直接叩かずback bufferのみを書き換えるが、touchされた内容はVM命令
+; ディスパッチループの1命令ごとflushフック(milestone127)により実行中に自動的に
+; 実画面へ送出される。os:print-atと同型の理由(実"\r\n"を伴わないため、続く
+; RESULT行がその途切れた行末に連結されテストハーネスの行検出が壊れる、milestone125)
+; により、明示的にwrite-lineで改行を挟む必要がある
+(defun run-test-console-set-status-line ()
+  (let ((ok (and (eq (%set-status-line "REPL") t)
+                 (eq (%set-status-line "") t))))
+    (write-line "")
+    ok))
+
 (defun run-test-console ()
   (and (run-test-console-clear-screen)
        (run-test-console-set-cursor-position)
        (run-test-console-get-screen-size)
        (run-test-console-os-goto-xy)
        (run-test-console-os-clear-screen)
-       (run-test-console-os-print-at)))
+       (run-test-console-os-print-at)
+       (run-test-console-set-status-line)))

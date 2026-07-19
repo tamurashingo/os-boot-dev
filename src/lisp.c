@@ -6286,6 +6286,25 @@ void lisp_screen_get_size(UINTN *cols, UINTN *rows) {
     *rows = lisp_screen_buffer.rows;
 }
 
+// milestone131: documents/lisp_process_screen_switch.mdフェーズM。先頭行(OS予約行、行0)へ
+// text(len文字)をpadding/truncate込みで直接書き込む専用経路。lisp_screen_putcの通常書き込み
+// (カーソル追従・折り返し・スクロール)とは完全に独立しており、cursor_col/cursor_rowは
+// 一切変更しない。cols幅に対してtextが短ければ残りをスペースで埋め、長ければcols文字目
+// より後ろを切り捨てる。行全体を書き換えるため、touchも常にその行全体(0〜cols-1)とする
+void lisp_screen_set_status_line(const char *text, UINTN len) {
+    if (!lisp_screen_buffer.initialized) {
+        lisp_screen_buffer_init();
+    }
+    UINTN cols = lisp_screen_buffer.cols;
+    for (UINTN c = 0; c < cols; c++) {
+        lisp_screen_buffer.back[0][c] = (c < len) ? (CHAR16)text[c] : L' ';
+    }
+    lisp_screen_buffer.row_touched[0] = 1;
+    lisp_screen_buffer.touched_min[0] = 0;
+    lisp_screen_buffer.touched_max[0] = cols - 1;
+    lisp_screen_buffer.dirty = 1;
+}
+
 // milestone120で暫定実装、milestone126でバッファ経由(lisp_screen_clear)へ切り替え
 LispObject lisp_builtin_clear_screen(LispObject args) {
     (void)args;
@@ -6312,6 +6331,17 @@ LispObject lisp_builtin_get_screen_size(LispObject args) {
     UINTN rows = 0;
     lisp_screen_get_size(&cols, &rows);
     return lisp_cons(lisp_make_fixnum((long long)cols), lisp_make_fixnum((long long)rows));
+}
+
+// (%set-status-line "text"): 先頭行(OS予約行)へtextを直接書き込む(milestone131)。
+// textはstring必須。行0の内容そのもの(表示するプロセス名等)はLisp側の関心事とし、
+// このビルトインは「行0へpadding/truncate込みで書き込む」という機構のみを提供する
+LispObject lisp_builtin_set_status_line(LispObject args) {
+    LispObject text_obj = lisp_car(args);
+    lisp_assert_string(text_obj);
+    LispClosure *text = lisp_closure_cell(text_obj);
+    lisp_screen_set_status_line(text->str_data, text->str_len);
+    return lisp_sym_t;
 }
 
 // --- VM命令ディスパッチループの1命令ごとflushフック自己テスト (milestone 127) ---
@@ -7366,6 +7396,7 @@ void lisp_builtins_init(void) {
     LISP_REGISTER_BUILTIN("%clear-screen", lisp_builtin_clear_screen);
     LISP_REGISTER_BUILTIN("%set-cursor-position", lisp_builtin_set_cursor_position);
     LISP_REGISTER_BUILTIN("%get-screen-size", lisp_builtin_get_screen_size);
+    LISP_REGISTER_BUILTIN("%set-status-line", lisp_builtin_set_status_line);
     LISP_REGISTER_BUILTIN("sleep", lisp_builtin_sleep);
     LISP_REGISTER_BUILTIN("gensym", lisp_builtin_gensym);
     LISP_REGISTER_BUILTIN("gc", lisp_builtin_gc);

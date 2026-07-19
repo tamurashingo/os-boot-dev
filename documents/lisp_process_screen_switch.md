@@ -99,7 +99,7 @@
 | # | マイルストーン | 状態 | 主な内容 |
 |---|---|---|---|
 | 130 | 先頭行を予約領域化 | 完了 | `LISP_SCREEN_STATUS_ROWS`導入。`lisp_screen_putc`の折り返し・スクロール、`lisp_screen_buffer_init`の初期カーソル位置を行1始まりに変更(行0は通常経路の対象外)。C自己テストで、通常の書き込み・スクロールが行0を一切変更しないことを確認。 |
-| 131 | `%set-status-line`ビルトイン | 未着手 | 行0へ直接書き込み(padding/truncate込み)・touched化する新規Cビルトインを追加。`test/lisp/test-console.lisp`にエラーなく呼べることの確認を追加。 |
+| 131 | `%set-status-line`ビルトイン | 完了 | 行0へ直接書き込み(padding/truncate込み)・touched化する新規Cビルトインを追加。`test/lisp/test-console.lisp`にエラーなく呼べることの確認を追加。 |
 
 ### フェーズN: プロセス毎画面バッファ化
 
