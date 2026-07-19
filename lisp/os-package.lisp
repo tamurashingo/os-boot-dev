@@ -11,4 +11,4 @@
   (:export "process" "*all-processes*" "get-all-processes" "make-process"
            "process-resume" "process-suspend" "process-local-variable"
            "process-package" "process-function-definitions"
-           "process-lexical-variables" "inspect-process"))
+           "process-lexical-variables" "inspect-process" "revert-function"))

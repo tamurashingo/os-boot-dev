@@ -190,6 +190,34 @@
                (not (eq var-pair nil))
                (eq (cdr var-pair) secret)))))))
 
+; milestone 115: os:revert-function(fork側でshadowされたcarをベースの定義に戻す)の検証。
+;
+; run-test-os-make-process-fork-redefineと同じ手順(in-package→shadow→intern経由の
+; ローカルシンボル取得、bare symbolのままだとcommon-lisp-userのままload時に読み切られてしまう
+; 既存のreader可視性制約のため文字列intern経由が必須)でfork側のcarをshadow+再定義してから、
+; os:revert-functionで差し戻し、差し戻し後は同じfork-car-sym経由で呼んでもベースのcarと
+; 同じ挙動(consの先頭要素)に戻ることを確認する。fork-car-sym自身はbase-car-symとは別
+; オブジェクトのままである(shadowが作ったローカルシンボル自体は消えず、関数定義の内容だけが
+; 戻る)ことも合わせて確認する。差し戻し対象が無い(そもそもshadowされていない、
+; common-lisp-userから継承したままの)名前"cons"を渡した場合はnilを返すことも確認する
+(defun run-test-os-revert-function ()
+  (let* ((p (os:make-process))
+         (fork-pkg (slot-value p 'package))
+         (base-car-sym (intern "car"))
+         (fork-car-sym (progn
+                         (in-package (package-name fork-pkg))
+                         (shadow "car")
+                         (let ((s (intern "car")))
+                           (%set-symbol-function s (lambda (x) 'shadowed-car-m115))
+                           (in-package "common-lisp-user")
+                           s))))
+    (let ((reverted (os:revert-function p "car"))
+          (no-op-result (os:revert-function p "cons")))
+      (and (eq reverted fork-car-sym)
+           (not (eq fork-car-sym base-car-sym))
+           (eq (funcall (symbol-function fork-car-sym) (cons 1 2)) 1)
+           (eq no-op-result nil)))))
+
 (defun run-test-os ()
   (and (run-test-os-process-class-exists)
        (run-test-os-process-slots)
@@ -200,4 +228,5 @@
        (run-test-os-make-process-fork-redefine)
        (run-test-os-process-suspend-resume)
        (run-test-os-process-local-variable)
-       (run-test-os-inspect-process)))
+       (run-test-os-inspect-process)
+       (run-test-os-revert-function)))

@@ -143,3 +143,30 @@
         (cons 'package-name (package-name (os:process-package p)))
         (cons 'functions (os:process-function-definitions p))
         (cons 'lexical-variables (os:process-lexical-variables p))))
+
+; milestone 115: 関数の「差し戻し」コマンド。
+;
+; fork側パッケージ(milestone109の運用手順どおり、shadowでベースと同名の別シンボルを確保し
+; そこへ再定義したもの)でshadowされた関数を、ベースパッケージ(common-lisp-user)の元の定義に
+; 戻すデバッグコマンド。新規Cビルトインは追加せず、既存のfind-symbol(milestone91)・
+; intern・symbol-function・%set-symbol-function(milestone93)のみを組み合わせて実装する。
+;
+; find-symbol(name fork-pkg)のstatusが:inherited(fork側にローカルな別シンボルを持たず、
+; useしているcommon-lisp-userのシンボルをそのまま共有している=そもそも差し戻す対象が
+; 無い、shadowされていない)ならnil(何もしない)を返す。:internal/:externalの場合は
+; fork側パッケージ内にshadow等でローカルに確保された別シンボルオブジェクトが実在するので、
+; そのシンボルの関数セルをcommon-lisp-user側の同名シンボルの関数定義で上書きし、対象の
+; シンボル自身を返す(%set-symbol-functionは対象シンボルのホームパッケージ=fork-pkgが
+; ロック済みでない限りブロックしないため、fork側パッケージへの書込として問題なく通る。
+; common-lisp-user自身は起動時にロックされるが、対象はfork-pkgのシンボルなので無関係)。
+; ベース側にnameという関数定義が存在しない場合は、既存のsymbol-functionの仕様どおりpanicする
+(defun os:revert-function (p name)
+  (let* ((fork-pkg (slot-value p 'package))
+         (found (find-symbol name fork-pkg)))
+    (if (null found)
+        nil
+        (if (eq (cdr found) :inherited)
+            nil
+            (let ((base-sym (intern name)))
+              (%set-symbol-function (car found) (symbol-function base-sym))
+              (car found))))))
