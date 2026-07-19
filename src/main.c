@@ -111,6 +111,16 @@ static void lisp_reader_special_form_export_selftest_run(EFI_SYSTEM_TABLE *Syste
     }
 }
 
+// --- Ctrl単体押下判定ロジック自己テスト (milestone 116) ---
+static void lisp_key_state_selftest_run(EFI_SYSTEM_TABLE *SystemTable) {
+    if (lisp_key_state_selftest()) {
+        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"Key state (lone Ctrl) self-test: PASS\r\n");
+    } else {
+        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"Key state (lone Ctrl) self-test: FAIL\r\n");
+        for (;;) {}
+    }
+}
+
 // --- ビルトインexport自己テスト (milestone 101) ---
 static void lisp_reader_builtin_export_selftest_run(EFI_SYSTEM_TABLE *SystemTable) {
     if (lisp_reader_builtin_export_selftest()) {
@@ -556,6 +566,16 @@ static void lisp_setjmp_selftest(EFI_SYSTEM_TABLE *SystemTable) {
 static EFI_STATUS EFIAPI EfiMainImpl(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
     g_system_table = SystemTable;
     g_image_handle = ImageHandle;
+
+    lisp_key_state_selftest_run(SystemTable); // milestone 116: Ctrl単体押下判定ロジック自己テスト
+                                               // (実機キー入力に依存しない純粋な判定ロジックのみ検証)
+    lisp_input_ex_init(); // milestone 116: EFI_SIMPLE_TEXT_INPUT_EX_PROTOCOLをLocateProtocolで
+                           // 取得する(見つからなければg_text_input_exはNULLのまま、panicしない)
+    if (g_text_input_ex != (void *)0) {
+        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"Text Input Ex Protocol: FOUND\r\n");
+    } else {
+        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"Text Input Ex Protocol: NOT FOUND\r\n");
+    }
 
     // clear screen
     SystemTable->ConOut->ClearScreen(SystemTable->ConOut);

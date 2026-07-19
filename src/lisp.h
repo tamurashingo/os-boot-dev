@@ -480,4 +480,30 @@ LispObject lisp_make_upvalue_descs(const UINTN *kinds, const UINTN *indices, UIN
 // （milestone38）。lisp_make_compiledは呼び出し時点ではupvalue_descsを受け取らないため分離している
 void lisp_compiled_set_upvalue_descs(LispObject fn, LispObject descs);
 
+// --- コンソール入力拡張 (milestone 116) ---
+//
+// EFI_SIMPLE_TEXT_INPUT_EX_PROTOCOLをLocateProtocol（システム全体から検索。既存の
+// HandleProtocolはEfiMainのImageHandleから辿れるハンドルにしか使えないため不十分）で
+// 取得し、g_text_input_exへ格納する。見つからなかった場合はpanicせずg_text_input_exを
+// NULLのままにする（ファームウェア実装依存で存在しない可能性があるため、Ctrl検知機能
+// （milestone117〜118）を使わない起動経路には影響させない）。g_system_tableが設定済み
+// （main.c起動シーケンス中）である必要がある
+void lisp_input_ex_init(void);
+
+// 見つかったEFI_SIMPLE_TEXT_INPUT_EX_PROTOCOL（NULLなら未検出）
+extern EFI_SIMPLE_TEXT_INPUT_EX_PROTOCOL *g_text_input_ex;
+
+// key_dataが「修飾キー(Ctrl)単体の押下」を表しているかを判定する。真になる条件は
+// (1)KeyState.KeyShiftStateのEFI_SHIFT_STATE_VALIDビットが立っている（ファームウェアが
+// 修飾キー状態を報告できている）、(2)EFI_LEFT_CONTROL_PRESSED/EFI_RIGHT_CONTROL_PRESSEDの
+// いずれかが立っている、(3)Ctrl以外の修飾ビット（Shift/Alt/Logo/Menu/SysReq）が一切
+// 立っていない、(4)Key.ScanCode/Key.UnicodeCharがいずれも0（Ctrlに伴う実際の文字キーが
+// 無い、＝Ctrl単体のキーストローク）の4条件すべてを満たす場合のみ。文字キーとの
+// 組み合わせ押下（例: Ctrl+A）はScanCode/UnicodeCharが非0になるため対象外
+int lisp_key_state_is_lone_ctrl(const EFI_KEY_DATA *key_data);
+
+// lisp_key_state_is_lone_ctrlの判定ロジックを、実機・ファームウェアのキー入力に依存しない
+// 手組みのEFI_KEY_DATA値で検証する自己テスト。真なら成功
+int lisp_key_state_selftest(void);
+
 #endif // OS_BOOT_DEV_LISP_H

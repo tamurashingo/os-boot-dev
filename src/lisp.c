@@ -185,6 +185,7 @@ static UINT64 lisp_heap_end;
 static UINT64 lisp_heap_total; // milestone 33: lisp_heap_lowがヒープ使用率を判定するための総量
 EFI_SYSTEM_TABLE *g_system_table; // panic時にConOutへ出力するため
 EFI_HANDLE g_image_handle; // milestone 16: loadがHandleProtocolでファイルシステムを取得するため
+EFI_SIMPLE_TEXT_INPUT_EX_PROTOCOL *g_text_input_ex; // milestone 116: 未検出ならNULLのまま
 
 // milestone 31: REPLループが設置したトラップ。NULLなら未設置
 lisp_jmp_buf *lisp_active_trap = (void *)0;
@@ -5313,6 +5314,96 @@ static LispObject lisp_load_eval_buffer(const char *buf) {
 
 static EFI_GUID lisp_guid_loaded_image = EFI_LOADED_IMAGE_PROTOCOL_GUID_VALUE;
 static EFI_GUID lisp_guid_simple_file_system = EFI_SIMPLE_FILE_SYSTEM_PROTOCOL_GUID_VALUE;
+static EFI_GUID lisp_guid_simple_text_input_ex = EFI_SIMPLE_TEXT_INPUT_EX_PROTOCOL_GUID_VALUE;
+
+// milestone 116: EFI_SIMPLE_TEXT_INPUT_EX_PROTOCOLをシステム全体から検索して取得する。
+// LocateProtocolはHandleProtocolと異なりハンドルを指定しないため、ConsoleInHandle以外に
+// インストールされている場合でも取得できる。見つからない場合はpanicせずg_text_input_exを
+// NULLのままにする（ファームウェア実装依存であり、Ctrl検知を使わない起動経路には
+// 影響させないため）
+void lisp_input_ex_init(void) {
+    EFI_BOOT_SERVICES *bs = g_system_table->BootServices;
+    void *interface = (void *)0;
+    if (bs->LocateProtocol(&lisp_guid_simple_text_input_ex, (void *)0, &interface) != 0) {
+        g_text_input_ex = (void *)0;
+        return;
+    }
+    g_text_input_ex = (EFI_SIMPLE_TEXT_INPUT_EX_PROTOCOL *)interface;
+}
+
+int lisp_key_state_is_lone_ctrl(const EFI_KEY_DATA *key_data) {
+    UINT32 shift_state = key_data->KeyState.KeyShiftState;
+    if ((shift_state & EFI_SHIFT_STATE_VALID) == 0) {
+        return 0;
+    }
+    UINT32 ctrl_bits = shift_state & (EFI_LEFT_CONTROL_PRESSED | EFI_RIGHT_CONTROL_PRESSED);
+    if (ctrl_bits == 0) {
+        return 0;
+    }
+    UINT32 other_modifier_bits = shift_state & (
+        EFI_LEFT_SHIFT_PRESSED | EFI_RIGHT_SHIFT_PRESSED |
+        EFI_LEFT_ALT_PRESSED | EFI_RIGHT_ALT_PRESSED |
+        EFI_LEFT_LOGO_PRESSED | EFI_RIGHT_LOGO_PRESSED |
+        EFI_MENU_KEY_PRESSED | EFI_SYS_REQ_PRESSED
+    );
+    if (other_modifier_bits != 0) {
+        return 0;
+    }
+    if (key_data->Key.ScanCode != 0 || key_data->Key.UnicodeChar != 0) {
+        return 0;
+    }
+    return 1;
+}
+
+int lisp_key_state_selftest(void) {
+    EFI_KEY_DATA lone_ctrl;
+    lone_ctrl.Key.ScanCode = 0;
+    lone_ctrl.Key.UnicodeChar = 0;
+    lone_ctrl.KeyState.KeyShiftState = EFI_SHIFT_STATE_VALID | EFI_LEFT_CONTROL_PRESSED;
+    lone_ctrl.KeyState.KeyToggleState = 0;
+    if (!lisp_key_state_is_lone_ctrl(&lone_ctrl)) {
+        return 0;
+    }
+
+    EFI_KEY_DATA lone_ctrl_right = lone_ctrl;
+    lone_ctrl_right.KeyState.KeyShiftState = EFI_SHIFT_STATE_VALID | EFI_RIGHT_CONTROL_PRESSED;
+    if (!lisp_key_state_is_lone_ctrl(&lone_ctrl_right)) {
+        return 0;
+    }
+
+    // ファームウェアが修飾キー状態を報告できない(validビット無し)場合は判定不能→偽
+    EFI_KEY_DATA invalid_state = lone_ctrl;
+    invalid_state.KeyState.KeyShiftState = EFI_LEFT_CONTROL_PRESSED;
+    if (lisp_key_state_is_lone_ctrl(&invalid_state)) {
+        return 0;
+    }
+
+    // Ctrl+Shiftのような他修飾キーとの組み合わせは対象外
+    EFI_KEY_DATA ctrl_shift = lone_ctrl;
+    ctrl_shift.KeyState.KeyShiftState = EFI_SHIFT_STATE_VALID | EFI_LEFT_CONTROL_PRESSED | EFI_LEFT_SHIFT_PRESSED;
+    if (lisp_key_state_is_lone_ctrl(&ctrl_shift)) {
+        return 0;
+    }
+
+    // Ctrl+A（文字キーとの組み合わせ、UnicodeCharが0x01等の非0値になる）も対象外
+    EFI_KEY_DATA ctrl_a = lone_ctrl;
+    ctrl_a.Key.UnicodeChar = 1;
+    if (lisp_key_state_is_lone_ctrl(&ctrl_a)) {
+        return 0;
+    }
+
+    // Ctrlが全く押されていない通常のキーストロークも対象外
+    EFI_KEY_DATA plain_key;
+    plain_key.Key.ScanCode = 0;
+    plain_key.Key.UnicodeChar = (CHAR16)'a';
+    plain_key.KeyState.KeyShiftState = EFI_SHIFT_STATE_VALID;
+    plain_key.KeyState.KeyToggleState = 0;
+    if (lisp_key_state_is_lone_ctrl(&plain_key)) {
+        return 0;
+    }
+
+    return 1;
+}
 
 // milestone 41: lisp/stdlib.lispがコメントを含めて8192byteを超えたため、無警告で
 // 末尾が読み捨てられる(truncateされてもlisp_load_eval_buffer側はEOFとして正常終了する

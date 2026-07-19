@@ -102,6 +102,16 @@ typedef EFI_STATUS (EFIAPI *EFI_HANDLE_PROTOCOL)(
     void **Interface
 );
 
+// milestone 116: EFI_SIMPLE_TEXT_INPUT_EX_PROTOCOLをハンドル指定無しで取得するために必要
+// （HandleProtocolはEfiMainのImageHandle経由で辿れるハンドルにしか使えないが、
+// コンソール入力の拡張プロトコルはConsoleInHandle以外にインストールされている場合もある
+// ため、システム全体から検索するLocateProtocolが必要）
+typedef EFI_STATUS (EFIAPI *EFI_LOCATE_PROTOCOL)(
+    EFI_GUID *Protocol,
+    void *Registration,
+    void **Interface
+);
+
 // milestone 25: sleep相当のLisp関数実装のために必要
 typedef void *EFI_EVENT;
 typedef UINTN EFI_TPL;
@@ -159,6 +169,33 @@ typedef struct _EFI_BOOT_SERVICES {
     void *ReinstallProtocolInterface;
     void *UninstallProtocolInterface;
     EFI_HANDLE_PROTOCOL HandleProtocol;
+
+    // milestone 116: UEFI仕様上HandleProtocolとLocateProtocolの間に並ぶ20フィールド分の
+    // オフセットを合わせるためのプレースホルダ（このバイナリレイアウトはUEFI仕様の
+    // vtable順序と一致させる必要があるため、使わないフィールドでも省略できない。
+    // uefi.h冒頭のコメント参照）
+    void *Reserved;
+    void *RegisterProtocolNotify;
+    void *LocateHandle;
+    void *LocateDevicePath;
+    void *InstallConfigurationTable;
+    void *LoadImage;
+    void *StartImage;
+    void *Exit;
+    void *UnloadImage;
+    void *ExitBootServices;
+    void *GetNextMonotonicCount;
+    void *Stall;
+    void *SetWatchdogTimer;
+    void *ConnectController;
+    void *DisconnectController;
+    void *OpenProtocol;
+    void *CloseProtocol;
+    void *OpenProtocolInformation;
+    void *ProtocolsPerHandle;
+    void *LocateHandleBuffer;
+
+    EFI_LOCATE_PROTOCOL LocateProtocol;
 } EFI_BOOT_SERVICES;
 
 
@@ -187,6 +224,60 @@ typedef struct _EFI_SIMPLE_TEXT_INPUT_PROTOCOL {
     EFI_INPUT_READ_KEY ReadKeyStroke;
     void *WaitForKey;
 } EFI_SIMPLE_TEXT_INPUT_PROTOCOL;
+
+// --- milestone 116: Ctrl単体押下検知のためのEFI_SIMPLE_TEXT_INPUT_EX_PROTOCOL ---
+//
+// 既存のEFI_SIMPLE_TEXT_INPUT_PROTOCOL（ReadKeyStroke）はScanCode/UnicodeCharの組しか
+// 報告できず、修飾キー単体の押下状態を一切表現できない（事前調査で確認済みの制約、
+// documents/lisp_os_process.md参照）。ReadKeyStrokeExが返すEFI_KEY_DATA.KeyStateの
+// KeyShiftStateには、そのキーストローク発生時点で押されている修飾キーの集合が
+// ビットフラグで入るため、修飾キー単体の押下（Key.ScanCode/UnicodeCharがいずれも0で、
+// KeyShiftStateにCtrlビットが立っている）を判別できる
+
+typedef unsigned char EFI_KEY_TOGGLE_STATE;
+
+typedef struct {
+    UINT32 KeyShiftState;
+    EFI_KEY_TOGGLE_STATE KeyToggleState;
+} EFI_KEY_STATE;
+
+typedef struct {
+    EFI_INPUT_KEY Key;
+    EFI_KEY_STATE KeyState;
+} EFI_KEY_DATA;
+
+// KeyShiftStateの最上位ビットが立っていない場合、その値自体が無効
+// （ファームウェアが修飾キー状態を報告できない）ことを意味する
+#define EFI_SHIFT_STATE_VALID     0x80000000U
+#define EFI_RIGHT_SHIFT_PRESSED   0x00000001U
+#define EFI_LEFT_SHIFT_PRESSED    0x00000002U
+#define EFI_RIGHT_CONTROL_PRESSED 0x00000004U
+#define EFI_LEFT_CONTROL_PRESSED  0x00000008U
+#define EFI_RIGHT_ALT_PRESSED     0x00000010U
+#define EFI_LEFT_ALT_PRESSED      0x00000020U
+#define EFI_RIGHT_LOGO_PRESSED    0x00000040U
+#define EFI_LEFT_LOGO_PRESSED     0x00000080U
+#define EFI_MENU_KEY_PRESSED      0x00000100U
+#define EFI_SYS_REQ_PRESSED       0x00000200U
+
+struct _EFI_SIMPLE_TEXT_INPUT_EX_PROTOCOL;
+
+typedef EFI_STATUS (EFIAPI *EFI_INPUT_READ_KEY_EX)(
+    struct _EFI_SIMPLE_TEXT_INPUT_EX_PROTOCOL *This,
+    EFI_KEY_DATA *KeyData
+);
+
+typedef struct _EFI_SIMPLE_TEXT_INPUT_EX_PROTOCOL {
+    void *Reset;
+    EFI_INPUT_READ_KEY_EX ReadKeyStrokeEx;
+    EFI_EVENT WaitForKeyEx;
+    void *SetState;
+    void *RegisterKeyNotify;
+    void *UnregisterKeyNotify;
+} EFI_SIMPLE_TEXT_INPUT_EX_PROTOCOL;
+
+#define EFI_SIMPLE_TEXT_INPUT_EX_PROTOCOL_GUID_VALUE \
+    {0xdd9e7534, 0x7762, 0x4698, {0x8c, 0x14, 0xf5, 0x85, 0x17, 0xa6, 0x25, 0xaa}}
 
 
 // --- milestone 16: FAT32のESPからファイルを読み込むためのプロトコル ---
