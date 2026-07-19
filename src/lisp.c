@@ -5504,6 +5504,39 @@ int lisp_wait_for_double_ctrl(UINT64 window_100ns) {
     return matched;
 }
 
+// milestone 119: 実際にファームウェアのQueryMode/SetCursorPositionを呼び、戻り値が
+// EFI_SUCCESSであること・QueryModeが返すCols/Rowsが妥当な範囲であること・
+// SetCursorPosition後にConOut->Mode->CursorColumn/CursorRowへ実際に反映されることを
+// 確認する
+int lisp_console_output_mode_selftest(void) {
+    EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL *out = g_system_table->ConOut;
+
+    UINTN cols = 0;
+    UINTN rows = 0;
+    if (out->QueryMode(out, out->Mode->Mode, &cols, &rows) != 0) {
+        return 0;
+    }
+    if (cols == 0 || cols > 1000 || rows == 0 || rows > 1000) {
+        return 0;
+    }
+
+    if (out->SetCursorPosition(out, 1, 1) != 0) {
+        return 0;
+    }
+    if (out->Mode->CursorColumn != 1 || out->Mode->CursorRow != 1) {
+        return 0;
+    }
+
+    if (out->SetCursorPosition(out, 0, 0) != 0) {
+        return 0;
+    }
+    if (out->Mode->CursorColumn != 0 || out->Mode->CursorRow != 0) {
+        return 0;
+    }
+
+    return 1;
+}
+
 // milestone 41: lisp/stdlib.lispがコメントを含めて8192byteを超えたため、無警告で
 // 末尾が読み捨てられる(truncateされてもlisp_load_eval_buffer側はEOFとして正常終了する
 // ため検知できない)事故を防ぐ目的で32768byteへ拡張した。milestone46でstdlib.lispが

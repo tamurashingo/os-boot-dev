@@ -131,6 +131,16 @@ static void lisp_ctrl_wait_classify_selftest_run(EFI_SYSTEM_TABLE *SystemTable) 
     }
 }
 
+// --- コンソール出力モード自己テスト (milestone 119) ---
+static void lisp_console_output_mode_selftest_run(EFI_SYSTEM_TABLE *SystemTable) {
+    if (lisp_console_output_mode_selftest()) {
+        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"Console output mode (QueryMode/SetCursorPosition) self-test: PASS\r\n");
+    } else {
+        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"Console output mode (QueryMode/SetCursorPosition) self-test: FAIL\r\n");
+        for (;;) {}
+    }
+}
+
 // --- ビルトインexport自己テスト (milestone 101) ---
 static void lisp_reader_builtin_export_selftest_run(EFI_SYSTEM_TABLE *SystemTable) {
     if (lisp_reader_builtin_export_selftest()) {
@@ -582,6 +592,9 @@ static EFI_STATUS EFIAPI EfiMainImpl(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *S
     lisp_ctrl_wait_classify_selftest_run(SystemTable); // milestone 117: Ctrl2回連続押下判定の
                                                         // 分類ロジック自己テスト(同様に実機キー
                                                         // 入力に依存しない)
+    lisp_console_output_mode_selftest_run(SystemTable); // milestone 119: 実際のConOut->QueryMode/
+                                                         // SetCursorPositionを呼び戻り値・
+                                                         // Cols/Rows・カーソル位置反映を確認する
     lisp_input_ex_init(); // milestone 116: EFI_SIMPLE_TEXT_INPUT_EX_PROTOCOLをLocateProtocolで
                            // 取得する(見つからなければg_text_input_exはNULLのまま、panicしない)
     if (g_text_input_ex != (void *)0) {

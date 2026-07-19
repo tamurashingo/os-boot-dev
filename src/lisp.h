@@ -539,4 +539,11 @@ int lisp_ctrl_wait_classify_selftest(void);
 // 呼び出されない(milestone116同様の既知の限界)
 int lisp_wait_for_double_ctrl(UINT64 window_100ns);
 
+// milestone 119: g_system_table->ConOutの実際のQueryMode/SetCursorPositionを呼び、
+// 戻り値がEFI_SUCCESSであること・QueryModeが返すCols/Rowsが妥当な範囲であること・
+// SetCursorPosition後にConOut->Mode->CursorColumn/CursorRowが実際に反映されることを
+// 確認する。ファームウェアの標準テキストコンソール機能のみに依存するため、
+// ヘッドレスQEMU/OVMF環境のmake testでも実行できる
+int lisp_console_output_mode_selftest(void);
+
 #endif // OS_BOOT_DEV_LISP_H

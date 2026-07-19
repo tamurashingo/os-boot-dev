@@ -9,6 +9,8 @@ typedef unsigned short UINT16;
 typedef unsigned int UINT32;
 typedef unsigned long long UINT64;
 typedef unsigned long long UINTN;
+typedef int INT32;
+typedef unsigned char BOOLEAN;
 typedef long long EFI_STATUS;
 typedef void *EFI_HANDLE;
 
@@ -201,15 +203,31 @@ typedef struct _EFI_BOOT_SERVICES {
 
 typedef EFI_STATUS (EFIAPI *EFI_TEXT_STRING)(struct _EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL *This, CHAR16 *String);
 typedef EFI_STATUS (EFIAPI *EFI_TEXT_CLEAR_SCREEN)(struct _EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL *This);
+typedef EFI_STATUS (EFIAPI *EFI_TEXT_QUERY_MODE)(struct _EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL *This, UINTN ModeNumber, UINTN *Columns, UINTN *Rows);
+typedef EFI_STATUS (EFIAPI *EFI_TEXT_SET_CURSOR_POSITION)(struct _EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL *This, UINTN Column, UINTN Row);
+typedef EFI_STATUS (EFIAPI *EFI_TEXT_ENABLE_CURSOR)(struct _EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL *This, BOOLEAN Visible);
+
+// UEFI仕様のEFI_SIMPLE_TEXT_OUTPUT_MODE(SetCursorPosition/QueryModeが参照する現在のモード情報)
+typedef struct {
+    INT32 MaxMode;
+    INT32 Mode;
+    INT32 Attribute;
+    INT32 CursorColumn;
+    INT32 CursorRow;
+    BOOLEAN CursorVisible;
+} EFI_SIMPLE_TEXT_OUTPUT_MODE;
 
 typedef struct _EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL {
     void *Reset;
     EFI_TEXT_STRING OutputString;
     void *TestString;
-    void *QueryMode;
+    EFI_TEXT_QUERY_MODE QueryMode;
     void *SetMode;
     void *SetAttribute;
     EFI_TEXT_CLEAR_SCREEN ClearScreen;
+    EFI_TEXT_SET_CURSOR_POSITION SetCursorPosition;
+    EFI_TEXT_ENABLE_CURSOR EnableCursor;
+    EFI_SIMPLE_TEXT_OUTPUT_MODE *Mode;
 } EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL;
 
 typedef struct {

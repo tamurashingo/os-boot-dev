@@ -81,7 +81,7 @@
 
 | # | マイルストーン | 状態 | 主な内容 |
 |---|---|---|---|
-| 119 | `EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL`拡張 | 未着手 | `src/uefi.h`に`EFI_TEXT_QUERY_MODE`/`EFI_TEXT_SET_CURSOR_POSITION`/`EFI_TEXT_ENABLE_CURSOR`型・`EFI_SIMPLE_TEXT_OUTPUT_MODE`構造体を追加し、`QueryMode`を呼び出し可能な型へ変更、`SetCursorPosition`/`EnableCursor`/`Mode`を`ClearScreen`の後ろに追記する(既存7フィールドの並び・個数は変更しない)。C自己テストで実際に`QueryMode`/`SetCursorPosition`を呼び戻り値・Cols/Rowsが妥当であることを確認する。 |
+| 119 | `EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL`拡張 | 完了 | `src/uefi.h`に`EFI_TEXT_QUERY_MODE`/`EFI_TEXT_SET_CURSOR_POSITION`/`EFI_TEXT_ENABLE_CURSOR`型(いずれも第1引数は`struct _EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL *`)と`EFI_SIMPLE_TEXT_OUTPUT_MODE`構造体(`MaxMode`/`Mode`/`Attribute`/`CursorColumn`/`CursorRow`の`INT32`5個+`CursorVisible`の`BOOLEAN`。プロジェクトに無かった`INT32`(`int`)・`BOOLEAN`(`unsigned char`)の2型を新規追加)を追加した。`QueryMode`を`void*`から`EFI_TEXT_QUERY_MODE`へ変更し、既存7フィールドの並び・個数はそのまま、`ClearScreen`の後ろに`SetCursorPosition`/`EnableCursor`/`Mode`を追記した。C自己テスト`lisp_console_output_mode_selftest`(`src/lisp.c`/`src/lisp.h`、`main.c`の起動シーケンス最初期・milestone116/117の自己テスト直後に組み込み)を追加し、実際の`g_system_table->ConOut->QueryMode`が`EFI_SUCCESS`を返しCols/Rowsが妥当な範囲(1〜1000)であること、`SetCursorPosition(1,1)`後に`ConOut->Mode->CursorColumn`/`CursorRow`が実際に1へ反映されること、`(0,0)`へ戻すと反映も0に戻ることを確認した。`make build`/`make test`(28ファイル全PASS、新規自己テスト`Console output mode (QueryMode/SetCursorPosition) self-test: PASS`のログを含む)で既存フィクスチャへの回帰が無いことを確認した。 |
 
 ### フェーズJ: カーソル制御ビルトイン単体(バッファ無し、暫定実装)
 
