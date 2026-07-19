@@ -263,6 +263,12 @@ int lisp_process_fork_package_selftest(void);
 // の結果が期待どおりであることを確認する。真なら成功
 int lisp_process_suspend_resume_selftest(void);
 
+// --- process-local-variable自己テスト (milestone 113) ---
+// let内側で生成したlambdaクロージャのenvがprocessのenvスロットへ捕捉されること、
+// %process-local-variableでそのレキシカル変数の値を外部から読み取れることを確認する。
+// 真なら成功
+int lisp_process_local_variable_selftest(void);
+
 // --- マーク＆スイープGC (milestone 33) ---
 // ヒープのバンプ側残り容量が総量の20%未満なら真を返す。EfiMainのREPLループが
 // 毎ループ先頭でこれを見て、真の場合のみlisp_gc()を呼ぶ（評価中には呼ばない——

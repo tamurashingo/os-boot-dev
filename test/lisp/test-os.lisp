@@ -125,6 +125,30 @@
              (eq (slot-value p 'status) :finished)
              (eq counter 2))))))
 
+; milestone 113: process-local-variable(プロセスのレキシカル環境を外部から覗く)の検証。
+;
+; thunkはletでレキシカル変数secretを束縛した内側で生成するlambdaにし、os:process-resumeで
+; 起動した後、os:process-local-variableでsecretの値を外部(このテスト自身)から読み取れることを
+; 確認する。thunk自体は%process-suspendを呼ばず即座に完了する(:finishedになる)ので、
+; process-local-variableがsuspended/finishedいずれの状態でも読み取れる(stackframeスロットが
+; nilでなければ良い)ことも合わせて確認できる。
+;
+; &optionalの未使用引数dummyは戻り値には無関係だが、lisp_defun_params_needs_interpreter
+; (milestone89)によりこのdefun本体全体をツリーウォーク(lisp_eval)へフォールバックさせるために
+; 必須。通常のdefun(ラムダリストキーワード無し)はlisp_eval_toplevelがデフォルトで
+; compile-and-run経路(VMバイトコード)へコンパイルし、コンパイル済みクロージャは変数を
+; envアリストではなく位置ベースのupvalue(変数名を保持しない)で捕捉するため、そちらの経路で
+; thunkを作るとprocess-local-variableは何も見つけられずunbound variableでpanicする
+; (試して確認済み。詳細はsrc/lisp.cの%process-local-variableコメント・
+; documents/lisp_os_process.mdマイルストーン113参照)
+(defun run-test-os-process-local-variable (&optional dummy)
+  (let ((p (os:make-process))
+        (secret 999))
+    (let ((thunk (lambda () nil)))
+      (os:process-resume p thunk)
+      (and (eq (slot-value p 'status) :finished)
+           (eq (os:process-local-variable p 'secret) secret)))))
+
 (defun run-test-os ()
   (and (run-test-os-process-class-exists)
        (run-test-os-process-slots)
@@ -133,4 +157,5 @@
        (run-test-os-make-process-named)
        (run-test-os-make-process-fork-package)
        (run-test-os-make-process-fork-redefine)
-       (run-test-os-process-suspend-resume)))
+       (run-test-os-process-suspend-resume)
+       (run-test-os-process-local-variable)))

@@ -60,3 +60,25 @@
 ; マイルストーン112参照)
 (defun os:process-resume (p &optional thunk) (%process-resume p thunk))
 (defun os:process-suspend (p) (%process-suspend p))
+
+; milestone 113: process-local-variable(プロセスのレキシカル環境を外部から覗く)。
+;
+; 実体はC組み込み関数%process-local-variable(src/lisp.c)にあり、ここでも同じ「薄いラッパー」
+; パターンを踏襲する。
+;
+; %process-resumeが初回起動時にthunkクロージャ自身のenvフィールド(生成時点で捕捉した
+; レキシカル環境)をenvスロットへコピーしておくため、process-local-variableはそのenvスロットを
+; lisp_env_lookup相当の規則で検索する。したがって見えるのは「thunk定義時点で既にレキシカル
+; スコープにあった変数」のみであり、thunk本体の実行中に新たに導入されたlet束縛(中断中でも
+; ツリーウォーク経路のC呼び出しスタック上にのみ存在する)は見えない。また動的/special変数は
+; 環境チェーンを経由せずシンボル自身のvalueを直接返す(全プロセス共有、プロセス毎の分離は
+; 無い既知の制約、documents/lisp_os_process.md参照)。プロセスが未起動(stackframeスロットがnil)
+; ならpanicする。
+;
+; 重要な制約: envフィールドはツリーウォーク(lisp_eval)経由で作られたクロージャのみが持つ。
+; 通常のdefun/lambda(ラムダリストキーワード無し)はlisp_eval_toplevelがデフォルトでcompile-and-run
+; 経路(VMバイトコード)へ委譲し、コンパイル済みclosureは変数を位置ベースのupvalue(変数名を
+; 保持しない)で捕捉するため、そのようなthunkに対してはprocess-local-variableは
+; (動的変数を除き)何も見つけられない。現状これが機能するのは、thunkの生成自体が
+; &optional/&rest等でツリーウォークへフォールバックする経路の場合のみである
+(defun os:process-local-variable (p sym) (%process-local-variable p sym))

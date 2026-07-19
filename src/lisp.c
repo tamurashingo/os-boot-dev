@@ -5968,6 +5968,7 @@ LispObject lisp_builtin_process_resume(LispObject args) {
 
     UINTN stackframe_index = lisp_instance_slot_index(p, lisp_intern("stackframe"));
     UINTN status_index = lisp_instance_slot_index(p, lisp_intern("status"));
+    UINTN env_index = lisp_instance_slot_index(p, lisp_intern("env"));
     LispObject *slots = lisp_closure_cell(lisp_closure_cell(p)->inst_slots)->vec_data;
 
     LispProcessStack *target;
@@ -5980,6 +5981,12 @@ LispObject lisp_builtin_process_resume(LispObject args) {
         lisp_process_stack_create(target, LISP_PROCESS_STACK_PAGES, lisp_process_thunk_entry,
             (void *)(UINTN)(UINT64)thunk);
         slots[stackframe_index] = lisp_make_fixnum((long long)pool_index);
+        // milestone113: process-local-variableが後から覗けるように、thunkクロージャ自身が
+        // 捕捉しているレキシカル環境(生成時点のenv、lambda/defunのクロージャが持つenvフィールド)を
+        // envスロットへコピーする。make-process時点ではなくthunk定義時点の環境である点に注意
+        // (%process-resumeにthunkを渡せるのはmake-process呼び出しより後なので、両者は一致しない
+        // ことがある。詳細はdocuments/lisp_os_process.md参照)
+        slots[env_index] = lisp_closure_cell(thunk)->env;
     } else {
         lisp_assert_fixnum(slots[stackframe_index]);
         UINTN pool_index = (UINTN)lisp_fixnum_value(slots[stackframe_index]);
@@ -6038,6 +6045,44 @@ LispObject lisp_builtin_process_suspend(LispObject args) {
     return p;
 }
 
+// (%process-local-variable process symbol): processのenvスロット(milestone112の%process-resumeが
+// 初回起動時にthunkクロージャ自身のenvを捕捉したもの)からsymbolの値をlisp_env_lookup経由で
+// 読み取る。stackframeスロットがnil(未起動)ならpanicする。
+//
+// lisp_env_lookupは動的/special変数ならシンボル自身のvalue(全プロセス共有、プロセス毎の分離は
+// 無い既知の制約)を返し、レキシカル変数ならenvチェーン→見つからなければglobal_envを探して
+// 無ければpanicする(通常のシンボル解決と同じ規則)。
+//
+// ここで見えるのはthunk定義時点(make-processではなくlambda/defun評価時点)で既にレキシカル
+// スコープにあった変数のみである。thunk本体の実行中に新たに導入されたlet束縛は、中断中でも
+// ツリーウォーク経路(lisp_eval/lisp_apply)のC呼び出しスタック上にのみ存在し外部から見えない。
+//
+// 重要な制約: envフィールド(alist)はツリーウォーク経路(lisp_eval)が作るクロージャのみが持つ。
+// lisp_eval_toplevel(milestone60〜)はdefmacro・ラムダリストキーワード入りdefun以外の
+// トップレベル式をデフォルトでcompile-and-run(macroexpand-all→compile-expr→vm-exec)へ委譲し、
+// コンパイル済みclosureはレキシカル変数をenvアリストではなく位置ベース(kind/index)の
+// upvalue_descs/upvalues(milestone38)で捕捉するため、変数名からの逆引きができない。したがって
+// thunkがコンパイル経路で作られたclosureの場合、envスロットは常にLISP_NILのままであり、
+// process-local-variableは(dynamic変数を除き)何も見つけられずunbound variableでpanicする。
+// 現状process-local-variableが機能するのは、thunkの生成自体がツリーウォークへフォールバックする
+// 経路(&optional/&rest等のラムダリストキーワードを持つdefunの本体全体、またはCから直接
+// lisp_evalを呼ぶ場合)に限られる(documents/lisp_os_process.mdマイルストーン113参照)
+LispObject lisp_builtin_process_local_variable(LispObject args) {
+    LispObject p = lisp_car(args);
+    LispObject sym = lisp_car(lisp_cdr(args));
+    lisp_assert_instance(p);
+    lisp_assert_symbol(sym);
+
+    UINTN stackframe_index = lisp_instance_slot_index(p, lisp_intern("stackframe"));
+    UINTN env_index = lisp_instance_slot_index(p, lisp_intern("env"));
+    LispObject *slots = lisp_closure_cell(lisp_closure_cell(p)->inst_slots)->vec_data;
+
+    if (slots[stackframe_index] == LISP_NIL) {
+        lisp_panic(L"process-local-variable: process has not started");
+    }
+    return lisp_env_lookup(slots[env_index], sym);
+}
+
 // --- process-suspend/process-resume自己テスト (milestone 112) ---
 // 0引数の閉包(ダイナミック変数m112-counterをインクリメント→自分自身に対しprocess-suspend→
 // 再度インクリメント)を新規プロセスに対して開始し、(1)1回目のインクリメント後、suspend直後で
@@ -6086,6 +6131,34 @@ int lisp_process_suspend_resume_selftest(void) {
         return 0;
     }
     if (lisp_eval(lisp_read_from_buffer("m112-counter"), global_env) != lisp_make_fixnum(2)) {
+        return 0;
+    }
+
+    return 1;
+}
+
+// --- process-local-variable自己テスト (milestone 113) ---
+// letでレキシカル変数m113-xを束縛した内側で(lambda () nil)を生成し、そのクロージャ自身の
+// envフィールドがm113-xの束縛を含んでいることを利用する。thunkをプロセスとして起動
+// (%process-suspendを呼ばないので即座に:finishedになる。ここでは実行完了そのものは検証対象
+// 外で、%process-resumeがthunkのenvをprocessのenvスロットへ捕捉することのみを確認する)し、
+// %process-local-variableでm113-xの値(42)を外部から読み取れることを確認する
+int lisp_process_local_variable_selftest(void) {
+    LispObject os_pkg = lisp_find_package("os");
+    LispObject cls = lisp_find_class(lisp_intern_in_package(os_pkg, "process"));
+    LispObject p = lisp_make_instance(cls);
+
+    lisp_eval(lisp_read_from_buffer(
+        "(let ((m113-x 42)) (defparameter m113-thunk (lambda () nil)))"),
+        global_env);
+
+    LispObject thunk = lisp_symbol_cell(lisp_intern("m113-thunk"))->value;
+
+    lisp_builtin_process_resume(lisp_cons(p, lisp_cons(thunk, LISP_NIL)));
+
+    LispObject x_val = lisp_builtin_process_local_variable(
+        lisp_cons(p, lisp_cons(lisp_intern("m113-x"), LISP_NIL)));
+    if (x_val != lisp_make_fixnum(42)) {
         return 0;
     }
 
@@ -6423,6 +6496,7 @@ void lisp_builtins_init(void) {
     LISP_REGISTER_BUILTIN("%make-process", lisp_builtin_make_process);
     LISP_REGISTER_BUILTIN("%process-resume", lisp_builtin_process_resume);
     LISP_REGISTER_BUILTIN("%process-suspend", lisp_builtin_process_suspend);
+    LISP_REGISTER_BUILTIN("%process-local-variable", lisp_builtin_process_local_variable);
 
     // milestone97: defmethod・総称関数・多重ディスパッチ
     LISP_REGISTER_BUILTIN("%ensure-generic-function", lisp_builtin_ensure_generic_function);
