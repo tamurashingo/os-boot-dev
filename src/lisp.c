@@ -1571,6 +1571,27 @@ static int lisp_symbol_visible_in_current_package(LispObject sym_obj) {
     return 0;
 }
 
+// milestone111: symの帰属パッケージ(sym->package、呼び出し時の*package*ではなくホーム
+// パッケージ)がlock-package(milestone110)済みかどうかを判定する。未帰属(uninterned/gensym、
+// package==LISP_NIL)は常にfalse
+static int lisp_symbol_home_package_locked(LispObject sym_obj) {
+    LispSymbol *sym = lisp_symbol_cell(sym_obj);
+    if (sym->package == LISP_NIL) {
+        return 0;
+    }
+    return lisp_closure_cell(sym->package)->pkg_locked;
+}
+
+// milestone111: 既存の関数定義(fn != LISP_NIL)をロック済みパッケージ内で上書きしようとしたら
+// panicする。新規定義(fn == LISP_NIL)は常に許可する("redefinition-only"のロック運用。これにより
+// common-lisp-userを起動時にロックしても、既存テストフィクスチャ等がcommon-lisp-user内へ新規
+// defunする分には影響しない)
+static void lisp_check_function_redefine_allowed(LispObject sym) {
+    if (lisp_symbol_cell(sym)->fn != LISP_NIL && lisp_symbol_home_package_locked(sym)) {
+        lisp_panic(L"Package is locked");
+    }
+}
+
 // milestone98: instance印字をprint-object総称関数へ委譲するための前方宣言
 // (本来の定義は2965行目付近、m97でlisp_gf_select_method用に追加した前方宣言と同じ理由)
 LispObject lisp_apply(LispObject fn, LispObject args);
@@ -2745,6 +2766,12 @@ LispObject lisp_env_lookup(LispObject env, LispObject sym) {
 // 無ければlisp_env_lookupと同じくunbound variableとしてpanicする（新規変数の暗黙定義はしない）
 void lisp_env_set(LispObject env, LispObject sym, LispObject value) {
     // 動的変数はlisp_env_lookupと同様、alistを経由せずシンボル自身のvalueを直接書き換える
+    // milestone111: setq自体は「既に確立済みの変数の値を書き換える」通常の実行時操作であり、
+    // defvar/defparameterのような変数の"定義"操作ではない(CommonLisp/SBCLのpackage lockも
+    // setqそのものは対象にしない)。ここへロックチェックを追加すると、(let ((*dv* ...)) (setq
+    // *dv* ...))のような、ロック対象のcommon-lisp-user自身が持つ動的変数への通常の再束縛/
+    // 代入(既存のtest-dynamic-vars.lisp等が検証している正常動作)まで塞いでしまうため、
+    // 意図的にチェック対象外とする
     if (lisp_symbol_cell(sym)->is_special) {
         lisp_symbol_cell(sym)->value = value;
         return;
@@ -3589,7 +3616,11 @@ LispObject lisp_eval(LispObject expr, LispObject env) {
                 return value; // milestone 19
             }
             LispSymbol *cell = lisp_symbol_cell(sym);
-            // defvarと異なり既存の値があっても常に上書きする
+            // milestone111: defvarと異なり既存の値があっても常に上書きするため、"redefinition"
+            // 判定はis_specialの現在値（この行より前の状態）で行う必要がある
+            if (cell->is_special && lisp_symbol_home_package_locked(sym)) {
+                lisp_panic(L"Package is locked");
+            }
             cell->value = value;
             cell->is_special = 1;
             return sym;
@@ -3598,6 +3629,8 @@ LispObject lisp_eval(LispObject expr, LispObject env) {
         if (op == lisp_sym_defun) {
             LispObject name = lisp_car(lisp_cdr(expr));
             lisp_assert_symbol(name);
+            // milestone111: 新規定義は常に許可、既存定義の上書きのみロック済みパッケージで禁止
+            lisp_check_function_redefine_allowed(name);
             LispObject params = lisp_car(lisp_cdr(lisp_cdr(expr)));
             LispObject body = lisp_car(lisp_cdr(lisp_cdr(lisp_cdr(expr))));
             LispObject closure = lisp_make_closure(params, body, env);
@@ -3691,6 +3724,8 @@ LispObject lisp_builtin_compiler_ready_p(LispObject args) {
 LispObject lisp_builtin_establish_global_function(LispObject args) {
     LispObject sym = lisp_car(args);
     lisp_assert_symbol(sym);
+    // milestone111: ツリーウォークdefunと同じ"redefinition-only"チェック
+    lisp_check_function_redefine_allowed(sym);
     LispObject closure = lisp_car(lisp_cdr(args));
     lisp_symbol_cell(sym)->fn = closure;
     return sym;
@@ -3715,6 +3750,8 @@ LispObject lisp_builtin_symbol_function(LispObject args) {
 LispObject lisp_builtin_set_symbol_function(LispObject args) {
     LispObject sym = lisp_car(args);
     lisp_assert_symbol(sym);
+    // milestone111: ツリーウォークdefunと同じ"redefinition-only"チェック
+    lisp_check_function_redefine_allowed(sym);
     LispObject value = lisp_car(lisp_cdr(args));
     lisp_symbol_cell(sym)->fn = value;
     return value;
@@ -4287,6 +4324,15 @@ LispObject lisp_builtin_unlock_package(LispObject args) {
 LispObject lisp_builtin_package_locked_p(LispObject args) {
     LispObject pkg = lisp_resolve_package_designator(lisp_car(args));
     return lisp_closure_cell(pkg)->pkg_locked ? lisp_sym_t : LISP_NIL;
+}
+
+// milestone111: main.cの起動シーケンス末尾（compiler.lisp/stdlib.lisp/os-package.lisp/os.lisp
+// の読み込み・全C自己テストの完了後、lisp_load_init_file直前）から呼ばれる。これより前に
+// common-lisp-user上で行われる再定義（milestone81のグローバル参照同一性自己テスト等）は
+// ロックの影響を受けず、これより後にloadされるinit.lisp/テストフィクスチャ・REPL入力に対して
+// のみ「既存定義の上書きはPackage is locked」が適用される
+void lisp_lock_cl_user_package(void) {
+    lisp_closure_cell(lisp_cl_user_package)->pkg_locked = 1;
 }
 
 // (delete-package designator): global_packagesからeqで除去し、他の全パッケージのpkg_usesから
@@ -5062,6 +5108,13 @@ LispObject lisp_builtin_establish_special(LispObject args) {
     lisp_assert_symbol(sym);
     LispObject value = lisp_car(lisp_cdr(args));
     LispSymbol *cell = lisp_symbol_cell(sym);
+    // milestone111: 呼び出し元はcompile-defvar(is_specialがまだ偽の時のみ呼ぶようガード済み、
+    // 常にfalse相当なのでチェックは素通り)とcompile-defparameter(無条件に呼ぶ、既存の値の
+    // 上書き=redefinition)の2箇所。ツリーウォークのdefparameterと同じ「上書き前のis_special」
+    // で判定する
+    if (cell->is_special && lisp_symbol_home_package_locked(sym)) {
+        lisp_panic(L"Package is locked");
+    }
     cell->value = value;
     cell->is_special = 1;
     return sym;

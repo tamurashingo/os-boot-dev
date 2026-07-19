@@ -37,9 +37,12 @@
        (eq (symbol-function 'm93-j) #'eq)))
 
 (defun run-test-symbol-function-redefine ()
-  ; 再設定すれば新しい値に更新される
+  ; 再設定すれば新しい値に更新される。milestone111のcommon-lisp-userデフォルトロックにより、
+  ; 既存定義の再設定自体には一時的なunlockが必要
   (%set-symbol-function 'm93-k #'car)
+  (unlock-package "common-lisp-user")
   (%set-symbol-function 'm93-k #'cdr)
+  (lock-package "common-lisp-user")
   (eq (symbol-function 'm93-k) #'cdr))
 
 (defun run-test-symbol-function ()

@@ -14,9 +14,13 @@
     (eq *dv-x* 1)))
 
 (defun run-test-defparameter-overwrite ()
-  ; defparameterは既存の値があっても常に上書きする
+  ; defparameterは既存の値があっても常に上書きする。milestone111でcommon-lisp-userが
+  ; 起動時にロックされ、既存の動的変数の再定義がpanicするようになったため、この意図的な
+  ; 上書き自体を試すにはunlock-package/lock-packageで一時的にロックを外す
   (progn
+    (unlock-package "common-lisp-user")
     (defparameter *dv-x* 42)
+    (lock-package "common-lisp-user")
     (eq *dv-x* 42)))
 
 (defvar *dv-y* 100)

@@ -290,9 +290,14 @@
        (eq *compile57-dv-a* 111)))
 
 (defun run-test-compile-and-run-defparameter-overwrite ()
-  ; defparameterは既存の値があっても常に上書きする
-  (and (eq (compile-and-run '(defparameter *compile57-dv-a* 222)) '*compile57-dv-a*)
-       (eq *compile57-dv-a* 222)))
+  ; defparameterは既存の値があっても常に上書きする。milestone111のcommon-lisp-user
+  ; デフォルトロックにより、この意図的な上書き自体を試すには一時的にunlockする
+  (progn
+    (unlock-package "common-lisp-user")
+    (let ((result (and (eq (compile-and-run '(defparameter *compile57-dv-a* 222)) '*compile57-dv-a*)
+                        (eq *compile57-dv-a* 222))))
+      (lock-package "common-lisp-user")
+      result)))
 
 (defun run-test-compile-and-run-defvar-global-ref-after-establish ()
   ; 確立後は通常のグローバル変数参照(OP_GLOBAL_REF)としても正しく見える

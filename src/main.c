@@ -636,6 +636,8 @@ static EFI_STATUS EFIAPI EfiMainImpl(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *S
 
             lisp_process_fork_package_selftest_run(SystemTable); // milestone 108: fork時の一意パッケージ生成自己テスト
 
+            lisp_lock_cl_user_package(); // milestone 111: 起動処理完了後にcommon-lisp-userをデフォルトでロックする
+
             lisp_load_init_file(); // milestone 47: EFI/BOOT/init.lispがあれば読み込む(無ければ何もしない)
 
             SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\nMinimal Lisp REPL. Type an expression and press Enter.\r\n");

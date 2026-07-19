@@ -32,6 +32,7 @@ void lisp_symbols_init(void);
 void lisp_builtins_init(void); // milestone94: 各symbolの関数セル(fn)へ直接登録するためvoid化
 void lisp_load_boot_file(const char *filename); // milestone 29
 void lisp_load_init_file(void); // milestone 47
+void lisp_lock_cl_user_package(void); // milestone 111: 起動シーケンス末尾でcommon-lisp-userをロックする
 
 void lisp_read_line(EFI_SYSTEM_TABLE *SystemTable);
 LispObject lisp_read_from_buffer(const char *str);

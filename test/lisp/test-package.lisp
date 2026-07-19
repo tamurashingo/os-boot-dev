@@ -374,6 +374,23 @@
          (eq (unlock-package pkg) t)
          (eq (package-locked-p pkg) nil))))
 
+; milestone111: "redefinition-only"のロック運用を検証する。ロック中でも新規シンボルへの
+; 初回定義は常に許可され、既存定義の上書きのみアンロック後でなければ成功しないことを確認する。
+; 実際にロック中に再定義を試みてpanicするシナリオそのものは検証方針(documents/
+; lisp_os_process.md)どおりmake testでは検証せず、個別のQEMU対話セッションで確認する
+(defun run-test-package-lock-redefinition-only ()
+  (let ((pkg (make-package "test-pkg111-lock")))
+    (lock-package pkg)
+    (let ((sym (intern "m111-locked-fn" pkg)))
+      (%set-symbol-function sym (lambda () 'first))
+      (let ((first-result (funcall (symbol-function sym))))
+        (unlock-package pkg)
+        (%set-symbol-function sym (lambda () 'second))
+        (let ((second-result (funcall (symbol-function sym))))
+          (and (eq first-result 'first)
+               (eq second-result 'second)
+               (eq (package-locked-p pkg) nil)))))))
+
 (defun run-test-package ()
   (and (run-test-package-keyword-identity)
        (run-test-package-namespace-separation)
@@ -408,4 +425,5 @@
        (run-test-package-defpackage-shadow)
        (run-test-package-defpackage-import-from)
        (run-test-package-defpackage-shadowing-import-from)
-       (run-test-package-lock)))
+       (run-test-package-lock)
+       (run-test-package-lock-redefinition-only)))
