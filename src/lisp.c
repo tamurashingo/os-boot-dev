@@ -5764,6 +5764,10 @@ typedef struct {
     UINTN pending_newlines;
     int dirty;
     int initialized;
+    // milestone132: documents/lisp_process_screen_switch.mdフェーズN。プロセス切替時
+    // (milestone133)に画面バッファを丸ごと入れ替えた直後、実画面(front)は退避前の内容を
+    // 表示したままなので、次回lisp_screen_flushで全セルを再送出させるためのワンショットフラグ
+    int force_full_redraw;
     // milestone125で追加(バグ修正、詳細は下記lisp_screen_flushのコメント参照): 行ごとに
     // 「この呼び出しで実際に書き込まれたセルの範囲」を記録する。row_touched[r]が真の間、
     // [touched_min[r], touched_max[r]](両端含む)がその範囲
@@ -5810,6 +5814,7 @@ void lisp_screen_buffer_init(void) {
     lisp_screen_buffer.cursor_row = LISP_SCREEN_STATUS_ROWS;
     lisp_screen_buffer.pending_newlines = 0;
     lisp_screen_buffer.dirty = 0;
+    lisp_screen_buffer.force_full_redraw = 0;
     for (UINTN r = 0; r < LISP_SCREEN_ROWS_MAX; r++) {
         lisp_screen_buffer.row_touched[r] = 0;
     }
@@ -6050,6 +6055,20 @@ static CHAR16 lisp_screen_flush_run_buffer[LISP_SCREEN_COLS_MAX + 1];
 void lisp_screen_flush(void) {
     EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL *out = g_system_table->ConOut;
 
+    // milestone132: force_full_redrawが立っていれば、以降は「全rows(status行含む)が
+    // touchされた」ものとして扱う。プロセス切替でバッファ自体が入れ替わった直後は
+    // dirty/pending_newlinesの値も入れ替わった側(=退避されていた過去の値)のままなので、
+    // dirtyが0であっても後続の早期returnをすり抜けさせるためdirtyもここで立てる
+    if (lisp_screen_buffer.force_full_redraw) {
+        for (UINTN r = 0; r < lisp_screen_buffer.rows; r++) {
+            lisp_screen_buffer.row_touched[r] = 1;
+            lisp_screen_buffer.touched_min[r] = 0;
+            lisp_screen_buffer.touched_max[r] = lisp_screen_buffer.cols - 1;
+        }
+        lisp_screen_buffer.dirty = 1;
+        lisp_screen_buffer.force_full_redraw = 0;
+    }
+
     if (!lisp_screen_buffer.dirty && lisp_screen_buffer.pending_newlines == 0) {
         return;
     }
@@ -6223,6 +6242,56 @@ int lisp_screen_flush_selftest(void) {
     if (lisp_screen_buffer.pending_newlines != 0) return 0;
 
     return 1;
+}
+
+// milestone132: documents/lisp_process_screen_switch.mdフェーズN。force_full_redrawフラグが
+// 立っている場合、次のlisp_screen_flushで全行(status行含む)が実際に送出され、フラグ自身も
+// クリアされることを確認する。単一グローバルバッファのままフラグを直接操作して検証する
+// (実際にプロセス毎バッファを入れ替える経路はmilestone133で追加する)
+int lisp_screen_force_full_redraw_selftest(void) {
+    lisp_screen_buffer_init();
+    lisp_screen_putc('A');
+    lisp_screen_flush();
+    if (lisp_screen_buffer.dirty != 0) return 0;
+    if (lisp_screen_buffer.force_full_redraw != 0) return 0;
+
+    // 何も新たに書き込んでいない(dirty=0、pending_newlines=0)状態でフラグだけを立てる。
+    // 通常ならlisp_screen_flush冒頭の早期returnで何も送出されないはずだが、
+    // force_full_redrawにより全rows分がtouchされ、実際に送出される。
+    //
+    // ロジック自体はrowsの実際の値に依存しないため(force_full_redrawは常に
+    // lisp_screen_buffer.rows件を全てtouch化するだけ)、他の画面バッファ系自己テストと
+    // 同程度の少ない実I/O量に抑えるため、検証中のみrowsを一時的に小さい値へ差し替える。
+    // 実際のQueryMode由来の行数(数十行)のままSetCursorPosition+OutputStringを
+    // 連続実行すると、ヘッドレスQEMUのConOutエミュレーションが稀に一時的な失敗
+    // (OutputString failed)を返すことがあり、make test全体が非決定的に
+    // TIMEOUT/FAILする原因になっていた(実装当初に発覚、既知のOVMFファームウェア
+    // 揺れの一種と判断した)
+    UINTN saved_rows = lisp_screen_buffer.rows;
+    lisp_screen_buffer.rows = LISP_SCREEN_STATUS_ROWS + 1;
+
+    lisp_screen_buffer.force_full_redraw = 1;
+    UINTN cell0 = lisp_screen_flush_cell_output_count;
+    UINTN cursor0 = lisp_screen_flush_set_cursor_count;
+    UINTN rows = lisp_screen_buffer.rows;
+    lisp_screen_flush();
+    int ok = 1;
+    if (lisp_screen_flush_cell_output_count != cell0 + rows) ok = 0;
+    if (lisp_screen_flush_set_cursor_count != cursor0 + rows + 1) ok = 0;
+    if (lisp_screen_buffer.force_full_redraw != 0) ok = 0;
+    if (lisp_screen_buffer.dirty != 0) ok = 0;
+    if (lisp_screen_buffer.front[LISP_SCREEN_STATUS_ROWS][0] != L'A') ok = 0;
+
+    // フラグは既にクリア済みかつ内容も不変のため、直後にもう一度flushしても追加送出は
+    // 発生しない
+    cell0 = lisp_screen_flush_cell_output_count;
+    cursor0 = lisp_screen_flush_set_cursor_count;
+    lisp_screen_flush();
+    if (lisp_screen_flush_cell_output_count != cell0) ok = 0;
+    if (lisp_screen_flush_set_cursor_count != cursor0) ok = 0;
+
+    lisp_screen_buffer.rows = saved_rows;
+    return ok;
 }
 
 // milestone126: %clear-screenのバッファ経由実装。QueryModeは起動時に1回だけ呼ぶという

@@ -105,7 +105,7 @@
 
 | # | マイルストーン | 状態 | 主な内容 |
 |---|---|---|---|
-| 132 | `force_full_redraw`フラグ | 未着手 | `LispScreenBuffer`に追加し、`lisp_screen_flush`冒頭でフラグが立っていれば全セルをtouched化してから通常のdiff処理に入るようにする(単一グローバルバッファのままC自己テストで検証)。 |
+| 132 | `force_full_redraw`フラグ | 完了 | `LispScreenBuffer`に追加し、`lisp_screen_flush`冒頭でフラグが立っていれば全セルをtouched化してから通常のdiff処理に入るようにする(単一グローバルバッファのままC自己テストで検証)。 |
 | 133 | `LispProcessStack`へ画面バッファ埋め込み | 未着手 | mainコンテキスト・プール各要素に`LispScreenBuffer screen`を追加。`lisp_context_switch`のvm_stack入替と同じ場所で退避/復元し、復元後`force_full_redraw`を立てる。未初期化(新規プロセス初回resume時)は`lisp_screen_buffer_init`相当の初期化を行う。新規C自己テストで「プロセスAが書いた内容はB実行中は見えず、Aに戻ると復元される」ことをback内容比較で確認する。既存のContext switch/Process suspend/resume系セルフテストの回帰が無いことも確認。 |
 | 134 | 状態行とプロセス切替の連動 | 未着手 | mainの初期化時に固定文字列(例"REPL")で`%set-status-line`。`os:process-resume`/`os:process-suspend`の実行箇所(`lisp/os.lisp`)で、切替直前に対象/mainの名前を`%set-status-line`する。`make test`回帰確認に加え、既存`os:switch-process`を使ったQEMU対話で実際に画面内容・1行目表示が切り替わることを目視確認する(ヘッドレスでは視覚確認不可、既存フェーズC/H/続報と同方針)。 |
 

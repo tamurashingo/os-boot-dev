@@ -171,6 +171,16 @@ static void lisp_screen_flush_selftest_run(EFI_SYSTEM_TABLE *SystemTable) {
     }
 }
 
+// --- force_full_redrawフラグ自己テスト (milestone 132) ---
+static void lisp_screen_force_full_redraw_selftest_run(EFI_SYSTEM_TABLE *SystemTable) {
+    if (lisp_screen_force_full_redraw_selftest()) {
+        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"Screen force full redraw self-test: PASS\r\n");
+    } else {
+        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"Screen force full redraw self-test: FAIL\r\n");
+        for (;;) {}
+    }
+}
+
 // --- VM命令ディスパッチループの1命令ごとflushフック自己テスト (milestone 127) ---
 static void lisp_vm_flush_hook_selftest_run(EFI_SYSTEM_TABLE *SystemTable) {
     if (lisp_vm_flush_hook_selftest()) {
@@ -644,6 +654,10 @@ static EFI_STATUS EFIAPI EfiMainImpl(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *S
                                                   // SetCursorPosition+OutputStringで反映し、
                                                   // pending_newlines分の実"\r\n"送出を
                                                   // 呼び出し回数ベースで確認する
+    lisp_screen_force_full_redraw_selftest_run(SystemTable); // milestone 132: force_full_redraw
+                                                               // フラグが立っていれば次のflushで
+                                                               // 全行が送出されフラグ自身も
+                                                               // クリアされることを確認する
     lisp_input_ex_init(); // milestone 116: EFI_SIMPLE_TEXT_INPUT_EX_PROTOCOLをLocateProtocolで
                            // 取得する(見つからなければg_text_input_exはNULLのまま、panicしない)
     if (g_text_input_ex != (void *)0) {

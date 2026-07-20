@@ -569,6 +569,11 @@ int lisp_screen_putc_selftest(void);
 void lisp_screen_flush(void);
 int lisp_screen_flush_selftest(void);
 
+// milestone132: documents/lisp_process_screen_switch.mdフェーズN。force_full_redrawフラグが
+// 立っている場合、次のlisp_screen_flushで全行(status行含む)が実際に送出されフラグ自身も
+// クリアされることを確認する
+int lisp_screen_force_full_redraw_selftest(void);
+
 // バグ修正(第2報): 当初はConOut->Mode->CursorColumn/CursorRowを読み戻すことで対処したが、
 // このフィールドはSetCursorPositionの明示呼び出しでのみ更新され、通常のOutputStringには
 // 追従しないコンソールドライバ実装(実機での対話操作時に踏んだ)が存在し機能しなかった。
