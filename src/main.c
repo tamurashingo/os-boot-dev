@@ -310,6 +310,22 @@ static void lisp_process_screen_separation_selftest_run(EFI_SYSTEM_TABLE *System
     }
 }
 
+// --- 状態行とプロセス切替の連動自己テスト (milestone 134) ---
+// 同じ理由(os:process/os.lisp読み込み後)から、他のprocess系self-testと同じ箇所で呼ぶ
+static void lisp_process_status_line_selftest_run(EFI_SYSTEM_TABLE *SystemTable) {
+    int ok = lisp_process_status_line_selftest();
+    // milestone134: 他のprocess系self-testと同じ理由(実際の%process-resumeを経由するため、
+    // pendingのforce_full_redrawを即座にここで消費し、明示的な改行で次の出力から切り離す)
+    lisp_screen_flush();
+    SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\n");
+    if (ok) {
+        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"Process status line self-test: PASS\r\n");
+    } else {
+        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"Process status line self-test: FAIL\r\n");
+        for (;;) {}
+    }
+}
+
 // --- VM最小実行ループ自己テスト (milestone 35) ---
 // OP_CONST 1, OP_CONST 2, OP_ADD, OP_RETURN相当を手動でバイトコード配列として構築し、
 // lisp_vm_execに渡して3が返ることを確認する。定数オブジェクトはlisp_make_fixnum相当の
@@ -812,10 +828,16 @@ static EFI_STATUS EFIAPI EfiMainImpl(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *S
             lisp_process_suspend_resume_selftest_run(SystemTable); // milestone 112: process-suspend/process-resume自己テスト
             lisp_process_local_variable_selftest_run(SystemTable); // milestone 113: process-local-variable自己テスト
             lisp_process_screen_separation_selftest_run(SystemTable); // milestone 133: プロセス毎画面バッファ分離自己テスト
+            lisp_process_status_line_selftest_run(SystemTable); // milestone 134: 状態行とプロセス切替の連動自己テスト
 
             lisp_lock_cl_user_package(); // milestone 111: 起動処理完了後にcommon-lisp-userをデフォルトでロックする
 
             lisp_load_init_file(); // milestone 47: EFI/BOOT/init.lispがあれば読み込む(無ければ何もしない)
+
+            // milestone134: mainコンテキスト自身の状態行(行0)へ固定文字列を1回だけ設定する。
+            // 以降はos:process-resume/os:process-suspendが起こすscreen退避/復元(milestone133)で
+            // そのまま持ち越されるため、明示的な再設定はここ1箇所のみで足りる
+            lisp_screen_set_status_line("REPL", 4);
 
             SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\nMinimal Lisp REPL. Type an expression and press Enter.\r\n");
 

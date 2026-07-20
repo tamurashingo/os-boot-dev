@@ -331,6 +331,17 @@ int lisp_process_local_variable_selftest(void);
 // 常に'A'のまま保たれることを確認する。真なら成功
 int lisp_process_screen_separation_selftest(void);
 
+// milestone131: (%set-status-line "text")の実体。先頭行(行0)へtext(len文字)を
+// padding/truncate込みで直接書き込む。main.cからmainコンテキスト自身の状態行を
+// 設定する際にも直接呼ばれる(milestone134)
+void lisp_screen_set_status_line(const char *text, UINTN len);
+
+// --- 状態行とプロセス切替の連動自己テスト (milestone 134) ---
+// プロセスが初めて%process-resumeされた瞬間に、対象プロセス自身のnameスロットの内容が
+// 状態行(行0)へ書き込まれ、自然終了後もtarget自身のscreenへそのまま保存され続けることを
+// back内容の直接比較で確認する。真なら成功
+int lisp_process_status_line_selftest(void);
+
 // --- マーク＆スイープGC (milestone 33) ---
 // ヒープのバンプ側残り容量が総量の20%未満なら真を返す。EfiMainのREPLループが
 // 毎ループ先頭でこれを見て、真の場合のみlisp_gc()を呼ぶ（評価中には呼ばない——

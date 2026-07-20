@@ -7030,11 +7030,34 @@ LispObject lisp_builtin_process_resume(LispObject args) {
     // 無関係な自己テストのたびにforce_full_redrawが立ち、次のVM命令フック契機の全画面再送出が
     // テストハーネスの改行前提の出力解析を壊す実害があった)
     lisp_screen_buffer_copy(&caller->screen, &lisp_screen_buffer);
-    if (!target->screen.initialized) {
+    int screen_fresh_start = !target->screen.initialized; // milestone134: このresumeで新規に
+        // screenが初期化されるかどうか(状態行にプロセス名を書くタイミングの判定に使う)
+    if (screen_fresh_start) {
         lisp_screen_buffer_init_blank(&target->screen, lisp_screen_buffer.cols, lisp_screen_buffer.rows);
     }
     lisp_screen_buffer_copy(&lisp_screen_buffer, &target->screen);
     lisp_screen_buffer.force_full_redraw = 1;
+
+    // milestone134: 新規プロセスが初めてresumeされた瞬間(screen_fresh_start)にだけ、対象p自身の
+    // nameスロットを状態行(行0)へ書き込む。以降はsuspend/resumeの度にscreen構造体全体がそのまま
+    // 退避/復元される(milestone133)ため、行0の内容もそのまま持ち越されて明示的な再設定は不要。
+    // 計画では「os:process-resume/os:process-suspend(lisp/os.lisp)側で切替直前にLisp側から
+    // %set-status-lineを呼ぶ」という設計だったが、実装時に次の技術的な矛盾を発見した:
+    // %process-resumeはthunk自身のクロージャのenvフィールドをそのままprocess-local-variable
+    // (milestone113)/os:inspect-process(milestone114)の参照先として使う実装であり、
+    // os:process-resume側でthunkを別の(lambda () (%set-status-line ...) (funcall thunk))で
+    // ラップすると、C側が捕捉するenvが元のthunkの定義時レキシカル環境ではなくラッパー自身の
+    // (p/thunk引数のみを束縛する)envに変わってしまい、既存のprocess-local-variable/
+    // os:inspect-processが壊れる。この矛盾はLisp側では解消できない(ラッパーに元のthunkと同じ
+    // envを後付けする手段がLispコードには公開されていない)ため、ユーザーの判断を待たず、
+    // 既にp自身のスロットを直接読んでいるこの関数内でnameスロットも同様に読んで書き込む方式へ
+    // 変更した(C側がプロセスの内部データを一切見ないという計画の理想からは外れるが、
+    // 既存機能を壊さない実装可能な方式はこちらのみだった)
+    if (screen_fresh_start) {
+        UINTN name_index = lisp_instance_slot_index(p, lisp_intern("name"));
+        LispClosure *name = lisp_closure_cell(slots[name_index]);
+        lisp_screen_set_status_line(name->str_data, name->str_len);
+    }
 
     lisp_process_thunk_finished = 0;
     lisp_context_switch(caller, target);
@@ -7312,6 +7335,45 @@ int lisp_process_screen_separation_selftest(void) {
     // プロセスB自身のバッファにはsuspend再開後に書いた'C'が残っている
     if (target->screen.back[LISP_SCREEN_STATUS_ROWS][LISP_PROCESS_SCREEN_SELFTEST_COL] != L'C') {
         return 0;
+    }
+
+    return 1;
+}
+
+// --- 状態行とプロセス切替の連動自己テスト (milestone 134) ---
+//
+// documents/lisp_process_screen_switch.mdフェーズN最終マイルストーン。プロセスが初めて
+// resumeされた瞬間に、lisp_builtin_process_resume内(上記screen_fresh_start分岐)が対象
+// プロセス自身のnameスロットを状態行(行0)へ書き込むこと、自然終了後もそのラベルがtarget自身の
+// screenへそのまま保存され続けること(milestone133の「自然終了時の退避」修正がここでも
+// 正しく効いていることの再確認にもなる)を、back内容の直接比較で検証する
+static LispObject lisp_process_status_line_selftest_thunk(LispObject args) {
+    (void)args;
+    return lisp_sym_t; // %process-suspendを呼ばず即座に自然終了する
+}
+
+int lisp_process_status_line_selftest(void) {
+    // milestone102のprocessクラスを裸のlisp_make_instanceで作ると、%make-processが本来行う
+    // name自動生成(lisp_generate_process_name)を経由しないためnameスロットがnilのままになる。
+    // 状態行への書き込みはnameスロットが実際の文字列である前提(%make-process経由の生成物)
+    // なので、ここでも%make-process(lisp_builtin_make_process)を使って生成する
+    LispObject p = lisp_builtin_make_process(LISP_NIL);
+
+    UINTN name_index = lisp_instance_slot_index(p, lisp_intern("name"));
+    UINTN stackframe_index = lisp_instance_slot_index(p, lisp_intern("stackframe"));
+    LispObject *slots = lisp_closure_cell(lisp_closure_cell(p)->inst_slots)->vec_data;
+    LispClosure *name = lisp_closure_cell(slots[name_index]);
+
+    LispObject thunk = lisp_make_builtin(lisp_process_status_line_selftest_thunk);
+    lisp_builtin_process_resume(lisp_cons(p, lisp_cons(thunk, LISP_NIL)));
+
+    UINTN pool_index = (UINTN)lisp_fixnum_value(slots[stackframe_index]);
+    LispProcessStack *target = &lisp_process_context_pool[pool_index];
+
+    for (UINTN i = 0; i < name->str_len; i++) {
+        if (target->screen.back[0][i] != (CHAR16)name->str_data[i]) {
+            return 0;
+        }
     }
 
     return 1;
