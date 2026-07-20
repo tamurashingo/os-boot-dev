@@ -6503,6 +6503,16 @@ LispObject lisp_builtin_get_screen_size(LispObject args) {
     return lisp_cons(lisp_make_fixnum((long long)cols), lisp_make_fixnum((long long)rows));
 }
 
+// milestone138続報: g_text_input_ex(EFI_SIMPLE_TEXT_INPUT_EX_PROTOCOL、milestone116で
+// LocateProtocolにより起動時に一度だけ検出、以後不変)がFOUNDだったかどうかを起動ログを
+// 読み返さずにREPLから確認できるようにする。起動時にmain.cが直接出力する
+// "Text Input Ex Protocol: FOUND"/"NOT FOUND"ログと同じ判定条件をそのまま参照する
+// (%text-input-ex-found-p) -> t/nil
+LispObject lisp_builtin_text_input_ex_found_p(LispObject args) {
+    (void)args;
+    return (g_text_input_ex != (void *)0) ? lisp_sym_t : LISP_NIL;
+}
+
 // (%set-status-line "text"): 先頭行(OS予約行)へtextを直接書き込む(milestone131)。
 // textはstring必須。行0の内容そのもの(表示するプロセス名等)はLisp側の関心事とし、
 // このビルトインは「行0へpadding/truncate込みで書き込む」という機構のみを提供する
@@ -7766,6 +7776,7 @@ void lisp_builtins_init(void) {
     LISP_REGISTER_BUILTIN("%set-cursor-position", lisp_builtin_set_cursor_position);
     LISP_REGISTER_BUILTIN("%get-screen-size", lisp_builtin_get_screen_size);
     LISP_REGISTER_BUILTIN("%set-status-line", lisp_builtin_set_status_line);
+    LISP_REGISTER_BUILTIN("%text-input-ex-found-p", lisp_builtin_text_input_ex_found_p);
     LISP_REGISTER_BUILTIN("sleep", lisp_builtin_sleep);
     LISP_REGISTER_BUILTIN("gensym", lisp_builtin_gensym);
     LISP_REGISTER_BUILTIN("gc", lisp_builtin_gc);

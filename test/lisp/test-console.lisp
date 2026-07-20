@@ -51,6 +51,13 @@
     (write-line "")
     ok))
 
+; milestone138続報: os:text-input-ex-found-p(g_text_input_exがFOUNDだったかどうかを
+; 起動ログを読み返さずにREPLから確認する診断用関数)。値そのものは実行環境(実機/QEMU)に
+; 依存するため、t/nilのいずれかを返すことのみを確認する
+(defun run-test-console-os-text-input-ex-found-p ()
+  (let ((r (os:text-input-ex-found-p)))
+    (or (eq r t) (eq r nil))))
+
 (defun run-test-console ()
   (and (run-test-console-clear-screen)
        (run-test-console-set-cursor-position)
@@ -58,4 +65,5 @@
        (run-test-console-os-goto-xy)
        (run-test-console-os-clear-screen)
        (run-test-console-os-print-at)
-       (run-test-console-set-status-line)))
+       (run-test-console-set-status-line)
+       (run-test-console-os-text-input-ex-found-p)))

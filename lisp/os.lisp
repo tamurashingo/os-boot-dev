@@ -263,3 +263,10 @@
                           (progn
                             (os:process-resume chosen)
                             (write-line "Returned to this REPL.")))))))))))
+
+; milestone138続報: 起動ログの"Text Input Ex Protocol: FOUND"/"NOT FOUND"は起動直後の
+; 一瞬しか表示されず流れてしまうため、REPLから同じ判定条件をいつでも参照できるようにする。
+; g_text_input_exは起動時にLocateProtocolで一度だけ確定し以後不変なので、この値がnilなら
+; ReadKeyStrokeEx経由のCtrl検知(milestone116以降)はそもそも動作しえない(KeyState自体が
+; 得られない既存のConIn->ReadKeyStrokeフォールバックに落ちているため)
+(defun os:text-input-ex-found-p () (%text-input-ex-found-p))

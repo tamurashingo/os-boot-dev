@@ -14,4 +14,6 @@
            "process-lexical-variables" "inspect-process" "revert-function"
            "switch-process"
            ; milestone 129: カーソル制御・画面バッファのLispラッパー
-           "goto-xy" "print-at" "clear-screen"))
+           "goto-xy" "print-at" "clear-screen"
+           ; milestone138続報: g_text_input_exの検出結果をREPLから確認するための診断用関数
+           "text-input-ex-found-p"))
