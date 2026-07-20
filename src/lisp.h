@@ -113,6 +113,45 @@ void lisp_panic_fatal(CHAR16 *message);
 // 等の既存コード自体は無変更。VM_STACK_SIZEはlisp_vm_push等と共有するため.cから.hへ移した）
 #define VM_STACK_SIZE 1024
 
+// --- 画面ダブルバッファリング (milestone 122〜) ---
+// もとはlisp.c内で静的なグローバル1個分としてのみ定義されていたが、milestone133で
+// LispProcessStackへプロセス毎のフィールドとして埋め込むため、型定義自体をこちらへ移した
+// (グローバルインスタンス自体は変わらずlisp.cのstatic変数のまま)
+#define LISP_SCREEN_COLS_MAX 200
+#define LISP_SCREEN_ROWS_MAX 80
+
+// milestone130: 先頭LISP_SCREEN_STATUS_ROWS行をOSが使う予約領域とし、通常のlisp_screen_putc
+// (折り返し・スクロール)・lisp_screen_buffer_initの初期カーソル位置からは対象外にする
+#define LISP_SCREEN_STATUS_ROWS 1
+
+// milestone133: ConOutのSetCursorPosition/OutputString/ClearScreenが、大量呼び出しバースト
+// (force_full_redraw時)に限ってまれに一時的な失敗を返すことを確認したため、lisp.c側の
+// リトライ処理(lisp_screen_flush_set_cursor_position等)で使う定数。lisp_screen_buffer_init
+// (画面バッファ本体より前で定義される関数)からも使うためこちらへ置く
+#define LISP_SCREEN_FLUSH_RETRY_MAX 5
+#define LISP_SCREEN_FLUSH_RETRY_STALL_US 1000
+
+typedef struct {
+    UINTN cols;
+    UINTN rows;
+    CHAR16 back[LISP_SCREEN_ROWS_MAX][LISP_SCREEN_COLS_MAX];
+    CHAR16 front[LISP_SCREEN_ROWS_MAX][LISP_SCREEN_COLS_MAX];
+    UINTN cursor_col;
+    UINTN cursor_row;
+    UINTN pending_newlines;
+    int dirty;
+    int initialized;
+    // milestone132: プロセス切替(milestone133)で画面バッファを丸ごと入れ替えた直後、実画面
+    // (front)は退避前の内容を表示したままなので、次回lisp_screen_flushで全セルを再送出させる
+    // ためのワンショットフラグ
+    int force_full_redraw;
+    // milestone125で追加(バグ修正): 行ごとに「この呼び出しで実際に書き込まれたセルの範囲」を
+    // 記録する。row_touched[r]が真の間、[touched_min[r], touched_max[r]](両端含む)がその範囲
+    int row_touched[LISP_SCREEN_ROWS_MAX];
+    UINTN touched_min[LISP_SCREEN_ROWS_MAX];
+    UINTN touched_max[LISP_SCREEN_ROWS_MAX];
+} LispScreenBuffer;
+
 typedef struct LispProcessStack {
     lisp_jmp_buf regs;
     EFI_PHYSICAL_ADDRESS stack_base;
@@ -127,6 +166,18 @@ typedef struct LispProcessStack {
     // 実行中だったコンテキスト）。process-suspendが「戻る先」を、process-resumeが「finished後に
     // 戻る先」を判断するために使う。lisp_process_stack_create直後はNULL（resume時に設定される）
     struct LispProcessStack *resumer;
+    // milestone133: documents/lisp_process_screen_switch.mdフェーズN。vm_stack等と同様、
+    // lisp.c側の同名のグローバル(lisp_screen_buffer)は常に「今実際に実行中のプロセス」の
+    // ものを指す単一の作業領域のままとし、lisp_builtin_process_resume/lisp_builtin_process_suspend
+    // (「表示中のプロセス」が実際に変わる唯一の箇所)がそことの間でコピー/入替を行う。
+    // lisp_context_switch自体はこのフィールドを一切参照しない（共有の低レベル関数であり、
+    // register/vm_stack分離のみを検証する既存の多数の自己テストも同じ関数を生の
+    // LispProcessStack変数で直接呼ぶため、そちら側に置くと無関係な自己テストのたびに
+    // force_full_redrawが立ってしまう実害があった）。lisp_process_stack_create直後は
+    // initialized=0（未使用マーカー。resume側が初回のみlisp_screen_buffer_init_blankで
+    // 初期化する）。createを経由しない生のLispProcessStack（各種セルフテストのmain役）は
+    // このscreenフィールドを一切読み書きされない
+    LispScreenBuffer screen;
 } LispProcessStack;
 
 // stack_pages*4KBの新規スタック領域をAllocatePages経由で確保し、outをそのスタック上で
@@ -271,6 +322,14 @@ int lisp_process_suspend_resume_selftest(void);
 // %process-local-variableでそのレキシカル変数の値を外部から読み取れることを確認する。
 // 真なら成功
 int lisp_process_local_variable_selftest(void);
+
+// --- プロセス毎画面バッファ分離自己テスト (milestone 133) ---
+// %process-resume/%process-suspend経由で実際に画面バッファの退避/復元が起きることを、
+// back内容の直接比較で確認する。呼び出し元が書いた'A'マーカーはプロセスB実行中は
+// 見えず(空白)、Bが書いた'B'/'C'マーカーは呼び出し元の画面には一切影響せずB自身の
+// バッファにのみ残ること、suspend/resume/自然終了のいずれの後も呼び出し元の画面が
+// 常に'A'のまま保たれることを確認する。真なら成功
+int lisp_process_screen_separation_selftest(void);
 
 // --- マーク＆スイープGC (milestone 33) ---
 // ヒープのバンプ側残り容量が総量の20%未満なら真を返す。EfiMainのREPLループが

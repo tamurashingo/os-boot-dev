@@ -5742,41 +5742,47 @@ LispObject lisp_builtin_read_console_expr(LispObject args) {
 // documents/lisp_console_buffer.mdフェーズK。単一プロセスのみが実行中というコルーチン方式
 // (milestone100〜118)の前提により、プロセス毎ではなく単一の共有グローバルとする。
 // UEFIの標準テキストコンソールで現実的に出現するモード(80x25〜128x40程度)を十分に
-// 上回る固定上限で静的に確保する(CLAUDE.mdの方針通り、この段階ではヒープ確保をしない)
-#define LISP_SCREEN_COLS_MAX 200
-#define LISP_SCREEN_ROWS_MAX 80
-
-// milestone130: documents/lisp_process_screen_switch.mdフェーズM。先頭LISP_SCREEN_STATUS_ROWS行を
-// OSが使う予約領域とし、通常のlisp_screen_putc(折り返し・スクロール)・lisp_screen_buffer_init/
-// lisp_screen_clearの初期カーソル位置からは対象外にする(カーソルは常にこの行数以降でのみ
-// 増減する)。予約行への書き込みは新規ビルトイン(milestone131の%set-status-line)が専用の
-// 経路で直接行う想定で、%set-cursor-position(os:goto-xy)による明示的な位置指定自体は
-// 引き続き許可する(通常の逐次書き込み・スクロールから保護することのみが本milestoneの範囲)
-#define LISP_SCREEN_STATUS_ROWS 1
-
-typedef struct {
-    UINTN cols;
-    UINTN rows;
-    CHAR16 back[LISP_SCREEN_ROWS_MAX][LISP_SCREEN_COLS_MAX];
-    CHAR16 front[LISP_SCREEN_ROWS_MAX][LISP_SCREEN_COLS_MAX];
-    UINTN cursor_col;
-    UINTN cursor_row;
-    UINTN pending_newlines;
-    int dirty;
-    int initialized;
-    // milestone132: documents/lisp_process_screen_switch.mdフェーズN。プロセス切替時
-    // (milestone133)に画面バッファを丸ごと入れ替えた直後、実画面(front)は退避前の内容を
-    // 表示したままなので、次回lisp_screen_flushで全セルを再送出させるためのワンショットフラグ
-    int force_full_redraw;
-    // milestone125で追加(バグ修正、詳細は下記lisp_screen_flushのコメント参照): 行ごとに
-    // 「この呼び出しで実際に書き込まれたセルの範囲」を記録する。row_touched[r]が真の間、
-    // [touched_min[r], touched_max[r]](両端含む)がその範囲
-    int row_touched[LISP_SCREEN_ROWS_MAX];
-    UINTN touched_min[LISP_SCREEN_ROWS_MAX];
-    UINTN touched_max[LISP_SCREEN_ROWS_MAX];
-} LispScreenBuffer;
-
+// 上回る固定上限で静的に確保する(CLAUDE.mdの方針通り、この段階ではヒープ確保をしない)。
+// LispScreenBuffer型自体(LISP_SCREEN_*_MAX/STATUS_ROWSの#defineも含む)はmilestone133で
+// LispProcessStackへ埋め込むためsrc/lisp.hへ移した(このグローバルインスタンス自体は不変)
 static LispScreenBuffer lisp_screen_buffer;
+
+// milestone133: documents/lisp_process_screen_switch.mdフェーズN。実ハードウェア
+// (QueryMode/ClearScreen)に依存しない、back/front初期化ロジックだけを切り出したもの。
+// 本番の起動時初期化(下記lisp_screen_buffer_init)はQueryMode/ClearScreen成功後にこれを
+// 呼ぶ。lisp_context_switchが新規プロセスの画面バッファを初回使用時に初期化する際は、
+// 実ハードウェアへは一切触れず(既にアクティブな側が実画面を表示中のため)この関数のみを呼ぶ
+static void lisp_screen_buffer_init_blank(LispScreenBuffer *buf, UINTN cols, UINTN rows) {
+    buf->cols = cols;
+    buf->rows = rows;
+    for (UINTN r = 0; r < rows; r++) {
+        for (UINTN c = 0; c < cols; c++) {
+            buf->back[r][c] = L' ';
+            buf->front[r][c] = L' ';
+        }
+    }
+    buf->cursor_col = 0;
+    buf->cursor_row = LISP_SCREEN_STATUS_ROWS;
+    buf->pending_newlines = 0;
+    buf->dirty = 0;
+    buf->force_full_redraw = 0;
+    for (UINTN r = 0; r < LISP_SCREEN_ROWS_MAX; r++) {
+        buf->row_touched[r] = 0;
+    }
+    buf->initialized = 1;
+}
+
+// milestone133: LispScreenBuffer丸ごとの構造体代入(dst = src)はサイズが大きいため、
+// クロスコンパイラが暗黙にmemcpy呼び出しへ展開してしまう(-nostdlibでlibcが無いため
+// リンクエラーになる、CLAUDE.mdの「標準ヘッダ・libcは使用できない」方針の実例)。
+// 1byteずつの明示的なループで代替する
+static void lisp_screen_buffer_copy(LispScreenBuffer *dst, const LispScreenBuffer *src) {
+    const unsigned char *s = (const unsigned char *)src;
+    unsigned char *d = (unsigned char *)dst;
+    for (UINTN i = 0; i < sizeof(LispScreenBuffer); i++) {
+        d[i] = s[i];
+    }
+}
 
 // QueryModeで実際のcols/rowsを確定し(上限を超えていればpanic)、ClearScreenで実画面を
 // クリアしてから、back/front両方をスペースで埋めカーソル/pending_newlines/dirtyを0に
@@ -5798,27 +5804,25 @@ void lisp_screen_buffer_init(void) {
     if (rows <= LISP_SCREEN_STATUS_ROWS) {
         lisp_panic(L"lisp_screen_buffer_init: screen too small for status row");
     }
-    if (out->ClearScreen(out) != 0) {
-        lisp_panic(L"lisp_screen_buffer_init: ClearScreen failed");
-    }
-
-    lisp_screen_buffer.cols = cols;
-    lisp_screen_buffer.rows = rows;
-    for (UINTN r = 0; r < rows; r++) {
-        for (UINTN c = 0; c < cols; c++) {
-            lisp_screen_buffer.back[r][c] = L' ';
-            lisp_screen_buffer.front[r][c] = L' ';
+    // milestone133: lisp_screen_flush_set_cursor_position/lisp_screen_flush_output_stringと
+    // 同じ理由(下記lisp_screen_flushのコメント参照)で、ClearScreenも一時的な失敗を即座に
+    // panicとせず、短いStallを挟んで数回リトライする
+    {
+        EFI_BOOT_SERVICES *bs = g_system_table->BootServices;
+        int cleared = 0;
+        for (UINTN attempt = 0; attempt < LISP_SCREEN_FLUSH_RETRY_MAX; attempt++) {
+            if (out->ClearScreen(out) == 0) {
+                cleared = 1;
+                break;
+            }
+            bs->Stall(LISP_SCREEN_FLUSH_RETRY_STALL_US);
+        }
+        if (!cleared) {
+            lisp_panic(L"lisp_screen_buffer_init: ClearScreen failed");
         }
     }
-    lisp_screen_buffer.cursor_col = 0;
-    lisp_screen_buffer.cursor_row = LISP_SCREEN_STATUS_ROWS;
-    lisp_screen_buffer.pending_newlines = 0;
-    lisp_screen_buffer.dirty = 0;
-    lisp_screen_buffer.force_full_redraw = 0;
-    for (UINTN r = 0; r < LISP_SCREEN_ROWS_MAX; r++) {
-        lisp_screen_buffer.row_touched[r] = 0;
-    }
-    lisp_screen_buffer.initialized = 1;
+
+    lisp_screen_buffer_init_blank(&lisp_screen_buffer, cols, rows);
 }
 
 // milestone125: lisp_console_stream_writeが未初期化時に自動初期化するかどうかを
@@ -6052,6 +6056,38 @@ static UINTN lisp_screen_flush_set_cursor_count = 0;
 static UINTN lisp_screen_flush_newline_output_count = 0;
 static CHAR16 lisp_screen_flush_run_buffer[LISP_SCREEN_COLS_MAX + 1];
 
+// milestone133: force_full_redraw時は最大で画面全行分のSetCursorPosition/OutputStringを
+// 連続で発行するバーストになる(milestone130以前にはこの規模の連続呼び出しは存在しなかった)。
+// 実機/QEMUどちらでも、この規模のバーストの最中に限ってSetCursorPosition/OutputStringが
+// 原因不明の一時的なエラーを返すことがあるのを確認した(make test全体を繰り返すと数回に
+// 1回程度の頻度で再現、個別の1テストだけを実行すると再現しない=バースト量に依存する非決定的な
+// 事象と判断)。1回の失敗を即座に致命的panicとせず、短いStall(EFI_BOOT_SERVICES.Stall)を
+// 挟んで数回リトライしてから初めてpanicする(実機のシリアル/コンソールドライバのFIFOが
+// 一時的に詰まっているだけなら、短い待機で解消することを期待する)。定数自体はlisp.hで定義
+// (lisp_screen_buffer_initがこの関数より前で同じ定数を使うため)
+
+static void lisp_screen_flush_set_cursor_position(EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL *out, UINTN col, UINTN row) {
+    EFI_BOOT_SERVICES *bs = g_system_table->BootServices;
+    for (UINTN attempt = 0; attempt < LISP_SCREEN_FLUSH_RETRY_MAX; attempt++) {
+        if (out->SetCursorPosition(out, col, row) == 0) {
+            return;
+        }
+        bs->Stall(LISP_SCREEN_FLUSH_RETRY_STALL_US);
+    }
+    lisp_panic(L"lisp_screen_flush: SetCursorPosition failed");
+}
+
+static void lisp_screen_flush_output_string(EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL *out, CHAR16 *str) {
+    EFI_BOOT_SERVICES *bs = g_system_table->BootServices;
+    for (UINTN attempt = 0; attempt < LISP_SCREEN_FLUSH_RETRY_MAX; attempt++) {
+        if (out->OutputString(out, str) == 0) {
+            return;
+        }
+        bs->Stall(LISP_SCREEN_FLUSH_RETRY_STALL_US);
+    }
+    lisp_panic(L"lisp_screen_flush: OutputString failed");
+}
+
 void lisp_screen_flush(void) {
     EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL *out = g_system_table->ConOut;
 
@@ -6087,28 +6123,20 @@ void lisp_screen_flush(void) {
         }
         lisp_screen_flush_run_buffer[run_len] = 0;
 
-        if (out->SetCursorPosition(out, start, r) != 0) {
-            lisp_panic(L"lisp_screen_flush: SetCursorPosition failed");
-        }
+        lisp_screen_flush_set_cursor_position(out, start, r);
         lisp_screen_flush_set_cursor_count++;
-        if (out->OutputString(out, lisp_screen_flush_run_buffer) != 0) {
-            lisp_panic(L"lisp_screen_flush: OutputString failed");
-        }
+        lisp_screen_flush_output_string(out, lisp_screen_flush_run_buffer);
         lisp_screen_flush_cell_output_count++;
         lisp_screen_buffer.row_touched[r] = 0;
     }
 
     for (UINTN i = 0; i < lisp_screen_buffer.pending_newlines; i++) {
-        if (out->OutputString(out, L"\r\n") != 0) {
-            lisp_panic(L"lisp_screen_flush: OutputString(newline) failed");
-        }
+        lisp_screen_flush_output_string(out, L"\r\n");
         lisp_screen_flush_newline_output_count++;
     }
     lisp_screen_buffer.pending_newlines = 0;
 
-    if (out->SetCursorPosition(out, lisp_screen_buffer.cursor_col, lisp_screen_buffer.cursor_row) != 0) {
-        lisp_panic(L"lisp_screen_flush: SetCursorPosition (final) failed");
-    }
+    lisp_screen_flush_set_cursor_position(out, lisp_screen_buffer.cursor_col, lisp_screen_buffer.cursor_row);
     lisp_screen_flush_set_cursor_count++;
 
     lisp_screen_buffer.dirty = 0;
@@ -6996,8 +7024,43 @@ LispObject lisp_builtin_process_resume(LispObject args) {
     lisp_current_process_stack = target;
     slots[status_index] = lisp_intern_keyword("active");
 
+    // milestone133: 画面バッファの退避/復元はここ(実際に「表示中のプロセス」が変わる場所)で
+    // 行う。lisp_context_switch自体には置かない(共有の低レベル関数であり、register/vm_stack
+    // 分離だけを検証する既存の多数の自己テストも同じ関数を直接呼ぶため、そちら側に置くと
+    // 無関係な自己テストのたびにforce_full_redrawが立ち、次のVM命令フック契機の全画面再送出が
+    // テストハーネスの改行前提の出力解析を壊す実害があった)
+    lisp_screen_buffer_copy(&caller->screen, &lisp_screen_buffer);
+    if (!target->screen.initialized) {
+        lisp_screen_buffer_init_blank(&target->screen, lisp_screen_buffer.cols, lisp_screen_buffer.rows);
+    }
+    lisp_screen_buffer_copy(&lisp_screen_buffer, &target->screen);
+    lisp_screen_buffer.force_full_redraw = 1;
+
     lisp_process_thunk_finished = 0;
     lisp_context_switch(caller, target);
+
+    // milestone133: ここへ戻ってくる経路は2つある。(1)targetが%process-suspendを呼んで
+    // 自発的に中断した場合(suspend側で既にlisp_screen_bufferをcallerの画面へ戻し済み)、
+    // (2)thunkがsuspendを一度も呼ばずに最後まで実行され自然終了した場合(この場合はsuspend側の
+    // 復元コードを一切経由しない)。(2)を素通りさせるとlisp_screen_bufferがtargetの画面の
+    // ままになり、次のflushでcols/rowsが実画面と食い違ったままの状態を引き回す実害があった
+    // (test-while他で不定期にSetCursorPosition失敗パニックを確認)。(1)(2)どちらでも
+    // callerの画面へ戻すのはこの1回のコピーだけで十分なので、suspend側の復元処理と重複しても
+    // 無条件にここで実行する。
+    //
+    // (2)の場合、この時点ではlisp_process_thunk_finishedが1で、lisp_screen_bufferはまだ
+    // target自身が最後に書いた内容(自然終了直前の画面、suspend側の復元処理を経由していない)を
+    // 保持している。これをcallerの画面で上書きする前にtarget->screenへ保存しておく
+    // (target->screenが直前のsuspend時点の内容のまま古くなり、後から誰かがtarget(既に
+    // :finished)の画面をインスペクトした場合に不整合な内容を見せてしまう非対称バグがあったため)。
+    // (1)の場合はここに来た時点でlisp_screen_bufferは既にsuspend側がcallerの画面へ入替済み
+    // (targetの内容ではない)なので、ここで保存すると逆にtarget->screenをcallerの内容で
+    // 破壊してしまう。そのためこのtarget->screenへの保存はthunk_finishedの場合のみに限定する
+    if (lisp_process_thunk_finished) {
+        lisp_screen_buffer_copy(&target->screen, &lisp_screen_buffer);
+    }
+    lisp_screen_buffer_copy(&lisp_screen_buffer, &caller->screen);
+    lisp_screen_buffer.force_full_redraw = 1;
 
     lisp_current_process_stack = caller;
     if (lisp_process_thunk_finished) {
@@ -7036,6 +7099,13 @@ LispObject lisp_builtin_process_suspend(LispObject args) {
     lisp_process_stack_register(target); // milestone107: 中断中はGCルートとして走査対象にする
     LispProcessStack *resumer = target->resumer;
     lisp_current_process_stack = resumer;
+
+    // milestone133: resume側と対称。lisp_context_switch自体には置かない理由も同様
+    // (lisp_builtin_process_resumeのコメント参照)
+    lisp_screen_buffer_copy(&target->screen, &lisp_screen_buffer);
+    lisp_screen_buffer_copy(&lisp_screen_buffer, &resumer->screen);
+    lisp_screen_buffer.force_full_redraw = 1;
+
     lisp_context_switch(target, resumer);
 
     // ここに戻ってくるのは、後で誰かが%process-resumeでこのプロセスを再開した時
@@ -7156,6 +7226,91 @@ int lisp_process_local_variable_selftest(void) {
     LispObject x_val = lisp_builtin_process_local_variable(
         lisp_cons(p, lisp_cons(lisp_intern("m113-x"), LISP_NIL)));
     if (x_val != lisp_make_fixnum(42)) {
+        return 0;
+    }
+
+    return 1;
+}
+
+// --- プロセス毎画面バッファ分離自己テスト (milestone 133) ---
+//
+// documents/lisp_process_screen_switch.mdフェーズN。実際の%process-resume/%process-suspend
+// (lisp_builtin_process_resume/lisp_builtin_process_suspend)経由でのみ画面バッファの退避/復元・
+// force_full_redrawが発生する設計(lisp_context_switch自体には置いていない、上記コメント参照)
+// なので、この2つのビルトインを直接呼ぶ形で検証する。lisp_screen_buffer_selftest等と異なり
+// generic-thunkを介さずCの関数そのものをプロセスのトランポリン先(thunk)として使い、
+// %process-suspend呼び出し前後で同じCスタックフレーム内の実行を継続させる(既存の
+// lisp_context_switch_selftest_entryと同じコルーチン的パターン)
+#define LISP_PROCESS_SCREEN_SELFTEST_COL 5
+
+static LispObject lisp_process_screen_selftest_p = LISP_NIL;
+static int lisp_process_screen_selftest_caller_marker_absent_ok = 0;
+
+static LispObject lisp_process_screen_selftest_thunk(LispObject args) {
+    (void)args;
+
+    // 開始直後、現在の画面バッファ(=このプロセス自身の、新規に空初期化されたバッファ)には
+    // 呼び出し元(main)が書き込んだ'A'マーカーが一切見えない(空白のまま)ことを確認する
+    lisp_process_screen_selftest_caller_marker_absent_ok =
+        (lisp_screen_buffer.back[LISP_SCREEN_STATUS_ROWS][LISP_PROCESS_SCREEN_SELFTEST_COL] == L' ');
+
+    lisp_screen_move_cursor(LISP_PROCESS_SCREEN_SELFTEST_COL, LISP_SCREEN_STATUS_ROWS);
+    lisp_screen_putc('B');
+
+    lisp_builtin_process_suspend(lisp_cons(lisp_process_screen_selftest_p, LISP_NIL));
+
+    // 再開後、'B'を書いた位置がそのまま残っている(suspend中に他プロセスに書き換えられて
+    // いない)ことを確認してから、finish直前の内容として'C'に書き換える
+    int b_preserved_across_suspend =
+        (lisp_screen_buffer.back[LISP_SCREEN_STATUS_ROWS][LISP_PROCESS_SCREEN_SELFTEST_COL] == L'B');
+    lisp_screen_move_cursor(LISP_PROCESS_SCREEN_SELFTEST_COL, LISP_SCREEN_STATUS_ROWS);
+    lisp_screen_putc(b_preserved_across_suspend ? 'C' : 'x');
+
+    return lisp_sym_t;
+}
+
+int lisp_process_screen_separation_selftest(void) {
+    LispObject os_pkg = lisp_find_package("os");
+    LispObject cls = lisp_find_class(lisp_intern_in_package(os_pkg, "process"));
+    LispObject p = lisp_make_instance(cls);
+    lisp_process_screen_selftest_p = p;
+    lisp_process_screen_selftest_caller_marker_absent_ok = 0;
+
+    // 呼び出し元(main)自身の画面バッファへ'A'マーカーを書き込む
+    lisp_screen_move_cursor(LISP_PROCESS_SCREEN_SELFTEST_COL, LISP_SCREEN_STATUS_ROWS);
+    lisp_screen_putc('A');
+
+    LispObject thunk = lisp_make_builtin(lisp_process_screen_selftest_thunk);
+
+    lisp_builtin_process_resume(lisp_cons(p, lisp_cons(thunk, LISP_NIL)));
+
+    // suspend直後、呼び出し元へ復元された画面バッファに'A'マーカーがそのまま残っている
+    // (プロセスBが書いた'B'に上書きされていない)ことを確認する
+    if (lisp_screen_buffer.back[LISP_SCREEN_STATUS_ROWS][LISP_PROCESS_SCREEN_SELFTEST_COL] != L'A') {
+        return 0;
+    }
+    if (!lisp_process_screen_selftest_caller_marker_absent_ok) {
+        return 0;
+    }
+
+    // プロセスB自身の(退避済みの)バッファには、呼び出し元の画面に一切影響せず'B'が
+    // 保存されていることを直接back内容比較で確認する
+    UINTN stackframe_index = lisp_instance_slot_index(p, lisp_intern("stackframe"));
+    LispObject *slots = lisp_closure_cell(lisp_closure_cell(p)->inst_slots)->vec_data;
+    UINTN pool_index = (UINTN)lisp_fixnum_value(slots[stackframe_index]);
+    LispProcessStack *target = &lisp_process_context_pool[pool_index];
+    if (target->screen.back[LISP_SCREEN_STATUS_ROWS][LISP_PROCESS_SCREEN_SELFTEST_COL] != L'B') {
+        return 0;
+    }
+
+    lisp_builtin_process_resume(lisp_cons(p, LISP_NIL));
+
+    // 自然終了後も、呼び出し元の画面は'A'のまま(=正しく復元され続けている)ことを確認する
+    if (lisp_screen_buffer.back[LISP_SCREEN_STATUS_ROWS][LISP_PROCESS_SCREEN_SELFTEST_COL] != L'A') {
+        return 0;
+    }
+    // プロセスB自身のバッファにはsuspend再開後に書いた'C'が残っている
+    if (target->screen.back[LISP_SCREEN_STATUS_ROWS][LISP_PROCESS_SCREEN_SELFTEST_COL] != L'C') {
         return 0;
     }
 
@@ -7618,6 +7773,10 @@ void lisp_process_stack_create(LispProcessStack *out, UINTN stack_pages, void (*
     out->vm_sp = 0; // milestone105: 空のVMデータスタックで開始する
     out->active_trap = (void *)0; // milestone105: トラップ未設置で開始する
     out->resumer = (void *)0; // milestone112: resume時に設定される
+    // milestone133: 未使用(初回%process-resumeで実際にtargetとして使われるまで)であることを
+    // 示すマーカー。lisp_builtin_process_resumeはこれが0の間、現在のグローバル画面バッファと
+    // 同じcols/rowsでこの場を初めて空白初期化する(lisp_screen_buffer_init_blank)
+    out->screen.initialized = 0;
     out->regs.rbx = 0;
     out->regs.rbp = 0;
     out->regs.rdi = 0;
@@ -7646,6 +7805,18 @@ void lisp_context_switch(LispProcessStack *from, LispProcessStack *to) {
     }
     vm_sp = to->vm_sp;
     lisp_active_trap = to->active_trap;
+
+    // milestone133: documents/lisp_process_screen_switch.mdフェーズN。画面バッファの退避/
+    // 復元はここではなく%process-resume/%process-suspend側(lisp_builtin_process_resume/
+    // lisp_builtin_process_suspend)で行う。既存のvm_stack/vm_sp/active_trap入替と同じ場所に
+    // 置く案を最初に試したが、lisp_context_switch自体は本物のプロセス切替以外にも(register/
+    // vm_stack分離を検証する多数の自己テストが)raw stack-local変数を使って直接呼んでおり、
+    // それら全てで無条件にforce_full_redrawが立つと、どの自己テストとも無関係な後続の
+    // どこかの時点(次にVM命令ディスパッチフックがflushする瞬間)で画面全体の再送出が
+    // 割り込み、テストハーネスの改行前提のシリアル出力解析を壊す実害を確認した
+    // (make testで全ファイルがTIMEOUTする形で発覚)。実際に「表示中のプロセスが切り替わる」
+    // ことを意味するのは%process-resume/%process-suspendの2箇所のみなので、画面バッファの
+    // 退避/復元とforce_full_redrawの設定はそちら側にのみ置く
 
     if (!to->started) {
         to->started = 1;

@@ -257,7 +257,18 @@ static void lisp_process_fork_package_selftest_run(EFI_SYSTEM_TABLE *SystemTable
 // os:process/os.lisp読み込み後にのみ実行できるため、lisp_process_fork_package_selftest_run
 // と同じ箇所(os.lisp読み込み後)から呼ぶ
 static void lisp_process_suspend_resume_selftest_run(EFI_SYSTEM_TABLE *SystemTable) {
-    if (lisp_process_suspend_resume_selftest()) {
+    int ok = lisp_process_suspend_resume_selftest();
+    // milestone133: このセルフテストは実際の%process-resume/%process-suspendを経由するため、
+    // 画面バッファの退避/復元・force_full_redrawも本物の処理として発生する。ここでの
+    // 退避/復元自体は「見た目上は何も変わっていない」再描画(このセルフテスト用の使い捨て
+    // プロセスは一切画面へ書き込まないため)だが、pending状態のまま次回の(無関係な)VM命令
+    // フック契機まで持ち越すと、その持ち越し先の出力(実運用ではRESULT行など)へ改行無しで
+    // 連結され、テストハーネスの改行前提の行検出を壊す実害があった。ここで明示的に
+    // lisp_screen_flushを呼んで即座に消費し、直後に一度改行を送出して次の出力から
+    // 独立させる
+    lisp_screen_flush();
+    SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\n");
+    if (ok) {
         SystemTable->ConOut->OutputString(SystemTable->ConOut, L"Process suspend/resume self-test: PASS\r\n");
     } else {
         SystemTable->ConOut->OutputString(SystemTable->ConOut, L"Process suspend/resume self-test: FAIL\r\n");
@@ -268,10 +279,33 @@ static void lisp_process_suspend_resume_selftest_run(EFI_SYSTEM_TABLE *SystemTab
 // --- process-local-variable自己テスト (milestone 113) ---
 // 同じ理由(os:process/os.lisp読み込み後)から、他のprocess系self-testと同じ箇所で呼ぶ
 static void lisp_process_local_variable_selftest_run(EFI_SYSTEM_TABLE *SystemTable) {
-    if (lisp_process_local_variable_selftest()) {
+    int ok = lisp_process_local_variable_selftest();
+    // milestone133: lisp_process_suspend_resume_selftest_runと同じ理由(このセルフテストも
+    // 実際の%process-resumeを経由するため、pendingのforce_full_redrawを即座にここで消費し、
+    // 明示的な改行で次の出力から切り離す)
+    lisp_screen_flush();
+    SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\n");
+    if (ok) {
         SystemTable->ConOut->OutputString(SystemTable->ConOut, L"Process local-variable self-test: PASS\r\n");
     } else {
         SystemTable->ConOut->OutputString(SystemTable->ConOut, L"Process local-variable self-test: FAIL\r\n");
+        for (;;) {}
+    }
+}
+
+// --- プロセス毎画面バッファ分離自己テスト (milestone 133) ---
+// 同じ理由(os:process/os.lisp読み込み後)から、他のprocess系self-testと同じ箇所で呼ぶ
+static void lisp_process_screen_separation_selftest_run(EFI_SYSTEM_TABLE *SystemTable) {
+    int ok = lisp_process_screen_separation_selftest();
+    // milestone133: 他のprocess系self-testと同じ理由(実際の%process-resume/%process-suspendを
+    // 経由するため、pendingのforce_full_redrawを即座にここで消費し、明示的な改行で次の出力
+    // から切り離す)
+    lisp_screen_flush();
+    SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\n");
+    if (ok) {
+        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"Process screen separation self-test: PASS\r\n");
+    } else {
+        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"Process screen separation self-test: FAIL\r\n");
         for (;;) {}
     }
 }
@@ -777,6 +811,7 @@ static EFI_STATUS EFIAPI EfiMainImpl(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *S
             lisp_process_fork_package_selftest_run(SystemTable); // milestone 108: fork時の一意パッケージ生成自己テスト
             lisp_process_suspend_resume_selftest_run(SystemTable); // milestone 112: process-suspend/process-resume自己テスト
             lisp_process_local_variable_selftest_run(SystemTable); // milestone 113: process-local-variable自己テスト
+            lisp_process_screen_separation_selftest_run(SystemTable); // milestone 133: プロセス毎画面バッファ分離自己テスト
 
             lisp_lock_cl_user_package(); // milestone 111: 起動処理完了後にcommon-lisp-userをデフォルトでロックする
 

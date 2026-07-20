@@ -147,6 +147,7 @@ typedef EFI_STATUS (EFIAPI *EFI_WAIT_FOR_EVENT)(
     UINTN *Index
 );
 typedef EFI_STATUS (EFIAPI *EFI_CLOSE_EVENT)(EFI_EVENT Event);
+typedef EFI_STATUS (EFIAPI *EFI_STALL)(UINTN Microseconds);
 
 typedef struct _EFI_BOOT_SERVICES {
     EFI_TABLE_HEADER Hdr;
@@ -187,7 +188,7 @@ typedef struct _EFI_BOOT_SERVICES {
     void *UnloadImage;
     void *ExitBootServices;
     void *GetNextMonotonicCount;
-    void *Stall;
+    EFI_STALL Stall;
     void *SetWatchdogTimer;
     void *ConnectController;
     void *DisconnectController;

@@ -218,15 +218,23 @@
            (eq (funcall (symbol-function fork-car-sym) (cons 1 2)) 1)
            (eq no-op-result nil)))))
 
+; milestone133: os:process-resume/os:process-suspendの実呼び出し(run-test-os-process-
+; suspend-resume以降のサブテスト)が実際に画面バッファの退避/復元・force_full_redrawを
+; 発生させるため、その復元後にバッファ側のカーソル位置がscripts/run_test.pyのRESULT行
+; 検出が期待する「行頭」からズレたまま残る(documents/lisp_console_buffer.mdに記録済みの
+; 既知の再発ガチャ、milestone125/129と同根)。明示的に空行を1つ書き出してから結果を返す
+; ことで、続くinit.lisp側のwrite-line "RESULT os ..."が確実に行頭から始まるようにする
 (defun run-test-os ()
-  (and (run-test-os-process-class-exists)
-       (run-test-os-process-slots)
-       (run-test-os-all-processes-registry)
-       (run-test-os-make-process-auto-name)
-       (run-test-os-make-process-named)
-       (run-test-os-make-process-fork-package)
-       (run-test-os-make-process-fork-redefine)
-       (run-test-os-process-suspend-resume)
-       (run-test-os-process-local-variable)
-       (run-test-os-inspect-process)
-       (run-test-os-revert-function)))
+  (let ((result (and (run-test-os-process-class-exists)
+                      (run-test-os-process-slots)
+                      (run-test-os-all-processes-registry)
+                      (run-test-os-make-process-auto-name)
+                      (run-test-os-make-process-named)
+                      (run-test-os-make-process-fork-package)
+                      (run-test-os-make-process-fork-redefine)
+                      (run-test-os-process-suspend-resume)
+                      (run-test-os-process-local-variable)
+                      (run-test-os-inspect-process)
+                      (run-test-os-revert-function))))
+    (write-line "")
+    result))
