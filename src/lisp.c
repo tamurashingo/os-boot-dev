@@ -1345,17 +1345,35 @@ void lisp_symbols_init(void) {
 char input_buffer[LISP_INPUT_BUFFER_MAX];
 UINTN input_length;
 
+int lisp_double_ctrl_detected = 0;
+
 // Enterキーまでの1行をキー入力から読み取り、input_bufferにASCII文字列として格納する。
 // Backspaceは1文字削除して画面表示も戻す。UnicodeChar==0の制御キー(矢印キー等)は無視する。
 // milestone135: g_text_input_ex(EFI_SIMPLE_TEXT_INPUT_EX_PROTOCOL、milestone116で検出)が
 // 見つかっていればReadKeyStrokeEx経由で読み取り、見つからない場合のみ既存のConIn経由へ
 // フォールバックする。EFI_KEY_DATA.KeyはEFI_INPUT_KEYそのものなので、以降の文字分類・
-// echo・backspace・Enter判定は経路にかかわらず共通のunicode_charに対して行い、挙動を
-// 一切変えない(Ctrl検知(KeyState参照)はmilestone136で組み込む予定でここでは行わない)
+// echo・backspace・Enter判定は経路にかかわらず共通のunicode_charに対して行う。
+// milestone136: g_text_input_ex経由の場合のみ、KeyStateからCtrl単体押下(milestone116の
+// lisp_key_state_is_lone_ctrl)を判定する。1回目の検知でLISP_DOUBLE_CTRL_WINDOW_100NS
+// (0.5秒)の使い捨てタイマーを起動し、ループの各周回でCheckEvent(ブロックしない)により
+// 満了を確認する。ウィンドウ内に2回目が来たら入力行を破棄してEnterと同様に即座に終了し、
+// ワンショットのグローバルフラグlisp_double_ctrl_detectedを立てる(呼び出し元がこれを
+// キャンセルとして扱う、milestone137で実際にダイアログへつなげる予定)。ウィンドウが尽きた
+// 場合や、ペンディング中にEnterで終了した場合もタイマーイベントは必ずCloseEventする
 void lisp_read_line(EFI_SYSTEM_TABLE *SystemTable) {
     input_length = 0;
 
+    int ctrl_wait_pending = 0;
+    EFI_EVENT ctrl_window_timer = (EFI_EVENT)0;
+    EFI_BOOT_SERVICES *bs = SystemTable->BootServices;
+
     for (;;) {
+        if (ctrl_wait_pending && bs->CheckEvent(ctrl_window_timer) == 0) {
+            // EFI_SUCCESS: タイマー満了、2回目を待つウィンドウが尽きた
+            bs->CloseEvent(ctrl_window_timer);
+            ctrl_wait_pending = 0;
+        }
+
         CHAR16 unicode_char;
 
         if (g_text_input_ex != (void *)0) {
@@ -1364,6 +1382,21 @@ void lisp_read_line(EFI_SYSTEM_TABLE *SystemTable) {
             if (status != 0) {
                 continue; // EFI_NOT_READY: まだキー入力がない
             }
+
+            if (lisp_key_state_is_lone_ctrl(&key_data)) {
+                if (ctrl_wait_pending) {
+                    bs->CloseEvent(ctrl_window_timer);
+                    ctrl_wait_pending = 0;
+                    input_length = 0;
+                    lisp_double_ctrl_detected = 1;
+                    break;
+                }
+                ctrl_wait_pending = 1;
+                bs->CreateEvent(EVT_TIMER, TPL_APPLICATION, (void *)0, (void *)0, &ctrl_window_timer);
+                bs->SetTimer(ctrl_window_timer, TimerRelative, LISP_DOUBLE_CTRL_WINDOW_100NS);
+                continue;
+            }
+
             unicode_char = key_data.Key.UnicodeChar;
         } else {
             EFI_INPUT_KEY key;
@@ -1401,6 +1434,10 @@ void lisp_read_line(EFI_SYSTEM_TABLE *SystemTable) {
             SystemTable->ConOut->OutputString(SystemTable->ConOut, echo);
             lisp_screen_track_echoed_wstring(echo);
         }
+    }
+
+    if (ctrl_wait_pending) {
+        bs->CloseEvent(ctrl_window_timer);
     }
 
     input_buffer[input_length] = '\0';
@@ -5734,11 +5771,16 @@ LispObject lisp_builtin_princ(LispObject args) {
 // milestone118: Lispコード(os:switch-processのプロセス選択メニュー等)がコンソールから
 // 1式読み込むための薄いビルトイン。プロンプト文字列を表示した後、REPL本体
 // (main.cのEfiMainImpl、milestone6/8)と全く同じlisp_read_line/lisp_read_from_bufferを
-// そのまま再利用するだけであり、ConIn(EFI_SIMPLE_TEXT_INPUT_PROTOCOL)以外のプロトコルには
-// 一切触れない。そのため、EFI_SIMPLE_TEXT_INPUT_EX_PROTOCOL(milestone116/117)の
-// キーイベントキューと衝突する余地を新たに持たない。空行が入力された場合はプロンプトを
-// 再表示して読み直す(REPL本体の「空行ならcontinue」とは異なり、こちらは必ず1式返す必要が
-// あるため)
+// そのまま再利用する。milestone135でlisp_read_line自体がg_text_input_ex経由の
+// ReadKeyStrokeExへ一本化されたため、以前のように「ConIn以外に一切触れない」わけでは
+// 無くなったが、読み取り経路自体がREPL本体と完全に同じ単一のlisp_read_lineへ統一された
+// ことで、複数の異なる経路が同じキーイベントキューを競合して読むリスクは構造的に排除
+// されている(milestone118で懸念されていたリスクの解消そのもの)。空行が入力された場合は
+// プロンプトを再表示して読み直す(REPL本体の「空行ならcontinue」とは異なり、こちらは必ず
+// 1式返す必要があるため)。milestone136: lisp_read_lineがCtrl2回押下を検知して打ち切った
+// (lisp_double_ctrl_detected)場合は、これも「1式返す必要がある」呼び出し規約には乗せられ
+// ないため、単純にnilを返してキャンセル扱いにする(再帰的にダイアログを起動する処理は
+// main REPLループのみに限定する設計方針、milestone137の対象)
 LispObject lisp_builtin_read_console_expr(LispObject args) {
     LispObject prompt_obj = lisp_car(args);
     lisp_assert_string(prompt_obj);
@@ -5748,6 +5790,10 @@ LispObject lisp_builtin_read_console_expr(LispObject args) {
     for (;;) {
         lisp_print_ascii(&stream, prompt->str_data);
         lisp_read_line(g_system_table);
+        if (lisp_double_ctrl_detected) {
+            lisp_double_ctrl_detected = 0;
+            return LISP_NIL;
+        }
         if (input_length == 0) {
             continue;
         }

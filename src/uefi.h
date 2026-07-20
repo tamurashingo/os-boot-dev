@@ -147,6 +147,7 @@ typedef EFI_STATUS (EFIAPI *EFI_WAIT_FOR_EVENT)(
     UINTN *Index
 );
 typedef EFI_STATUS (EFIAPI *EFI_CLOSE_EVENT)(EFI_EVENT Event);
+typedef EFI_STATUS (EFIAPI *EFI_CHECK_EVENT)(EFI_EVENT Event);
 typedef EFI_STATUS (EFIAPI *EFI_STALL)(UINTN Microseconds);
 
 typedef struct _EFI_BOOT_SERVICES {
@@ -166,7 +167,7 @@ typedef struct _EFI_BOOT_SERVICES {
     EFI_WAIT_FOR_EVENT WaitForEvent;
     void *SignalEvent;
     EFI_CLOSE_EVENT CloseEvent;
-    void *CheckEvent;
+    EFI_CHECK_EVENT CheckEvent;
 
     void *InstallProtocolInterface;
     void *ReinstallProtocolInterface;

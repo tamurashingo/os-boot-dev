@@ -612,6 +612,24 @@ int lisp_ctrl_wait_classify_selftest(void);
 // 呼び出されない(milestone116同様の既知の限界)
 int lisp_wait_for_double_ctrl(UINT64 window_100ns);
 
+// --- ライブなCtrl2回検知 (milestone 136) ---
+//
+// milestone135でlisp_read_line自体がg_text_input_ex経由のReadKeyStrokeExへ一本化された
+// ため、lisp_wait_for_double_ctrl(上記、ブロッキングWaitForEvent方式で現在呼び出し元が
+// 無い)とは別に、lisp_read_lineの既存のノンブロッキング・ビジーポーリングループの中で
+// Ctrl2回押下を検知する。1回目のCtrl単体押下でCreateEvent(EVT_TIMER)/
+// SetTimer(TimerRelative)の使い捨てタイマーを起動し、ループの各周回でCheckEvent
+// (ブロックしない)によりタイマー満了を確認する。ウィンドウ内に2回目のCtrl単体押下が
+// 来たら入力行を破棄してlisp_read_line自体をEnterと同様に即座に終了させ、ワンショットの
+// グローバルフラグlisp_double_ctrl_detectedを立てる。g_text_input_exが未検出の場合は
+// KeyState自体が得られないため判定不能であり、このフラグは一切立たない
+#define LISP_DOUBLE_CTRL_WINDOW_100NS 5000000ULL // 0.5秒(100ns単位)
+
+// lisp_read_lineがCtrl2回押下を検知して入力を打ち切った直後にのみ1が立つワンショット
+// フラグ。消費する側(%read-console-expr、milestone137のmain.cのREPLループ)は読んだら
+// 即0に戻す(lisp_process_thunk_finishedと同じ「読んだら即クリア」規約)
+extern int lisp_double_ctrl_detected;
+
 // milestone 119: g_system_table->ConOutの実際のQueryMode/SetCursorPositionを呼び、
 // 戻り値がEFI_SUCCESSであること・QueryModeが返すCols/Rowsが妥当な範囲であること・
 // SetCursorPosition後にConOut->Mode->CursorColumn/CursorRowが実際に反映されることを
