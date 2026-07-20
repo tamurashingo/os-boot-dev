@@ -1353,27 +1353,19 @@ int lisp_double_ctrl_detected = 0;
 // 見つかっていればReadKeyStrokeEx経由で読み取り、見つからない場合のみ既存のConIn経由へ
 // フォールバックする。EFI_KEY_DATA.KeyはEFI_INPUT_KEYそのものなので、以降の文字分類・
 // echo・backspace・Enter判定は経路にかかわらず共通のunicode_charに対して行う。
-// milestone136: g_text_input_ex経由の場合のみ、KeyStateからCtrl単体押下(milestone116の
-// lisp_key_state_is_lone_ctrl)を判定する。1回目の検知でLISP_DOUBLE_CTRL_WINDOW_100NS
-// (0.5秒)の使い捨てタイマーを起動し、ループの各周回でCheckEvent(ブロックしない)により
-// 満了を確認する。ウィンドウ内に2回目が来たら入力行を破棄してEnterと同様に即座に終了し、
-// ワンショットのグローバルフラグlisp_double_ctrl_detectedを立てる(呼び出し元がこれを
-// キャンセルとして扱う、milestone137で実際にダイアログへつなげる予定)。ウィンドウが尽きた
-// 場合や、ペンディング中にEnterで終了した場合もタイマーイベントは必ずCloseEventする
+// milestone138: g_text_input_ex経由の場合のみ、KeyStateからCtrl単体押下(milestone116の
+// lisp_key_state_is_lone_ctrl)を判定する。時間ウィンドウ方式(milestone136)を廃止し、
+// 「1回目の検知でarmed状態に入り期限なく2回目を待つ」状態機械に変更した。armed中に2回目の
+// Ctrl単体押下が来たら入力行を破棄してEnterと同様に即座に終了し、ワンショットのグローバル
+// フラグlisp_double_ctrl_detectedを立てる(呼び出し元がこれをキャンセル/ダイアログ起動として
+// 扱う)。armed中にCtrl単体以外のキーが来た場合はarmedを解除するだけで、そのキー自体は
+// 通常どおり処理する(入力行は破棄しない)
 void lisp_read_line(EFI_SYSTEM_TABLE *SystemTable) {
     input_length = 0;
 
-    int ctrl_wait_pending = 0;
-    EFI_EVENT ctrl_window_timer = (EFI_EVENT)0;
-    EFI_BOOT_SERVICES *bs = SystemTable->BootServices;
+    int ctrl_armed = 0;
 
     for (;;) {
-        if (ctrl_wait_pending && bs->CheckEvent(ctrl_window_timer) == 0) {
-            // EFI_SUCCESS: タイマー満了、2回目を待つウィンドウが尽きた
-            bs->CloseEvent(ctrl_window_timer);
-            ctrl_wait_pending = 0;
-        }
-
         CHAR16 unicode_char;
 
         if (g_text_input_ex != (void *)0) {
@@ -1384,17 +1376,21 @@ void lisp_read_line(EFI_SYSTEM_TABLE *SystemTable) {
             }
 
             if (lisp_key_state_is_lone_ctrl(&key_data)) {
-                if (ctrl_wait_pending) {
-                    bs->CloseEvent(ctrl_window_timer);
-                    ctrl_wait_pending = 0;
+                if (ctrl_armed) {
+                    ctrl_armed = 0;
+                    lisp_screen_show_ctrl_indicator(SystemTable, 0);
                     input_length = 0;
                     lisp_double_ctrl_detected = 1;
                     break;
                 }
-                ctrl_wait_pending = 1;
-                bs->CreateEvent(EVT_TIMER, TPL_APPLICATION, (void *)0, (void *)0, &ctrl_window_timer);
-                bs->SetTimer(ctrl_window_timer, TimerRelative, LISP_DOUBLE_CTRL_WINDOW_100NS);
+                ctrl_armed = 1;
+                lisp_screen_show_ctrl_indicator(SystemTable, 1);
                 continue;
+            }
+
+            if (ctrl_armed) {
+                ctrl_armed = 0;
+                lisp_screen_show_ctrl_indicator(SystemTable, 0);
             }
 
             unicode_char = key_data.Key.UnicodeChar;
@@ -1434,10 +1430,6 @@ void lisp_read_line(EFI_SYSTEM_TABLE *SystemTable) {
             SystemTable->ConOut->OutputString(SystemTable->ConOut, echo);
             lisp_screen_track_echoed_wstring(echo);
         }
-    }
-
-    if (ctrl_wait_pending) {
-        bs->CloseEvent(ctrl_window_timer);
     }
 
     input_buffer[input_length] = '\0';
@@ -6450,19 +6442,37 @@ void lisp_screen_get_size(UINTN *cols, UINTN *rows) {
 // text(len文字)をpadding/truncate込みで直接書き込む専用経路。lisp_screen_putcの通常書き込み
 // (カーソル追従・折り返し・スクロール)とは完全に独立しており、cursor_col/cursor_rowは
 // 一切変更しない。cols幅に対してtextが短ければ残りをスペースで埋め、長ければcols文字目
-// より後ろを切り捨てる。行全体を書き換えるため、touchも常にその行全体(0〜cols-1)とする
+// より後ろを切り捨てる。milestone138: 列0〜LISP_SCREEN_STATUS_RESERVED_COLS-1はシステム
+// 予約領域(Ctrl待機インジケータ用)なので、この関数はそれより後ろの列にのみ書き込む。
+// touchもlisp_screen_touch_cellで行い、予約領域側のtouched範囲を無条件に上書きしない
 void lisp_screen_set_status_line(const char *text, UINTN len) {
     if (!lisp_screen_buffer.initialized) {
         lisp_screen_buffer_init();
     }
     UINTN cols = lisp_screen_buffer.cols;
-    for (UINTN c = 0; c < cols; c++) {
-        lisp_screen_buffer.back[0][c] = (c < len) ? (CHAR16)text[c] : L' ';
+    for (UINTN c = LISP_SCREEN_STATUS_RESERVED_COLS; c < cols; c++) {
+        UINTN i = c - LISP_SCREEN_STATUS_RESERVED_COLS;
+        lisp_screen_buffer.back[0][c] = (i < len) ? (CHAR16)text[i] : L' ';
+        lisp_screen_touch_cell(0, c);
     }
-    lisp_screen_buffer.row_touched[0] = 1;
-    lisp_screen_buffer.touched_min[0] = 0;
-    lisp_screen_buffer.touched_max[0] = cols - 1;
     lisp_screen_buffer.dirty = 1;
+}
+
+// milestone138: Ctrl単体押下1回目の待機中(armed)であることを示す'C'を、状態行左端(列0、
+// システム予約LISP_SCREEN_STATUS_RESERVED_COLS列のうち先頭)へ表示/消去する。
+// lisp_read_lineがキー入力を待ってブロックしている間はlisp_screen_flushが一度も呼ばれ
+// ないため(milestone125以降のキーechoと同じ理由)、back bufferへ書くだけでは画面に反映
+// されない。そのためキーechoと同じ方式で、ConOutへ直接描画する。入力行編集中の実際の
+// カーソル位置(lisp_screen_buffer.cursor_col/cursor_row、キーechoが追従管理)を書き込み
+// 前後で保つため、SetCursorPositionで一時的に(0,0)へ移動してから書き込み後に元へ戻す
+void lisp_screen_show_ctrl_indicator(EFI_SYSTEM_TABLE *SystemTable, int armed) {
+    if (!lisp_screen_buffer.initialized) {
+        return;
+    }
+    SystemTable->ConOut->SetCursorPosition(SystemTable->ConOut, 0, 0);
+    CHAR16 ch[2] = { armed ? L'C' : L' ', 0 };
+    SystemTable->ConOut->OutputString(SystemTable->ConOut, ch);
+    SystemTable->ConOut->SetCursorPosition(SystemTable->ConOut, lisp_screen_buffer.cursor_col, lisp_screen_buffer.cursor_row);
 }
 
 // milestone120で暫定実装、milestone126でバッファ経由(lisp_screen_clear)へ切り替え
@@ -7434,7 +7444,7 @@ int lisp_process_status_line_selftest(void) {
     LispProcessStack *target = &lisp_process_context_pool[pool_index];
 
     for (UINTN i = 0; i < name->str_len; i++) {
-        if (target->screen.back[0][i] != (CHAR16)name->str_data[i]) {
+        if (target->screen.back[0][LISP_SCREEN_STATUS_RESERVED_COLS + i] != (CHAR16)name->str_data[i]) {
             return 0;
         }
     }

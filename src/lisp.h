@@ -124,6 +124,11 @@ void lisp_panic_fatal(CHAR16 *message);
 // (折り返し・スクロール)・lisp_screen_buffer_initの初期カーソル位置からは対象外にする
 #define LISP_SCREEN_STATUS_ROWS 1
 
+// milestone138: 状態行(行0)の左側LISP_SCREEN_STATUS_RESERVED_COLS列をシステム予約領域とし、
+// その先頭(列0)にCtrl単体押下待機中インジケータ('C')を表示する。lisp_screen_set_status_line
+// が書き込むプロセス名はこの予約領域より後ろ(列LISP_SCREEN_STATUS_RESERVED_COLSから)に表示する
+#define LISP_SCREEN_STATUS_RESERVED_COLS 3
+
 // milestone133: ConOutのSetCursorPosition/OutputString/ClearScreenが、大量呼び出しバースト
 // (force_full_redraw時)に限ってまれに一時的な失敗を返すことを確認したため、lisp.c側の
 // リトライ処理(lisp_screen_flush_set_cursor_position等)で使う定数。lisp_screen_buffer_init
@@ -612,18 +617,26 @@ int lisp_ctrl_wait_classify_selftest(void);
 // 呼び出されない(milestone116同様の既知の限界)
 int lisp_wait_for_double_ctrl(UINT64 window_100ns);
 
-// --- ライブなCtrl2回検知 (milestone 136) ---
+// --- ライブなCtrl2回検知 (milestone 136、milestone138で押下ベースへ変更) ---
 //
 // milestone135でlisp_read_line自体がg_text_input_ex経由のReadKeyStrokeExへ一本化された
 // ため、lisp_wait_for_double_ctrl(上記、ブロッキングWaitForEvent方式で現在呼び出し元が
 // 無い)とは別に、lisp_read_lineの既存のノンブロッキング・ビジーポーリングループの中で
-// Ctrl2回押下を検知する。1回目のCtrl単体押下でCreateEvent(EVT_TIMER)/
-// SetTimer(TimerRelative)の使い捨てタイマーを起動し、ループの各周回でCheckEvent
-// (ブロックしない)によりタイマー満了を確認する。ウィンドウ内に2回目のCtrl単体押下が
-// 来たら入力行を破棄してlisp_read_line自体をEnterと同様に即座に終了させ、ワンショットの
-// グローバルフラグlisp_double_ctrl_detectedを立てる。g_text_input_exが未検出の場合は
-// KeyState自体が得られないため判定不能であり、このフラグは一切立たない
-#define LISP_DOUBLE_CTRL_WINDOW_100NS 5000000ULL // 0.5秒(100ns単位)
+// Ctrl2回押下を検知する。milestone136では時間ウィンドウ(タイマー)方式だったが、
+// milestone138で「1回目のCtrl単体押下で待機状態(armed)に入り、期限なく2回目を待つ。
+// 2回目のCtrl単体押下が来たら確定、それ以外のキーが来たら待機を解除する」という状態機械へ
+// 変更した。ReadKeyStrokeExは離鍵を区別できないため、「1回目の押下イベント」と「2回目の
+// 押下イベント」という2つの別イベントが届くこと自体が、キーが一度離されてから再度押された
+// ことを意味する。確定した瞬間に入力行を破棄してlisp_read_line自体をEnterと同様に即座に
+// 終了させ、ワンショットのグローバルフラグlisp_double_ctrl_detectedを立てる。
+// g_text_input_exが未検出の場合はKeyState自体が得られないため判定不能であり、このフラグは
+// 一切立たない
+//
+// lisp_screen_show_ctrl_indicator(src/lisp.c)がarmed状態を状態行左端(列0)へ'C'として
+// 表示/消去する。lisp_read_lineがキー入力を待ってブロックしている間はlisp_screen_flushが
+// 一度も呼ばれないため(milestone125以降のキーechoと同じ理由)、back bufferへ書くだけでは
+// 画面に反映されない。そのためキーechoと同じ方式で、ConOutへ直接描画する
+void lisp_screen_show_ctrl_indicator(EFI_SYSTEM_TABLE *SystemTable, int armed);
 
 // lisp_read_lineがCtrl2回押下を検知して入力を打ち切った直後にのみ1が立つワンショット
 // フラグ。消費する側(%read-console-expr、milestone137のmain.cのREPLループ)は読んだら
