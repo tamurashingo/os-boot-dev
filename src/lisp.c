@@ -1345,7 +1345,7 @@ void lisp_symbols_init(void) {
 char input_buffer[LISP_INPUT_BUFFER_MAX];
 UINTN input_length;
 
-int lisp_double_ctrl_detected = 0;
+int lisp_process_switch_requested = 0;
 
 // milestone138続報2: 実機で「Text Input Ex Protocol: FOUND(g_text_input_ex!=NULL)なのに
 // Ctrl単体押下が検知できない」という報告の切り分け用に、ReadKeyStrokeExが実際に返した
@@ -1384,21 +1384,22 @@ static void lisp_key_debug_log_record(const EFI_KEY_DATA *key_data) {
 // milestone135: g_text_input_ex(EFI_SIMPLE_TEXT_INPUT_EX_PROTOCOL、milestone116で検出)が
 // 見つかっていればReadKeyStrokeEx経由で読み取り、見つからない場合のみ既存のConIn経由へ
 // フォールバックする。EFI_KEY_DATA.KeyはEFI_INPUT_KEYそのものなので、以降の文字分類・
-// echo・backspace・Enter判定は経路にかかわらず共通のunicode_charに対して行う。
-// milestone138: g_text_input_ex経由の場合のみ、KeyStateからCtrl単体押下(milestone116の
-// lisp_key_state_is_lone_ctrl)を判定する。時間ウィンドウ方式(milestone136)を廃止し、
-// 「1回目の検知でarmed状態に入り期限なく2回目を待つ」状態機械に変更した。armed中に2回目の
-// Ctrl単体押下が来たら入力行を破棄してEnterと同様に即座に終了し、ワンショットのグローバル
-// フラグlisp_double_ctrl_detectedを立てる(呼び出し元がこれをキャンセル/ダイアログ起動として
-// 扱う)。armed中にCtrl単体以外のキーが来た場合はarmedを解除するだけで、そのキー自体は
-// 通常どおり処理する(入力行は破棄しない)
+// echo・backspace・Enter判定は経路にかかわらず共通のunicode_char/scan_codeに対して行う。
+// milestone138続報3: プロセス切替ダイアログの起動キーは当初Ctrl単体2回押下(milestone136/138)
+// だったが、%key-debug-log(milestone138続報2)による実機診断の結果、一部ファームウェアは
+// 修飾キー単体の押下に対してキーストロークイベント自体を生成しないことが判明し、Ctrl単体
+// 押下の検知が原理的に不可能な実機が存在すると分かった。そのためScanCode==SCAN_F2(修飾
+// キー不要のファンクションキー)の単発押下へ変更した。ScanCodeはEFI_SIMPLE_TEXT_INPUT_
+// EX_PROTOCOL(KeyState付き)・EFI_SIMPLE_TEXT_INPUT_PROTOCOL(KeyStateなし)のどちらでも
+// 共通に報告されるため、g_text_input_exの検出成否に関わらず両分岐で同じ判定が使える
+// (Ctrl単体判定はKeyStateが無いと原理的に不可能だったため、旧実装ではConIn側は対象外
+// だったが、F2判定はConIn側でも行える)
 void lisp_read_line(EFI_SYSTEM_TABLE *SystemTable) {
     input_length = 0;
 
-    int ctrl_armed = 0;
-
     for (;;) {
         CHAR16 unicode_char;
+        UINT16 scan_code;
 
         if (g_text_input_ex != (void *)0) {
             EFI_KEY_DATA key_data;
@@ -1409,25 +1410,8 @@ void lisp_read_line(EFI_SYSTEM_TABLE *SystemTable) {
 
             lisp_key_debug_log_record(&key_data);
 
-            if (lisp_key_state_is_lone_ctrl(&key_data)) {
-                if (ctrl_armed) {
-                    ctrl_armed = 0;
-                    lisp_screen_show_ctrl_indicator(SystemTable, 0);
-                    input_length = 0;
-                    lisp_double_ctrl_detected = 1;
-                    break;
-                }
-                ctrl_armed = 1;
-                lisp_screen_show_ctrl_indicator(SystemTable, 1);
-                continue;
-            }
-
-            if (ctrl_armed) {
-                ctrl_armed = 0;
-                lisp_screen_show_ctrl_indicator(SystemTable, 0);
-            }
-
             unicode_char = key_data.Key.UnicodeChar;
+            scan_code = key_data.Key.ScanCode;
         } else {
             EFI_INPUT_KEY key;
             EFI_STATUS status = SystemTable->ConIn->ReadKeyStroke(SystemTable->ConIn, &key);
@@ -1435,6 +1419,13 @@ void lisp_read_line(EFI_SYSTEM_TABLE *SystemTable) {
                 continue; // EFI_NOT_READY: まだキー入力がない
             }
             unicode_char = key.UnicodeChar;
+            scan_code = key.ScanCode;
+        }
+
+        if (scan_code == SCAN_F2) {
+            input_length = 0;
+            lisp_process_switch_requested = 1;
+            break;
         }
 
         if (unicode_char == L'\r') {
@@ -5803,10 +5794,11 @@ LispObject lisp_builtin_princ(LispObject args) {
 // ことで、複数の異なる経路が同じキーイベントキューを競合して読むリスクは構造的に排除
 // されている(milestone118で懸念されていたリスクの解消そのもの)。空行が入力された場合は
 // プロンプトを再表示して読み直す(REPL本体の「空行ならcontinue」とは異なり、こちらは必ず
-// 1式返す必要があるため)。milestone136: lisp_read_lineがCtrl2回押下を検知して打ち切った
-// (lisp_double_ctrl_detected)場合は、これも「1式返す必要がある」呼び出し規約には乗せられ
-// ないため、単純にnilを返してキャンセル扱いにする(再帰的にダイアログを起動する処理は
-// main REPLループのみに限定する設計方針、milestone137の対象)
+// 1式返す必要があるため)。milestone136/138続報3: lisp_read_lineがプロセス切替キー
+// (lisp_process_switch_requested、当初Ctrl2回押下→現F2単発押下)を検知して打ち切った
+// 場合は、これも「1式返す必要がある」呼び出し規約には乗せられないため、単純にnilを返して
+// キャンセル扱いにする(再帰的にダイアログを起動する処理はmain REPLループのみに限定する
+// 設計方針、milestone137の対象)
 LispObject lisp_builtin_read_console_expr(LispObject args) {
     LispObject prompt_obj = lisp_car(args);
     lisp_assert_string(prompt_obj);
@@ -5816,8 +5808,8 @@ LispObject lisp_builtin_read_console_expr(LispObject args) {
     for (;;) {
         lisp_print_ascii(&stream, prompt->str_data);
         lisp_read_line(g_system_table);
-        if (lisp_double_ctrl_detected) {
-            lisp_double_ctrl_detected = 0;
+        if (lisp_process_switch_requested) {
+            lisp_process_switch_requested = 0;
             return LISP_NIL;
         }
         if (input_length == 0) {
@@ -6490,23 +6482,6 @@ void lisp_screen_set_status_line(const char *text, UINTN len) {
         lisp_screen_touch_cell(0, c);
     }
     lisp_screen_buffer.dirty = 1;
-}
-
-// milestone138: Ctrl単体押下1回目の待機中(armed)であることを示す'C'を、状態行左端(列0、
-// システム予約LISP_SCREEN_STATUS_RESERVED_COLS列のうち先頭)へ表示/消去する。
-// lisp_read_lineがキー入力を待ってブロックしている間はlisp_screen_flushが一度も呼ばれ
-// ないため(milestone125以降のキーechoと同じ理由)、back bufferへ書くだけでは画面に反映
-// されない。そのためキーechoと同じ方式で、ConOutへ直接描画する。入力行編集中の実際の
-// カーソル位置(lisp_screen_buffer.cursor_col/cursor_row、キーechoが追従管理)を書き込み
-// 前後で保つため、SetCursorPositionで一時的に(0,0)へ移動してから書き込み後に元へ戻す
-void lisp_screen_show_ctrl_indicator(EFI_SYSTEM_TABLE *SystemTable, int armed) {
-    if (!lisp_screen_buffer.initialized) {
-        return;
-    }
-    SystemTable->ConOut->SetCursorPosition(SystemTable->ConOut, 0, 0);
-    CHAR16 ch[2] = { armed ? L'C' : L' ', 0 };
-    SystemTable->ConOut->OutputString(SystemTable->ConOut, ch);
-    SystemTable->ConOut->SetCursorPosition(SystemTable->ConOut, lisp_screen_buffer.cursor_col, lisp_screen_buffer.cursor_row);
 }
 
 // milestone120で暫定実装、milestone126でバッファ経由(lisp_screen_clear)へ切り替え

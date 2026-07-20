@@ -861,11 +861,12 @@ static EFI_STATUS EFIAPI EfiMainImpl(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *S
                 lisp_print_ascii(&console_stream, "> ");
                 lisp_screen_flush();
                 lisp_read_line(SystemTable);
-                if (lisp_double_ctrl_detected) { // milestone 137: メインREPLループのみ、Ctrl2回検知を
+                if (lisp_process_switch_requested) { // milestone 137: メインREPLループのみ、プロセス
+                                                  // 切替キー(F2、milestone138続報3)検知を
                                                   // 実際のプロセス選択ダイアログ起動へ変換する
                                                   // (%read-console-exprなど他の呼び出し元は
                                                   // milestone136通りキャンセル/nil止まりのまま)
-                    lisp_double_ctrl_detected = 0;
+                    lisp_process_switch_requested = 0;
                     lisp_eval_toplevel(lisp_read_from_buffer("(os:switch-process)"));
                     continue;
                 }

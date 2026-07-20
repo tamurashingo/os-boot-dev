@@ -237,6 +237,14 @@ typedef struct {
     CHAR16 UnicodeChar;
 } EFI_INPUT_KEY;
 
+// UEFI仕様Appendix Bで定義されているScanCode値のうち、プロセス切替ダイアログの
+// 起動キー(milestone138続報3、Ctrl単体押下がファームウェア仕様上検知不能な実機が
+// あると判明したため修飾キー不要のファンクションキーへ変更)として使うF2のみを
+// 定義する。ScanCodeはEFI_SIMPLE_TEXT_INPUT_PROTOCOL/EFI_SIMPLE_TEXT_INPUT_EX_PROTOCOL
+// のどちらでも共通に報告されるため、修飾キー状態(KeyState)を持たない基本プロトコル
+// (Ex protocol未検出時のフォールバック経路)でも同じ判定が使える
+#define SCAN_F2 0x0CU
+
 typedef EFI_STATUS (EFIAPI *EFI_INPUT_READ_KEY)(struct _EFI_SIMPLE_TEXT_INPUT_PROTOCOL *This, EFI_INPUT_KEY *Key);
 
 typedef struct _EFI_SIMPLE_TEXT_INPUT_PROTOCOL {
