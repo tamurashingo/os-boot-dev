@@ -1353,7 +1353,10 @@ int lisp_double_ctrl_detected = 0;
 // (%key-debug-log)。診断用であり、is_lone_ctrlの判定結果に関わらずEx protocol経由で
 // 受信した全キーイベントを記録する(判定条件自体が間違っているのか、そもそも期待した
 // 値が来ていないのかを区別できるようにするため)
-#define LISP_KEY_DEBUG_LOG_SIZE 32
+// 32だと診断コマンド(os:key-debug-log)自体の打ち込み(バックスペース等の訂正込みで
+// 20件強)だけでバッファが一巡し、直前に押したCtrlイベントが上書きされて消えてしまう
+// ことが実機検証で判明したため、コマンド入力分の余裕を持たせて128に拡大する
+#define LISP_KEY_DEBUG_LOG_SIZE 128
 typedef struct {
     UINT16 scan_code;
     UINT16 unicode_char;
