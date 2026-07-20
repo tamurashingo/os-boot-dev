@@ -6552,6 +6552,16 @@ int lisp_vm_flush_hook_selftest(void) {
     if (lisp_screen_buffer.dirty != 0) return 0;
     if (lisp_screen_buffer.row_touched[LISP_SCREEN_STATUS_ROWS] != 0) return 0;
 
+    // 検証用に書き込んだ'X'をこの自己テスト内で後始末する。lisp_screen_buffer_initは
+    // ソフトウェア側のback/front/touched状態のみを初期化するため、既に実画面へflush済みの
+    // 'X'自体は直接ConOutへ空白を書き込んで消す必要がある(lisp_screen_show_ctrl_indicatorと
+    // 同じ直接書き込み手法、リトライ付きヘルパーはこのファイル内で前方定義済みのものを再利用)。
+    // これを怠るとfront側の記録だけが空白に戻り、実画面には'X'が残ったままREPLに到達してしまう
+    // (以降の起動処理はどこもこのセルを上書きしない)
+    lisp_screen_flush_set_cursor_position(g_system_table->ConOut, 0, LISP_SCREEN_STATUS_ROWS);
+    lisp_screen_flush_output_string(g_system_table->ConOut, L" ");
+    lisp_screen_buffer_init();
+
     return 1;
 }
 
