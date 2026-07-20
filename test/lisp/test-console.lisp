@@ -58,6 +58,14 @@
   (let ((r (os:text-input-ex-found-p)))
     (or (eq r t) (eq r nil))))
 
+; milestone138続報2: os:key-debug-log(ReadKeyStrokeExが実際に返した生のKey/KeyStateを
+; 確認する診断用関数)。ヘッドレスQEMUのload実行中はlisp_read_lineが一度も呼ばれていない
+; ため空リスト(nil)が期待値だが、将来この前提が変わっても壊れないよう「nilまたはcons」の
+; いずれかであることのみを確認する
+(defun run-test-console-os-key-debug-log ()
+  (let ((log (os:key-debug-log)))
+    (or (null log) (consp log))))
+
 (defun run-test-console ()
   (and (run-test-console-clear-screen)
        (run-test-console-set-cursor-position)
@@ -66,4 +74,5 @@
        (run-test-console-os-clear-screen)
        (run-test-console-os-print-at)
        (run-test-console-set-status-line)
-       (run-test-console-os-text-input-ex-found-p)))
+       (run-test-console-os-text-input-ex-found-p)
+       (run-test-console-os-key-debug-log)))

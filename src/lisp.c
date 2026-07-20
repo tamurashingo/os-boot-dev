@@ -1347,6 +1347,35 @@ UINTN input_length;
 
 int lisp_double_ctrl_detected = 0;
 
+// milestone138続報2: 実機で「Text Input Ex Protocol: FOUND(g_text_input_ex!=NULL)なのに
+// Ctrl単体押下が検知できない」という報告の切り分け用に、ReadKeyStrokeExが実際に返した
+// 生のKey/KeyState値をそのままリング バッファに記録し、REPLから確認できるようにする
+// (%key-debug-log)。診断用であり、is_lone_ctrlの判定結果に関わらずEx protocol経由で
+// 受信した全キーイベントを記録する(判定条件自体が間違っているのか、そもそも期待した
+// 値が来ていないのかを区別できるようにするため)
+#define LISP_KEY_DEBUG_LOG_SIZE 32
+typedef struct {
+    UINT16 scan_code;
+    UINT16 unicode_char;
+    UINT32 shift_state;
+    UINT8 toggle_state;
+} LispKeyDebugEntry;
+static LispKeyDebugEntry lisp_key_debug_log[LISP_KEY_DEBUG_LOG_SIZE];
+static UINTN lisp_key_debug_log_head = 0;
+static UINTN lisp_key_debug_log_count = 0;
+
+static void lisp_key_debug_log_record(const EFI_KEY_DATA *key_data) {
+    LispKeyDebugEntry *e = &lisp_key_debug_log[lisp_key_debug_log_head];
+    e->scan_code = key_data->Key.ScanCode;
+    e->unicode_char = key_data->Key.UnicodeChar;
+    e->shift_state = key_data->KeyState.KeyShiftState;
+    e->toggle_state = key_data->KeyState.KeyToggleState;
+    lisp_key_debug_log_head = (lisp_key_debug_log_head + 1) % LISP_KEY_DEBUG_LOG_SIZE;
+    if (lisp_key_debug_log_count < LISP_KEY_DEBUG_LOG_SIZE) {
+        lisp_key_debug_log_count++;
+    }
+}
+
 // Enterキーまでの1行をキー入力から読み取り、input_bufferにASCII文字列として格納する。
 // Backspaceは1文字削除して画面表示も戻す。UnicodeChar==0の制御キー(矢印キー等)は無視する。
 // milestone135: g_text_input_ex(EFI_SIMPLE_TEXT_INPUT_EX_PROTOCOL、milestone116で検出)が
@@ -1374,6 +1403,8 @@ void lisp_read_line(EFI_SYSTEM_TABLE *SystemTable) {
             if (status != 0) {
                 continue; // EFI_NOT_READY: まだキー入力がない
             }
+
+            lisp_key_debug_log_record(&key_data);
 
             if (lisp_key_state_is_lone_ctrl(&key_data)) {
                 if (ctrl_armed) {
@@ -6513,6 +6544,28 @@ LispObject lisp_builtin_text_input_ex_found_p(LispObject args) {
     return (g_text_input_ex != (void *)0) ? lisp_sym_t : LISP_NIL;
 }
 
+// (%key-debug-log) -> ((scan-code unicode-char shift-state toggle-state) ...)
+// lisp_key_debug_log(直近LISP_KEY_DEBUG_LOG_SIZE件のリングバッファ)を古い順のリストで返す。
+// shift-stateはEFI_SHIFT_STATE_VALID(0x80000000)込みの生の値なので、実機でCtrlを押した
+// 直後にこれを呼べば、そのビットが立っているか・Ctrlビットが立っているか・他の修飾ビットが
+// 混ざっていないかを直接確認できる
+LispObject lisp_builtin_key_debug_log(LispObject args) {
+    (void)args;
+    LispObject result = LISP_NIL;
+    UINTN n = lisp_key_debug_log_count;
+    for (UINTN ip = 0; ip < n; ip++) {
+        UINTN idx = (lisp_key_debug_log_head + LISP_KEY_DEBUG_LOG_SIZE - 1 - ip) % LISP_KEY_DEBUG_LOG_SIZE;
+        LispKeyDebugEntry *e = &lisp_key_debug_log[idx];
+        LispObject entry =
+            lisp_cons(lisp_make_fixnum((long long)e->scan_code),
+            lisp_cons(lisp_make_fixnum((long long)e->unicode_char),
+            lisp_cons(lisp_make_fixnum((long long)e->shift_state),
+            lisp_cons(lisp_make_fixnum((long long)e->toggle_state), LISP_NIL))));
+        result = lisp_cons(entry, result);
+    }
+    return result;
+}
+
 // (%set-status-line "text"): 先頭行(OS予約行)へtextを直接書き込む(milestone131)。
 // textはstring必須。行0の内容そのもの(表示するプロセス名等)はLisp側の関心事とし、
 // このビルトインは「行0へpadding/truncate込みで書き込む」という機構のみを提供する
@@ -7777,6 +7830,7 @@ void lisp_builtins_init(void) {
     LISP_REGISTER_BUILTIN("%get-screen-size", lisp_builtin_get_screen_size);
     LISP_REGISTER_BUILTIN("%set-status-line", lisp_builtin_set_status_line);
     LISP_REGISTER_BUILTIN("%text-input-ex-found-p", lisp_builtin_text_input_ex_found_p);
+    LISP_REGISTER_BUILTIN("%key-debug-log", lisp_builtin_key_debug_log);
     LISP_REGISTER_BUILTIN("sleep", lisp_builtin_sleep);
     LISP_REGISTER_BUILTIN("gensym", lisp_builtin_gensym);
     LISP_REGISTER_BUILTIN("gc", lisp_builtin_gc);

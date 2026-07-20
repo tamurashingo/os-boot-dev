@@ -16,4 +16,6 @@
            ; milestone 129: カーソル制御・画面バッファのLispラッパー
            "goto-xy" "print-at" "clear-screen"
            ; milestone138続報: g_text_input_exの検出結果をREPLから確認するための診断用関数
-           "text-input-ex-found-p"))
+           "text-input-ex-found-p"
+           ; milestone138続報2: ReadKeyStrokeExが実際に返した生のKey/KeyStateを確認する診断用関数
+           "key-debug-log"))

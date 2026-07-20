@@ -270,3 +270,10 @@
 ; ReadKeyStrokeEx経由のCtrl検知(milestone116以降)はそもそも動作しえない(KeyState自体が
 ; 得られない既存のConIn->ReadKeyStrokeフォールバックに落ちているため)
 (defun os:text-input-ex-found-p () (%text-input-ex-found-p))
+
+; milestone138続報2: text-input-ex-found-pがtでもCtrl単体押下が検知できないという実機報告の
+; 切り分け用。ReadKeyStrokeExが実際に返した直近の生のKey/KeyState値(scan-code unicode-char
+; shift-state toggle-state)を古い順のリストで確認できる(%key-debug-log)。shift-stateの
+; 最上位ビット(#x80000000、EFI_SHIFT_STATE_VALID)が立っていなければそのファームウェアは
+; 修飾キー状態を報告できておらず、Ctrl単体押下自体が原理的に判定不能であることが分かる
+(defun os:key-debug-log () (%key-debug-log))
