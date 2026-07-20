@@ -1346,24 +1346,41 @@ char input_buffer[LISP_INPUT_BUFFER_MAX];
 UINTN input_length;
 
 // Enterキーまでの1行をキー入力から読み取り、input_bufferにASCII文字列として格納する。
-// Backspaceは1文字削除して画面表示も戻す。UnicodeChar==0の制御キー(矢印キー等)は無視する
+// Backspaceは1文字削除して画面表示も戻す。UnicodeChar==0の制御キー(矢印キー等)は無視する。
+// milestone135: g_text_input_ex(EFI_SIMPLE_TEXT_INPUT_EX_PROTOCOL、milestone116で検出)が
+// 見つかっていればReadKeyStrokeEx経由で読み取り、見つからない場合のみ既存のConIn経由へ
+// フォールバックする。EFI_KEY_DATA.KeyはEFI_INPUT_KEYそのものなので、以降の文字分類・
+// echo・backspace・Enter判定は経路にかかわらず共通のunicode_charに対して行い、挙動を
+// 一切変えない(Ctrl検知(KeyState参照)はmilestone136で組み込む予定でここでは行わない)
 void lisp_read_line(EFI_SYSTEM_TABLE *SystemTable) {
     input_length = 0;
 
     for (;;) {
-        EFI_INPUT_KEY key;
-        EFI_STATUS status = SystemTable->ConIn->ReadKeyStroke(SystemTable->ConIn, &key);
-        if (status != 0) {
-            continue; // EFI_NOT_READY: まだキー入力がない
+        CHAR16 unicode_char;
+
+        if (g_text_input_ex != (void *)0) {
+            EFI_KEY_DATA key_data;
+            EFI_STATUS status = g_text_input_ex->ReadKeyStrokeEx(g_text_input_ex, &key_data);
+            if (status != 0) {
+                continue; // EFI_NOT_READY: まだキー入力がない
+            }
+            unicode_char = key_data.Key.UnicodeChar;
+        } else {
+            EFI_INPUT_KEY key;
+            EFI_STATUS status = SystemTable->ConIn->ReadKeyStroke(SystemTable->ConIn, &key);
+            if (status != 0) {
+                continue; // EFI_NOT_READY: まだキー入力がない
+            }
+            unicode_char = key.UnicodeChar;
         }
 
-        if (key.UnicodeChar == L'\r') {
+        if (unicode_char == L'\r') {
             SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\n");
             lisp_screen_track_echoed_wstring(L"\r\n");
             break;
         }
 
-        if (key.UnicodeChar == 8) { // Backspace
+        if (unicode_char == 8) { // Backspace
             if (input_length > 0) {
                 input_length--;
                 SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\b \b");
@@ -1372,15 +1389,15 @@ void lisp_read_line(EFI_SYSTEM_TABLE *SystemTable) {
             continue;
         }
 
-        if (key.UnicodeChar == 0) {
+        if (unicode_char == 0) {
             continue;
         }
 
         if (input_length < LISP_INPUT_BUFFER_MAX - 1) {
-            input_buffer[input_length] = (char)key.UnicodeChar;
+            input_buffer[input_length] = (char)unicode_char;
             input_length++;
 
-            CHAR16 echo[2] = { key.UnicodeChar, 0 };
+            CHAR16 echo[2] = { unicode_char, 0 };
             SystemTable->ConOut->OutputString(SystemTable->ConOut, echo);
             lisp_screen_track_echoed_wstring(echo);
         }
