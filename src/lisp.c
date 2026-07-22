@@ -6196,10 +6196,35 @@ void lisp_screen_flush(void) {
         }
         UINTN start = lisp_screen_buffer.touched_min[r];
         UINTN end = lisp_screen_buffer.touched_max[r];
-        UINTN run_len = 0;
         for (UINTN c = start; c <= end; c++) {
-            lisp_screen_flush_run_buffer[run_len] = lisp_screen_buffer.back[r][c];
             lisp_screen_buffer.front[r][c] = lisp_screen_buffer.back[r][c];
+        }
+
+        // milestone140: 画面最終行(rows-1)の最終列(cols-1)へ実際に文字を書くと、
+        // ConOut(実機/QEMU双方のGOPコンソール実装)がカーソルを画面外へ進めたと
+        // 判断し、行0を含む画面全体を1行分ハードウェア側で自動スクロールしてしまう
+        // ことをminimal_testアプリでの再現実験で確認した(このスクロールはソフトウェア
+        // 側のback/front/touched機構に一切反映されないため、以後行0の内容が永久に
+        // ずれる)。force_full_redraw(プロセス切替、milestone133/134)は毎回全行を
+        // 列0〜cols-1のフル幅でtouchするため、最終行を描画する度に必ずこの自動
+        // スクロールを誘発していた。実際に書き込む範囲を最終行に限り最大cols-2まで
+        // に切り詰め、右下の1セルだけは意図的にハードウェアへ送出しない(front/back
+        // 上は正しい値を保持するため、diffベースの再描画自体は破綻しない)。
+        UINTN hw_end = end;
+        if (r == lisp_screen_buffer.rows - 1 && end == lisp_screen_buffer.cols - 1) {
+            hw_end = (end == 0) ? 0 : end - 1;
+        }
+
+        lisp_screen_buffer.row_touched[r] = 0;
+        if (r == lisp_screen_buffer.rows - 1 && start > hw_end && end == lisp_screen_buffer.cols - 1) {
+            // 右下の1セルのみがtouchされていた場合、送出すべき範囲が無くなるため
+            // ConOut呼び出し自体を丸ごと省略する
+            continue;
+        }
+
+        UINTN run_len = 0;
+        for (UINTN c = start; c <= hw_end; c++) {
+            lisp_screen_flush_run_buffer[run_len] = lisp_screen_buffer.back[r][c];
             run_len++;
         }
         lisp_screen_flush_run_buffer[run_len] = 0;
@@ -6208,7 +6233,6 @@ void lisp_screen_flush(void) {
         lisp_screen_flush_set_cursor_count++;
         lisp_screen_flush_output_string(out, lisp_screen_flush_run_buffer);
         lisp_screen_flush_cell_output_count++;
-        lisp_screen_buffer.row_touched[r] = 0;
     }
 
     // milestone139: 改行バイトを送出する前に、ハードウェアカーソルを安全な行
