@@ -6211,6 +6211,19 @@ void lisp_screen_flush(void) {
         lisp_screen_buffer.row_touched[r] = 0;
     }
 
+    // milestone139: 改行バイトを送出する前に、ハードウェアカーソルを安全な行
+    // (状態行の直後、LISP_SCREEN_STATUS_ROWS)へ一旦退避させる。ここでの位置自体は
+    // 直後のlisp_screen_flush_set_cursor_position(関数末尾)で論理カーソル位置へ
+    // 上書きされるため無意味だが、force_full_redraw直後などでハードウェアカーソルが
+    // 画面最下行付近に残っていると、これから送る"\r\n"がVT100端末(QEMUのGOP
+    // コンソール等)の実スクロールを誘発し、状態行(行0)にまで過去の内容が
+    // 巻き上がって上書きされる(実機/QEMU観測で確認済みのバグ。%set-status-lineは
+    // 行0の列3以降しか書かないため、この巻き上がりを検知・修復できない)。
+    if (lisp_screen_buffer.pending_newlines > 0) {
+        lisp_screen_flush_set_cursor_position(out, 0, LISP_SCREEN_STATUS_ROWS);
+        lisp_screen_flush_set_cursor_count++;
+    }
+
     for (UINTN i = 0; i < lisp_screen_buffer.pending_newlines; i++) {
         lisp_screen_flush_output_string(out, L"\r\n");
         lisp_screen_flush_newline_output_count++;
@@ -6337,7 +6350,9 @@ int lisp_screen_flush_selftest(void) {
     if (lisp_screen_buffer.front[LISP_SCREEN_STATUS_ROWS][2] != L' ' || lisp_screen_buffer.front[LISP_SCREEN_STATUS_ROWS][3] != L'B') return 0;
 
     // (5) 改行のみ(セル内容は不変、dirtyも立たない)でもpending_newlines分の実"\r\n"は
-    // 送出され、最終カーソル合わせの1回だけset_cursorが増える
+    // 送出され、set_cursorは「\r\n送出前の安全な行への退避1回」+「最終カーソル合わせ
+    // 1回」の合計2回増える(milestone139: ネイティブスクロールが状態行を破壊する
+    // バグの修正で、安全な行への退避が追加された)
     lisp_screen_buffer_init();
     lisp_screen_putc('\n');
     if (lisp_screen_buffer.dirty != 0) return 0;
@@ -6347,7 +6362,7 @@ int lisp_screen_flush_selftest(void) {
     lisp_screen_flush();
     if (lisp_screen_flush_cell_output_count != cell0) return 0;
     if (lisp_screen_flush_newline_output_count != nl0 + 1) return 0;
-    if (lisp_screen_flush_set_cursor_count != cursor0 + 1) return 0;
+    if (lisp_screen_flush_set_cursor_count != cursor0 + 2) return 0;
     if (lisp_screen_buffer.pending_newlines != 0) return 0;
 
     return 1;

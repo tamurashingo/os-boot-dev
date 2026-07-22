@@ -133,8 +133,15 @@ void lisp_panic_fatal(CHAR16 *message);
 // (force_full_redraw時)に限ってまれに一時的な失敗を返すことを確認したため、lisp.c側の
 // リトライ処理(lisp_screen_flush_set_cursor_position等)で使う定数。lisp_screen_buffer_init
 // (画面バッファ本体より前で定義される関数)からも使うためこちらへ置く
-#define LISP_SCREEN_FLUSH_RETRY_MAX 5
-#define LISP_SCREEN_FLUSH_RETRY_STALL_US 1000
+// milestone139: pending_newlines送出前の退避カーソル移動(lisp_screen_flush)の追加により、
+// force_full_redraw以外の通常の改行を含むflushでも毎回SetCursorPositionの呼び出し回数が
+// 実質2倍になった(画面が一杯になった以降はcursor_rowが最下行に固定され続けるため、
+// ほぼ全てのflushが対象になる)。この呼び出し回数の増加により、make test全体
+// (29ファイル)を通すと元の予算(5回・1000us)では数回に1回の頻度で
+// SetCursorPosition failedによるpanicが再発したため、予算を4倍(2倍の試行回数×2倍の
+// 待機時間)に拡大した
+#define LISP_SCREEN_FLUSH_RETRY_MAX 10
+#define LISP_SCREEN_FLUSH_RETRY_STALL_US 2000
 
 typedef struct {
     UINTN cols;
