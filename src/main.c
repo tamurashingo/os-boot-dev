@@ -3,6 +3,32 @@
 
 char memory_map_buffer[1024 * 256];
 
+// milestone138続報4: lisp_screen_buffer_init()以降の起動診断メッセージ(自己テストPASS/FAIL・
+// メモリマップ/ヒープ情報等)を、直書きOutputStringではなくバッファ(console_stream)経由に
+// 統一するための共通ヘルパー。lisp_make_console_streamは状態を持たない(ctxは未使用)ため、
+// 呼び出し毎に作り直しても既存の共有lisp_screen_bufferへの書き込みとして完全に等価に働く。
+// 呼び出し毎にlisp_screen_flushする(1行=1バーストに留める)のは、複数行分を溜め込んで
+// 一度に大きなバーストでflushすると、lisp_screen_flush内のSetCursorPosition/OutputString
+// リトライ機構(lisp.c:6140以降のコメント参照。バースト量に依存する非決定的な失敗が既知)を
+// 使い果たしてpanicする再現性が上がってしまうため
+static void lisp_boot_print_line(EFI_SYSTEM_TABLE *SystemTable, const char *msg) {
+    LispOutputStream stream = lisp_make_console_stream(SystemTable);
+    lisp_print_ascii(&stream, msg);
+    lisp_print_ascii(&stream, "\n");
+    lisp_screen_flush();
+}
+
+// milestone138続報4: UINT64ToHexStrが生成するCHAR16配列(内容は常にASCII範囲の16進文字列)を
+// console_stream(lisp_print_asciiはchar*を取る)へそのまま渡せるよう単純に幅を落とす
+static void lisp_char16_hex_to_ascii(const CHAR16 *src, char *dst) {
+    UINTN i = 0;
+    while (src[i] != 0) {
+        dst[i] = (char)src[i];
+        i++;
+    }
+    dst[i] = '\0';
+}
+
 // --- setjmp/longjmp自己テスト (milestone 30) ---
 // 深いC呼び出しスタックの奥底からlisp_longjmpで一気に脱出できることを確認する。
 // 各段でローカル配列を消費し、単純な同一フレーム内ジャンプでは検出できない
@@ -34,9 +60,9 @@ static void lisp_setjmp_selftest_level1(lisp_jmp_buf *buf) {
 // --- VMデータスタックGCルート自己テスト (milestone 34) ---
 static void lisp_vm_gc_root_selftest_run(EFI_SYSTEM_TABLE *SystemTable) {
     if (lisp_vm_gc_root_selftest()) {
-        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"VM stack GC root self-test: PASS\r\n");
+        lisp_boot_print_line(SystemTable, "VM stack GC root self-test: PASS");
     } else {
-        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"VM stack GC root self-test: FAIL\r\n");
+        lisp_boot_print_line(SystemTable, "VM stack GC root self-test: FAIL");
         for (;;) {}
     }
 }
@@ -44,9 +70,9 @@ static void lisp_vm_gc_root_selftest_run(EFI_SYSTEM_TABLE *SystemTable) {
 // --- リーダーのpkg:sym/pkg::sym修飾子自己テスト (milestone 74) ---
 static void lisp_reader_package_qualifier_selftest_run(EFI_SYSTEM_TABLE *SystemTable) {
     if (lisp_reader_package_qualifier_selftest()) {
-        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"Reader package qualifier self-test: PASS\r\n");
+        lisp_boot_print_line(SystemTable, "Reader package qualifier self-test: PASS");
     } else {
-        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"Reader package qualifier self-test: FAIL\r\n");
+        lisp_boot_print_line(SystemTable, "Reader package qualifier self-test: FAIL");
         for (;;) {}
     }
 }
@@ -54,9 +80,9 @@ static void lisp_reader_package_qualifier_selftest_run(EFI_SYSTEM_TABLE *SystemT
 // --- exportビルトイン+リーダー修飾子の自己テスト (milestone 76) ---
 static void lisp_reader_export_selftest_run(EFI_SYSTEM_TABLE *SystemTable) {
     if (lisp_reader_export_selftest()) {
-        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"Reader export self-test: PASS\r\n");
+        lisp_boot_print_line(SystemTable, "Reader export self-test: PASS");
     } else {
-        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"Reader export self-test: FAIL\r\n");
+        lisp_boot_print_line(SystemTable, "Reader export self-test: FAIL");
         for (;;) {}
     }
 }
@@ -64,9 +90,9 @@ static void lisp_reader_export_selftest_run(EFI_SYSTEM_TABLE *SystemTable) {
 // --- use-packageビルトイン+use-list継承intern解決の自己テスト (milestone 77) ---
 static void lisp_reader_use_package_selftest_run(EFI_SYSTEM_TABLE *SystemTable) {
     if (lisp_reader_use_package_selftest()) {
-        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"Reader use-package self-test: PASS\r\n");
+        lisp_boot_print_line(SystemTable, "Reader use-package self-test: PASS");
     } else {
-        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"Reader use-package self-test: FAIL\r\n");
+        lisp_boot_print_line(SystemTable, "Reader use-package self-test: FAIL");
         for (;;) {}
     }
 }
@@ -74,9 +100,9 @@ static void lisp_reader_use_package_selftest_run(EFI_SYSTEM_TABLE *SystemTable) 
 // --- intern/in-package/defpackageマクロの自己テスト (milestone 78) ---
 static void lisp_reader_defpackage_selftest_run(EFI_SYSTEM_TABLE *SystemTable) {
     if (lisp_reader_defpackage_selftest()) {
-        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"Reader defpackage self-test: PASS\r\n");
+        lisp_boot_print_line(SystemTable, "Reader defpackage self-test: PASS");
     } else {
-        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"Reader defpackage self-test: FAIL\r\n");
+        lisp_boot_print_line(SystemTable, "Reader defpackage self-test: FAIL");
         for (;;) {}
     }
 }
@@ -84,9 +110,9 @@ static void lisp_reader_defpackage_selftest_run(EFI_SYSTEM_TABLE *SystemTable) {
 // --- ブートストラップのパッケージ文脈自己テスト (milestone 80) ---
 static void lisp_bootstrap_package_context_selftest_run(EFI_SYSTEM_TABLE *SystemTable) {
     if (lisp_bootstrap_package_context_selftest()) {
-        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"Bootstrap package context self-test: PASS\r\n");
+        lisp_boot_print_line(SystemTable, "Bootstrap package context self-test: PASS");
     } else {
-        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"Bootstrap package context self-test: FAIL\r\n");
+        lisp_boot_print_line(SystemTable, "Bootstrap package context self-test: FAIL");
         for (;;) {}
     }
 }
@@ -94,9 +120,9 @@ static void lisp_bootstrap_package_context_selftest_run(EFI_SYSTEM_TABLE *System
 // --- グローバル参照とシンボル同一性の回帰自己テスト (milestone 81) ---
 static void lisp_global_ref_package_identity_selftest_run(EFI_SYSTEM_TABLE *SystemTable) {
     if (lisp_global_ref_package_identity_selftest()) {
-        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"Global ref package identity self-test: PASS\r\n");
+        lisp_boot_print_line(SystemTable, "Global ref package identity self-test: PASS");
     } else {
-        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"Global ref package identity self-test: FAIL\r\n");
+        lisp_boot_print_line(SystemTable, "Global ref package identity self-test: FAIL");
         for (;;) {}
     }
 }
@@ -104,9 +130,9 @@ static void lisp_global_ref_package_identity_selftest_run(EFI_SYSTEM_TABLE *Syst
 // --- 特殊形式export自己テスト (milestone 100) ---
 static void lisp_reader_special_form_export_selftest_run(EFI_SYSTEM_TABLE *SystemTable) {
     if (lisp_reader_special_form_export_selftest()) {
-        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"Special form export self-test: PASS\r\n");
+        lisp_boot_print_line(SystemTable, "Special form export self-test: PASS");
     } else {
-        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"Special form export self-test: FAIL\r\n");
+        lisp_boot_print_line(SystemTable, "Special form export self-test: FAIL");
         for (;;) {}
     }
 }
@@ -184,9 +210,9 @@ static void lisp_screen_force_full_redraw_selftest_run(EFI_SYSTEM_TABLE *SystemT
 // --- VM命令ディスパッチループの1命令ごとflushフック自己テスト (milestone 127) ---
 static void lisp_vm_flush_hook_selftest_run(EFI_SYSTEM_TABLE *SystemTable) {
     if (lisp_vm_flush_hook_selftest()) {
-        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"VM flush hook self-test: PASS\r\n");
+        lisp_boot_print_line(SystemTable, "VM flush hook self-test: PASS");
     } else {
-        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"VM flush hook self-test: FAIL\r\n");
+        lisp_boot_print_line(SystemTable, "VM flush hook self-test: FAIL");
         for (;;) {}
     }
 }
@@ -194,9 +220,9 @@ static void lisp_vm_flush_hook_selftest_run(EFI_SYSTEM_TABLE *SystemTable) {
 // --- ビルトインexport自己テスト (milestone 101) ---
 static void lisp_reader_builtin_export_selftest_run(EFI_SYSTEM_TABLE *SystemTable) {
     if (lisp_reader_builtin_export_selftest()) {
-        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"Builtin export self-test: PASS\r\n");
+        lisp_boot_print_line(SystemTable, "Builtin export self-test: PASS");
     } else {
-        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"Builtin export self-test: FAIL\r\n");
+        lisp_boot_print_line(SystemTable, "Builtin export self-test: FAIL");
         for (;;) {}
     }
 }
@@ -204,9 +230,9 @@ static void lisp_reader_builtin_export_selftest_run(EFI_SYSTEM_TABLE *SystemTabl
 // --- per-processスタック領域とコンテキスト保存自己テスト (milestone 104) ---
 static void lisp_context_switch_selftest_run(EFI_SYSTEM_TABLE *SystemTable) {
     if (lisp_context_switch_selftest()) {
-        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"Context switch self-test: PASS\r\n");
+        lisp_boot_print_line(SystemTable, "Context switch self-test: PASS");
     } else {
-        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"Context switch self-test: FAIL\r\n");
+        lisp_boot_print_line(SystemTable, "Context switch self-test: FAIL");
         for (;;) {}
     }
 }
@@ -214,9 +240,9 @@ static void lisp_context_switch_selftest_run(EFI_SYSTEM_TABLE *SystemTable) {
 // --- per-process vm_stack/vm_sp/lisp_active_trap分離自己テスト (milestone 105) ---
 static void lisp_process_vm_state_selftest_run(EFI_SYSTEM_TABLE *SystemTable) {
     if (lisp_process_vm_state_selftest()) {
-        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"Process VM state separation self-test: PASS\r\n");
+        lisp_boot_print_line(SystemTable, "Process VM state separation self-test: PASS");
     } else {
-        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"Process VM state separation self-test: FAIL\r\n");
+        lisp_boot_print_line(SystemTable, "Process VM state separation self-test: FAIL");
         for (;;) {}
     }
 }
@@ -224,9 +250,9 @@ static void lisp_process_vm_state_selftest_run(EFI_SYSTEM_TABLE *SystemTable) {
 // --- コルーチンyieldチェック自己テスト (milestone 106) ---
 static void lisp_vm_yield_selftest_run(EFI_SYSTEM_TABLE *SystemTable) {
     if (lisp_vm_yield_selftest()) {
-        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"VM yield check self-test: PASS\r\n");
+        lisp_boot_print_line(SystemTable, "VM yield check self-test: PASS");
     } else {
-        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"VM yield check self-test: FAIL\r\n");
+        lisp_boot_print_line(SystemTable, "VM yield check self-test: FAIL");
         for (;;) {}
     }
 }
@@ -234,9 +260,9 @@ static void lisp_vm_yield_selftest_run(EFI_SYSTEM_TABLE *SystemTable) {
 // --- 全プロセスGCルート登録自己テスト (milestone 107) ---
 static void lisp_process_gc_root_selftest_run(EFI_SYSTEM_TABLE *SystemTable) {
     if (lisp_process_gc_root_selftest()) {
-        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"Process GC root self-test: PASS\r\n");
+        lisp_boot_print_line(SystemTable, "Process GC root self-test: PASS");
     } else {
-        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"Process GC root self-test: FAIL\r\n");
+        lisp_boot_print_line(SystemTable, "Process GC root self-test: FAIL");
         for (;;) {}
     }
 }
@@ -246,9 +272,9 @@ static void lisp_process_gc_root_selftest_run(EFI_SYSTEM_TABLE *SystemTable) {
 // 実行できないため、os.lisp読み込み後の呼び出し箇所で呼ぶ
 static void lisp_process_fork_package_selftest_run(EFI_SYSTEM_TABLE *SystemTable) {
     if (lisp_process_fork_package_selftest()) {
-        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"Process fork package self-test: PASS\r\n");
+        lisp_boot_print_line(SystemTable, "Process fork package self-test: PASS");
     } else {
-        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"Process fork package self-test: FAIL\r\n");
+        lisp_boot_print_line(SystemTable, "Process fork package self-test: FAIL");
         for (;;) {}
     }
 }
@@ -267,11 +293,11 @@ static void lisp_process_suspend_resume_selftest_run(EFI_SYSTEM_TABLE *SystemTab
     // lisp_screen_flushを呼んで即座に消費し、直後に一度改行を送出して次の出力から
     // 独立させる
     lisp_screen_flush();
-    SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\n");
+    lisp_boot_print_line(SystemTable, "");
     if (ok) {
-        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"Process suspend/resume self-test: PASS\r\n");
+        lisp_boot_print_line(SystemTable, "Process suspend/resume self-test: PASS");
     } else {
-        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"Process suspend/resume self-test: FAIL\r\n");
+        lisp_boot_print_line(SystemTable, "Process suspend/resume self-test: FAIL");
         for (;;) {}
     }
 }
@@ -284,11 +310,11 @@ static void lisp_process_local_variable_selftest_run(EFI_SYSTEM_TABLE *SystemTab
     // 実際の%process-resumeを経由するため、pendingのforce_full_redrawを即座にここで消費し、
     // 明示的な改行で次の出力から切り離す)
     lisp_screen_flush();
-    SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\n");
+    lisp_boot_print_line(SystemTable, "");
     if (ok) {
-        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"Process local-variable self-test: PASS\r\n");
+        lisp_boot_print_line(SystemTable, "Process local-variable self-test: PASS");
     } else {
-        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"Process local-variable self-test: FAIL\r\n");
+        lisp_boot_print_line(SystemTable, "Process local-variable self-test: FAIL");
         for (;;) {}
     }
 }
@@ -301,11 +327,11 @@ static void lisp_process_screen_separation_selftest_run(EFI_SYSTEM_TABLE *System
     // 経由するため、pendingのforce_full_redrawを即座にここで消費し、明示的な改行で次の出力
     // から切り離す)
     lisp_screen_flush();
-    SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\n");
+    lisp_boot_print_line(SystemTable, "");
     if (ok) {
-        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"Process screen separation self-test: PASS\r\n");
+        lisp_boot_print_line(SystemTable, "Process screen separation self-test: PASS");
     } else {
-        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"Process screen separation self-test: FAIL\r\n");
+        lisp_boot_print_line(SystemTable, "Process screen separation self-test: FAIL");
         for (;;) {}
     }
 }
@@ -317,11 +343,11 @@ static void lisp_process_status_line_selftest_run(EFI_SYSTEM_TABLE *SystemTable)
     // milestone134: 他のprocess系self-testと同じ理由(実際の%process-resumeを経由するため、
     // pendingのforce_full_redrawを即座にここで消費し、明示的な改行で次の出力から切り離す)
     lisp_screen_flush();
-    SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\n");
+    lisp_boot_print_line(SystemTable, "");
     if (ok) {
-        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"Process status line self-test: PASS\r\n");
+        lisp_boot_print_line(SystemTable, "Process status line self-test: PASS");
     } else {
-        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"Process status line self-test: FAIL\r\n");
+        lisp_boot_print_line(SystemTable, "Process status line self-test: FAIL");
         for (;;) {}
     }
 }
@@ -337,9 +363,9 @@ static void lisp_vm_arith_selftest_run(EFI_SYSTEM_TABLE *SystemTable) {
     LispObject result = lisp_vm_exec(fn);
 
     if (result == lisp_read_from_buffer("3")) {
-        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"VM arithmetic self-test: PASS\r\n");
+        lisp_boot_print_line(SystemTable, "VM arithmetic self-test: PASS");
     } else {
-        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"VM arithmetic self-test: FAIL\r\n");
+        lisp_boot_print_line(SystemTable, "VM arithmetic self-test: FAIL");
         for (;;) {}
     }
 }
@@ -390,9 +416,9 @@ static void lisp_vm_control_flow_selftest_run(EFI_SYSTEM_TABLE *SystemTable) {
     LispObject result_true = lisp_vm_exec(fn_true);
 
     if (result_false == thirty && result_true == twenty) {
-        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"VM control flow self-test: PASS\r\n");
+        lisp_boot_print_line(SystemTable, "VM control flow self-test: PASS");
     } else {
-        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"VM control flow self-test: FAIL\r\n");
+        lisp_boot_print_line(SystemTable, "VM control flow self-test: FAIL");
         for (;;) {}
     }
 }
@@ -454,9 +480,9 @@ static void lisp_vm_call_selftest_run(EFI_SYSTEM_TABLE *SystemTable) {
     LispObject result = lisp_vm_exec(driver);
 
     if (result == five) {
-        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"VM function call self-test: PASS\r\n");
+        lisp_boot_print_line(SystemTable, "VM function call self-test: PASS");
     } else {
-        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"VM function call self-test: FAIL\r\n");
+        lisp_boot_print_line(SystemTable, "VM function call self-test: FAIL");
         for (;;) {}
     }
 }
@@ -535,9 +561,9 @@ static void lisp_vm_closure_selftest_run(EFI_SYSTEM_TABLE *SystemTable) {
     LispObject expected = lisp_read_from_buffer("124");
 
     if (result == expected) {
-        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"VM closure/upvalue self-test: PASS\r\n");
+        lisp_boot_print_line(SystemTable, "VM closure/upvalue self-test: PASS");
     } else {
-        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"VM closure/upvalue self-test: FAIL\r\n");
+        lisp_boot_print_line(SystemTable, "VM closure/upvalue self-test: FAIL");
         for (;;) {}
     }
 }
@@ -650,9 +676,9 @@ static void lisp_vm_integrated_selftest_run(EFI_SYSTEM_TABLE *SystemTable) {
     LispObject expected = lisp_read_from_buffer("12");
 
     if (result == expected) {
-        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"VM integrated self-test: PASS\r\n");
+        lisp_boot_print_line(SystemTable, "VM integrated self-test: PASS");
     } else {
-        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"VM integrated self-test: FAIL\r\n");
+        lisp_boot_print_line(SystemTable, "VM integrated self-test: FAIL");
         for (;;) {}
     }
 }
@@ -661,23 +687,28 @@ static void lisp_setjmp_selftest(EFI_SYSTEM_TABLE *SystemTable) {
     lisp_jmp_buf buf;
     volatile UINT64 marker = 0xDEADBEEFCAFEULL;
     int rv = lisp_setjmp(&buf);
+    LispOutputStream stream = lisp_make_console_stream(SystemTable);
 
     if (rv == 0) {
-        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"setjmp/longjmp self-test: 1st pass (rv=0)\r\n");
+        lisp_print_ascii(&stream, "setjmp/longjmp self-test: 1st pass (rv=0)\n");
+        lisp_screen_flush();
         lisp_setjmp_selftest_level1(&buf);
         // lisp_longjmpは戻らないはずなので、ここに到達したら失敗
-        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"setjmp/longjmp self-test: FAIL (unreachable code reached)\r\n");
+        lisp_print_ascii(&stream, "setjmp/longjmp self-test: FAIL (unreachable code reached)\n");
         for (;;) {}
     }
 
     if (rv == 1 && marker == 0xDEADBEEFCAFEULL) {
         CHAR16 hex_marker[20];
         UINT64ToHexStr((UINT64)marker, hex_marker);
-        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"setjmp/longjmp self-test: 2nd pass OK (rv=1, marker=");
-        SystemTable->ConOut->OutputString(SystemTable->ConOut, hex_marker);
-        SystemTable->ConOut->OutputString(SystemTable->ConOut, L")\r\n");
+        char hex_marker_ascii[20];
+        lisp_char16_hex_to_ascii(hex_marker, hex_marker_ascii);
+        lisp_print_ascii(&stream, "setjmp/longjmp self-test: 2nd pass OK (rv=1, marker=");
+        lisp_print_ascii(&stream, hex_marker_ascii);
+        lisp_print_ascii(&stream, ")\n");
+        lisp_screen_flush();
     } else {
-        SystemTable->ConOut->OutputString(SystemTable->ConOut, L"setjmp/longjmp self-test: FAIL (corrupted state)\r\n");
+        lisp_print_ascii(&stream, "setjmp/longjmp self-test: FAIL (corrupted state)\n");
         for (;;) {}
     }
 }
@@ -721,9 +752,16 @@ static EFI_STATUS EFIAPI EfiMainImpl(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *S
     // (QueryModeでcols/rows確定・実ClearScreen・back/front初期化を1回で済ませる。
     // Lisp heapへは触れないためlisp_heap_init前のこの位置でも安全)
     lisp_screen_buffer_init();
-    SystemTable->ConOut->OutputString(SystemTable->ConOut, L"Hello World!\r\n");
 
-    SystemTable->ConOut->OutputString(SystemTable->ConOut, L"Memory cheking....\r\n");
+    // milestone138続報4: lisp_screen_buffer_init()以降の全出力をconsole_stream経由に統一する
+    // ため、以降のREPLループまで使い回す変数をここで宣言する
+    LispOutputStream console_stream = lisp_make_console_stream(SystemTable);
+
+    lisp_print_ascii(&console_stream, "Hello World!\n");
+    lisp_screen_flush(); // 1行毎にflushしバーストを小さく保つ(lisp_boot_print_line参照)
+
+    lisp_print_ascii(&console_stream, "Memory cheking....\n");
+    lisp_screen_flush();
 
 
     UINTN memory_map_size = 0;
@@ -757,7 +795,8 @@ static EFI_STATUS EFIAPI EfiMainImpl(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *S
         );
 
         if (status == 0) {
-            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"Success to get Memory Map!\r\n");
+            lisp_print_ascii(&console_stream, "Success to get Memory Map!\n");
+            lisp_screen_flush();
 
             UINTN entries = memory_map_size / descriptor_size;
             UINT64 max_free_size = 0;
@@ -781,13 +820,20 @@ static EFI_STATUS EFIAPI EfiMainImpl(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *S
             UINT64ToHexStr(heap_start, hex_addr);
             UINT64ToHexStr(max_free_size, hex_size);
 
-            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"OS Heap Target Address: ");
-            SystemTable->ConOut->OutputString(SystemTable->ConOut, hex_addr);
-            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\n");
+            char hex_addr_ascii[20];
+            char hex_size_ascii[20];
+            lisp_char16_hex_to_ascii(hex_addr, hex_addr_ascii);
+            lisp_char16_hex_to_ascii(hex_size, hex_size_ascii);
 
-            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"Available Heap Size: ");
-            SystemTable->ConOut->OutputString(SystemTable->ConOut, hex_size);
-            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\n");
+            lisp_print_ascii(&console_stream, "OS Heap Target Address: ");
+            lisp_print_ascii(&console_stream, hex_addr_ascii);
+            lisp_print_ascii(&console_stream, "\n");
+            lisp_screen_flush();
+
+            lisp_print_ascii(&console_stream, "Available Heap Size: ");
+            lisp_print_ascii(&console_stream, hex_size_ascii);
+            lisp_print_ascii(&console_stream, "\n");
+            lisp_screen_flush();
 
             lisp_heap_init(heap_start, max_free_size);
 
@@ -839,9 +885,8 @@ static EFI_STATUS EFIAPI EfiMainImpl(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *S
             // そのまま持ち越されるため、明示的な再設定はここ1箇所のみで足りる
             lisp_screen_set_status_line("REPL", 4);
 
-            SystemTable->ConOut->OutputString(SystemTable->ConOut, L"\r\nMinimal Lisp REPL. Type an expression and press Enter.\r\n");
-
-            LispOutputStream console_stream = lisp_make_console_stream(SystemTable);
+            lisp_print_ascii(&console_stream, "\nMinimal Lisp REPL. Type an expression and press Enter.\n");
+            lisp_screen_flush();
 
             lisp_jmp_buf repl_trap; // milestone 31: panic発生時にここへ復帰する
             lisp_active_trap = &repl_trap;
